@@ -53,10 +53,45 @@ try {
     New-Item -ItemType Directory -Force -Path $DotnetDirectory | Out-Null
 
     Invoke-WebRequest -Uri 'https://dot.net/v1/dotnet-install.ps1' -OutFile $DotnetInstallScript
-    & $DotnetInstallScript -Version $DotnetVersion -InstallDir $DotnetDirectory -NoPath
+    & $DotnetInstallScript -Version $DotnetVersion -InstallDir $DotnetDirectory -Architecture x64 -NoPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "The local .NET SDK installation failed with exit code $LASTEXITCODE."
+    }
 
-    if (-not (Test-Path -LiteralPath (Join-Path $DotnetDirectory 'dotnet.exe') -PathType Leaf)) {
+    $dotnetExe = Join-Path $DotnetDirectory 'dotnet.exe'
+    $dotnetSdkVersionFile = Join-Path $DotnetDirectory "sdk\$DotnetVersion\.version"
+    if (-not (Test-Path -LiteralPath $dotnetExe -PathType Leaf)) {
         throw "The local .NET SDK installation did not produce dotnet.exe in $DotnetDirectory."
+    }
+    if (-not (Test-Path -LiteralPath $dotnetSdkVersionFile -PathType Leaf)) {
+        throw "The local .NET SDK installation did not produce $dotnetSdkVersionFile."
+    }
+    $dotnetSdkMarker = @(Get-Content -LiteralPath $dotnetSdkVersionFile)
+    if ($dotnetSdkMarker -notcontains $DotnetVersion -or $dotnetSdkMarker -notcontains 'win-x64') {
+        throw "The local .NET SDK version marker does not identify $DotnetVersion for win-x64."
+    }
+
+    $hadMultilevelLookup = Test-Path Env:DOTNET_MULTILEVEL_LOOKUP
+    $previousMultilevelLookup = $env:DOTNET_MULTILEVEL_LOOKUP
+    $env:DOTNET_MULTILEVEL_LOOKUP = '0'
+    try {
+        $sdkList = @(& $dotnetExe --list-sdks)
+        if ($LASTEXITCODE -ne 0) {
+            throw "The local .NET SDK validation failed with exit code $LASTEXITCODE."
+        }
+    }
+    finally {
+        if ($hadMultilevelLookup) {
+            $env:DOTNET_MULTILEVEL_LOOKUP = $previousMultilevelLookup
+        }
+        else {
+            Remove-Item Env:DOTNET_MULTILEVEL_LOOKUP
+        }
+    }
+
+    $expectedSdkEntry = "$DotnetVersion [$(Join-Path $DotnetDirectory 'sdk')]"
+    if ($sdkList.Count -ne 1 -or $sdkList[0].Trim() -ne $expectedSdkEntry) {
+        throw "Expected exactly '$expectedSdkEntry' from the local SDK, got '$($sdkList -join '; ')'."
     }
 
     Invoke-WebRequest -Uri $CodexAuthUrl -OutFile $CodexAuthArchive

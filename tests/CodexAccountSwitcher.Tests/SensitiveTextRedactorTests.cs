@@ -23,6 +23,12 @@ public sealed class SensitiveTextRedactorTests
         var redacted = SensitiveTextRedactor.Redact(text, [exactSecret]);
 
         Assert.Contains("status: connected", redacted, StringComparison.Ordinal);
+        Assert.Contains("raw=[REDACTED]", redacted, StringComparison.Ordinal);
+        Assert.Contains("Authorization: Bearer [REDACTED]", redacted, StringComparison.Ordinal);
+        Assert.Contains("\"access_token\":\"[REDACTED]\"", redacted, StringComparison.Ordinal);
+        Assert.Contains("\"refresh_token\":\"[REDACTED]\"", redacted, StringComparison.Ordinal);
+        Assert.Contains("\"id_token\":\"[REDACTED]\"", redacted, StringComparison.Ordinal);
+        Assert.Contains("\"OPENAI_API_KEY\":\"[REDACTED]\"", redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(exactSecret, redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(bearerToken, redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(accessToken, redacted, StringComparison.Ordinal);

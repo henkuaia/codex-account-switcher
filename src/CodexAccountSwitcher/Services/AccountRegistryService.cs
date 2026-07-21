@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodexAccountSwitcher.Models;
@@ -8,6 +9,7 @@ namespace CodexAccountSwitcher.Services;
 public sealed class AccountRegistryService
 {
     private const string RegistryRelativePath = "accounts/registry.json";
+    private const string ChatGptAccountIdClaim = "https://api.openai.com/auth.chatgpt_account_id";
 
     public async Task<AccountRegistry> LoadAsync(string codexHome, CancellationToken cancellationToken)
     {
@@ -35,13 +37,30 @@ public sealed class AccountRegistryService
             throw new InvalidDataException("The account registry is invalid.");
         }
 
-        if (registry.SchemaVersion < 2)
+        var schemaVersion = registry.SchemaVersion ?? registry.Version ?? 0;
+        if (schemaVersion < 2 || schemaVersion > 3)
         {
             throw new InvalidDataException("The account registry schema is unsupported.");
         }
 
+        var accounts = schemaVersion == 2
+            ? await LoadLegacyAccountsAsync(codexHome, registry.Accounts ?? [], cancellationToken)
+            : LoadCurrentAccounts(registry.Accounts ?? []);
+
+        var activeAccountKey = schemaVersion == 2
+            ? ResolveLegacyActiveAccountKey(registry.ActiveEmail, accounts)
+            : registry.ActiveAccountKey;
+
+        return new AccountRegistry(
+            schemaVersion,
+            activeAccountKey,
+            Array.AsReadOnly(accounts.ToArray()));
+    }
+
+    private static List<AccountRecord> LoadCurrentAccounts(IReadOnlyList<AccountDto> registryAccounts)
+    {
         var accounts = new List<AccountRecord>();
-        foreach (var account in registry.Accounts ?? [])
+        foreach (var account in registryAccounts)
         {
             if (string.IsNullOrWhiteSpace(account.AccountKey) || string.IsNullOrWhiteSpace(account.Email))
             {
@@ -59,19 +78,143 @@ public sealed class AccountRegistryService
                 account.AuthMode));
         }
 
-        return new AccountRegistry(
-            registry.SchemaVersion,
-            registry.ActiveAccountKey,
-            Array.AsReadOnly(accounts.ToArray()));
+        return accounts;
+    }
+
+    private static async Task<List<AccountRecord>> LoadLegacyAccountsAsync(
+        string codexHome,
+        IReadOnlyList<AccountDto> registryAccounts,
+        CancellationToken cancellationToken)
+    {
+        var accounts = new List<AccountRecord>();
+        foreach (var account in registryAccounts)
+        {
+            if (string.IsNullOrWhiteSpace(account.Email))
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            var snapshotPath = Path.Combine(codexHome, "accounts", $"{Base64UrlEncode(account.Email)}.auth.json");
+            if (!File.Exists(snapshotPath))
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            LegacyAuthSnapshotDto snapshot;
+            try
+            {
+                await using var stream = new FileStream(
+                    snapshotPath,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: 4096,
+                    FileOptions.Asynchronous | FileOptions.SequentialScan);
+                snapshot = await JsonSerializer.DeserializeAsync<LegacyAuthSnapshotDto>(stream, cancellationToken: cancellationToken)
+                    ?? throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+            catch (JsonException)
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            if (string.IsNullOrWhiteSpace(snapshot.Tokens?.AccountId) || string.IsNullOrWhiteSpace(snapshot.Tokens.IdToken))
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            var claims = ParseIdToken(snapshot.Tokens.IdToken);
+            if (string.IsNullOrWhiteSpace(claims.Subject) ||
+                string.IsNullOrWhiteSpace(claims.ChatGptAccountId) ||
+                !string.Equals(snapshot.Tokens.AccountId, claims.ChatGptAccountId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            accounts.Add(new AccountRecord(
+                $"{claims.Subject}::{claims.ChatGptAccountId}",
+                claims.ChatGptAccountId,
+                claims.Subject,
+                account.Email,
+                account.Alias ?? string.Empty,
+                null,
+                null,
+                null));
+        }
+
+        return accounts;
+    }
+
+    private static string? ResolveLegacyActiveAccountKey(string? activeEmail, IReadOnlyList<AccountRecord> accounts)
+    {
+        if (activeEmail is null)
+        {
+            return null;
+        }
+
+        var activeAccount = accounts.SingleOrDefault(account =>
+            string.Equals(account.Email, activeEmail, StringComparison.Ordinal));
+        return activeAccount?.AccountKey
+            ?? throw new InvalidDataException("The account registry contains an invalid active account.");
+    }
+
+    private static JwtClaimsDto ParseIdToken(string idToken)
+    {
+        var segments = idToken.Split('.');
+        if (segments.Length != 3 || string.IsNullOrEmpty(segments[1]))
+        {
+            throw new InvalidDataException("The account registry contains an invalid account.");
+        }
+
+        try
+        {
+            var payload = Encoding.UTF8.GetString(Base64UrlDecode(segments[1]));
+            return JsonSerializer.Deserialize<JwtClaimsDto>(payload)
+                ?? throw new InvalidDataException("The account registry contains an invalid account.");
+        }
+        catch (JsonException)
+        {
+            throw new InvalidDataException("The account registry contains an invalid account.");
+        }
+        catch (FormatException)
+        {
+            throw new InvalidDataException("The account registry contains an invalid account.");
+        }
+    }
+
+    private static string Base64UrlEncode(string value) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    private static byte[] Base64UrlDecode(string value)
+    {
+        var paddedValue = value.Replace('-', '+').Replace('_', '/');
+        paddedValue += (paddedValue.Length % 4) switch
+        {
+            0 => string.Empty,
+            2 => "==",
+            3 => "=",
+            _ => throw new FormatException(),
+        };
+
+        return Convert.FromBase64String(paddedValue);
     }
 
     private sealed class RegistryDto
     {
         [JsonPropertyName("schema_version")]
-        public int SchemaVersion { get; init; }
+        public int? SchemaVersion { get; init; }
+
+        [JsonPropertyName("version")]
+        public int? Version { get; init; }
 
         [JsonPropertyName("active_account_key")]
         public string? ActiveAccountKey { get; init; }
+
+        [JsonPropertyName("active_email")]
+        public string? ActiveEmail { get; init; }
 
         [JsonPropertyName("accounts")]
         public List<AccountDto>? Accounts { get; init; }
@@ -102,5 +245,29 @@ public sealed class AccountRegistryService
 
         [JsonPropertyName("auth_mode")]
         public string? AuthMode { get; init; }
+    }
+
+    private sealed class LegacyAuthSnapshotDto
+    {
+        [JsonPropertyName("tokens")]
+        public LegacyTokensDto? Tokens { get; init; }
+    }
+
+    private sealed class LegacyTokensDto
+    {
+        [JsonPropertyName("account_id")]
+        public string? AccountId { get; init; }
+
+        [JsonPropertyName("id_token")]
+        public string? IdToken { get; init; }
+    }
+
+    private sealed class JwtClaimsDto
+    {
+        [JsonPropertyName("sub")]
+        public string? Subject { get; init; }
+
+        [JsonPropertyName(ChatGptAccountIdClaim)]
+        public string? ChatGptAccountId { get; init; }
     }
 }

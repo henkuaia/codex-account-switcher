@@ -57,27 +57,81 @@ public sealed class AccountRegistryServiceTests
     }
 
     [Fact]
-    public async Task Valid_v2_registry_is_loaded()
+    public async Task Valid_v2_registry_loads_legacy_auth_snapshot_and_maps_active_email()
     {
         using var home = new TemporaryDirectory();
+        const string email = "legacy@example.com";
+        const string accountId = "acct-legacy";
+        const string userId = "user-legacy";
         home.Write("accounts/registry.json", """
             {
-              "schema_version": 2,
+              "version": 2,
+              "active_email": "legacy@example.com",
               "accounts": [{
-                "account_key": "user-2::acct-2",
-                "chatgpt_account_id": "acct-2",
-                "chatgpt_user_id": "user-2",
-                "email": "second@example.com",
+                "email": "legacy@example.com",
                 "alias": "secondary"
               }]
+            }
+            """);
+        home.Write($"accounts/{Base64UrlEncode(email)}.auth.json", $$"""
+            {
+              "tokens": {
+                "account_id": "{{accountId}}",
+                "id_token": "header.{{Base64UrlEncode($$"""{"sub":"{{userId}}","https://api.openai.com/auth.chatgpt_account_id":"{{accountId}}"}""")}}.signature"
+              }
             }
             """);
 
         var result = await new AccountRegistryService().LoadAsync(home.Path, default);
 
         Assert.Equal(2, result.SchemaVersion);
-        Assert.Null(result.ActiveAccountKey);
-        Assert.Equal("secondary", Assert.Single(result.Accounts).Alias);
+        Assert.Equal($"{userId}::{accountId}", result.ActiveAccountKey);
+        var account = Assert.Single(result.Accounts);
+        Assert.Equal($"{userId}::{accountId}", account.AccountKey);
+        Assert.Equal(accountId, account.ChatGptAccountId);
+        Assert.Equal(userId, account.ChatGptUserId);
+        Assert.Equal(email, account.Email);
+        Assert.Equal("secondary", account.Alias);
+    }
+
+    [Fact]
+    public async Task Current_layout_version_field_is_accepted()
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", """
+            {
+              "version": 3,
+              "active_account_key": "user-3::acct-3",
+              "accounts": [{
+                "account_key": "user-3::acct-3",
+                "chatgpt_account_id": "acct-3",
+                "chatgpt_user_id": "user-3",
+                "email": "third@example.com",
+                "alias": "third"
+              }]
+            }
+            """);
+
+        var result = await new AccountRegistryService().LoadAsync(home.Path, default);
+
+        Assert.Equal(3, result.SchemaVersion);
+        Assert.Equal("user-3::acct-3", result.ActiveAccountKey);
+        Assert.Equal("third", Assert.Single(result.Accounts).Alias);
+    }
+
+    [Fact]
+    public async Task Future_schema_version_throws_invalid_data()
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", """
+            {
+              "schema_version": 999,
+              "accounts": []
+            }
+            """);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
     }
 
     [Fact]
@@ -105,4 +159,10 @@ public sealed class AccountRegistryServiceTests
         await Assert.ThrowsAsync<InvalidDataException>(
             () => new AccountRegistryService().LoadAsync(home.Path, default));
     }
+
+    private static string Base64UrlEncode(string value) =>
+        Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
 }

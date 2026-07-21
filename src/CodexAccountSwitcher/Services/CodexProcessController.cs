@@ -81,6 +81,7 @@ public sealed class CodexProcessController : ICodexProcessController
     private readonly Dictionary<int, CodexProcessIdentity> _issuedRemainingTargets = [];
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly ICodexProcessAccessor _processAccessor;
+    private string? _issuedInstallLocation;
 
     public CodexProcessController()
         : this(new SystemCodexProcessAccessor(), new SystemAppsFolderLauncher())
@@ -111,6 +112,7 @@ public sealed class CodexProcessController : ICodexProcessController
         try
         {
             _issuedRemainingTargets.Clear();
+            _issuedInstallLocation = null;
             var targets = SelectTargetProcesses(package, _processAccessor.GetProcesses());
             foreach (var process in targets)
             {
@@ -134,6 +136,11 @@ public sealed class CodexProcessController : ICodexProcessController
             foreach (var identity in remainingTargets)
             {
                 _issuedRemainingTargets.Add(identity.Id, identity);
+            }
+
+            if (remainingTargets.Length > 0)
+            {
+                _issuedInstallLocation = Path.GetFullPath(package.InstallLocation);
             }
 
             return new CloseResult(
@@ -160,7 +167,8 @@ public sealed class CodexProcessController : ICodexProcessController
             foreach (var processId in processIds)
             {
                 if (!requestedProcessIds.Add(processId) ||
-                    !_issuedRemainingTargets.TryGetValue(processId, out var identity))
+                    !_issuedRemainingTargets.TryGetValue(processId, out var identity) ||
+                    _issuedInstallLocation is null)
                 {
                     throw new InvalidOperationException(UntrustedForceTargetMessage);
                 }
@@ -168,12 +176,29 @@ public sealed class CodexProcessController : ICodexProcessController
                 requestedTargets.Add(identity);
             }
 
+            if (requestedTargets.Count == 0)
+            {
+                return;
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var terminationTargets = SelectForceTerminationTargets(
+                requestedTargets,
+                _processAccessor.GetProcesses(),
+                _issuedInstallLocation!);
+            cancellationToken.ThrowIfCancellationRequested();
+
             foreach (var identity in requestedTargets)
             {
                 _issuedRemainingTargets.Remove(identity.Id);
             }
 
-            foreach (var identity in requestedTargets)
+            if (_issuedRemainingTargets.Count == 0)
+            {
+                _issuedInstallLocation = null;
+            }
+
+            foreach (var identity in terminationTargets)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 _processAccessor.Kill(identity, entireProcessTree: true);
@@ -251,6 +276,112 @@ public sealed class CodexProcessController : ICodexProcessController
                 selectedIdentity == process.Identity)
             .ToArray();
     }
+
+    private static IReadOnlyList<CodexProcessIdentity> SelectForceTerminationTargets(
+        IReadOnlyList<CodexProcessIdentity> trustedRoots,
+        IReadOnlyList<CodexProcessEntry> processes,
+        string installLocation)
+    {
+        var unambiguousEntries = new Dictionary<int, CodexProcessEntry>();
+        var ambiguousProcessIds = new HashSet<int>();
+        foreach (var process in processes)
+        {
+            if (ambiguousProcessIds.Contains(process.Identity.Id))
+            {
+                continue;
+            }
+
+            if (!unambiguousEntries.TryAdd(process.Identity.Id, process))
+            {
+                unambiguousEntries.Remove(process.Identity.Id);
+                ambiguousProcessIds.Add(process.Identity.Id);
+            }
+        }
+
+        var selectedIdentities = new Dictionary<int, CodexProcessIdentity>();
+        var selectedTargets = new List<CodexProcessIdentity>();
+        foreach (var trustedRoot in trustedRoots)
+        {
+            if (!unambiguousEntries.TryGetValue(trustedRoot.Id, out var currentRoot) ||
+                !IdentitiesMatch(currentRoot.Identity, trustedRoot) ||
+                !IsInsideInstallLocation(currentRoot.Identity.ExecutablePath, installLocation))
+            {
+                continue;
+            }
+
+            selectedIdentities.Add(currentRoot.Identity.Id, currentRoot.Identity);
+            selectedTargets.Add(currentRoot.Identity);
+        }
+
+        var currentCandidates = processes
+            .Where(process =>
+                unambiguousEntries.TryGetValue(process.Identity.Id, out var unambiguousEntry) &&
+                unambiguousEntry == process)
+            .ToArray();
+        var addedProcess = true;
+        while (addedProcess)
+        {
+            addedProcess = false;
+            foreach (var process in currentCandidates)
+            {
+                if (selectedIdentities.ContainsKey(process.Identity.Id) ||
+                    !selectedIdentities.TryGetValue(process.ParentProcessId, out var parentIdentity) ||
+                    parentIdentity.CreationTimeUtcTicks > process.Identity.CreationTimeUtcTicks ||
+                    !IsInsideInstallLocation(process.Identity.ExecutablePath, installLocation))
+                {
+                    continue;
+                }
+
+                selectedIdentities.Add(process.Identity.Id, process.Identity);
+                selectedTargets.Add(process.Identity);
+                addedProcess = true;
+            }
+        }
+
+        var depthByProcessId = new Dictionary<int, int>();
+        var resolvingProcessIds = new HashSet<int>();
+        int GetDepth(CodexProcessIdentity identity)
+        {
+            if (depthByProcessId.TryGetValue(identity.Id, out var knownDepth))
+            {
+                return knownDepth;
+            }
+
+            if (!resolvingProcessIds.Add(identity.Id))
+            {
+                return 0;
+            }
+
+            var depth = 0;
+            if (unambiguousEntries.TryGetValue(identity.Id, out var process) &&
+                selectedIdentities.TryGetValue(process.ParentProcessId, out var parentIdentity) &&
+                parentIdentity.CreationTimeUtcTicks <= identity.CreationTimeUtcTicks)
+            {
+                depth = GetDepth(parentIdentity) + 1;
+            }
+
+            resolvingProcessIds.Remove(identity.Id);
+            depthByProcessId[identity.Id] = depth;
+            return depth;
+        }
+
+        return selectedTargets
+            .Select((identity, index) => new { Identity = identity, Depth = GetDepth(identity), Index = index })
+            .OrderBy(target => target.Depth)
+            .ThenBy(target => target.Index)
+            .Select(target => target.Identity)
+            .ToArray();
+    }
+
+    private static bool IdentitiesMatch(
+        CodexProcessIdentity currentIdentity,
+        CodexProcessIdentity expectedIdentity) =>
+        currentIdentity.Id == expectedIdentity.Id &&
+        currentIdentity.CreationTimeUtcTicks == expectedIdentity.CreationTimeUtcTicks &&
+        string.Equals(
+            currentIdentity.ExecutablePath,
+            expectedIdentity.ExecutablePath,
+            StringComparison.OrdinalIgnoreCase);
 
     private static bool IsInsideInstallLocation(string executablePath, string installLocation)
     {

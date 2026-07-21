@@ -330,12 +330,58 @@ public sealed class CodexProcessControllerTests
         accessor.ExitResults[101] = false;
         var controller = Controller(accessor);
         await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        var enumerationCountAfterClose = accessor.EnumerationCount;
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             controller.ForceTerminateAsync([100, 999], default));
 
         Assert.Empty(accessor.KilledProcessIds);
+        Assert.Equal(enumerationCountAfterClose, accessor.EnumerationCount);
         await controller.ForceTerminateAsync([100, 101], default);
+        Assert.Equal([100, 101], accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_terminate_includes_new_in_package_descendants()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.SetProcesses(
+        [
+            root,
+            Process(101, 100, 101, "app", "resources", "new-child.exe"),
+        ]);
+
+        await controller.ForceTerminateAsync([100], default);
+
+        Assert.Equal([100, 101], accessor.KilledProcessIds);
+        Assert.Equal(2, accessor.EnumerationCount);
+    }
+
+    [Fact]
+    public async Task Force_terminate_excludes_outside_stale_and_ambiguous_descendants()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.SetProcesses(
+        [
+            root,
+            Process(101, 100, 101, "app", "resources", "valid-child.exe"),
+            Process(102, 100, 102, @"C:\Other\outside-child.exe"),
+            Process(103, 100, 99, "app", "resources", "stale-parent-child.exe"),
+            Process(104, 100, 104, "app", "resources", "ambiguous-a.exe"),
+            Process(104, 100, 105, "app", "resources", "ambiguous-b.exe"),
+            Process(105, 999, 105, "app", "resources", "unchained-child.exe"),
+        ]);
+
+        await controller.ForceTerminateAsync([100], default);
+
         Assert.Equal([100, 101], accessor.KilledProcessIds);
     }
 
@@ -347,7 +393,13 @@ public sealed class CodexProcessControllerTests
         accessor.ExitResults[100] = false;
         var controller = Controller(accessor);
         await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
-        accessor.CurrentIdentities[100] = original.Identity with { CreationTimeUtcTicks = 200 };
+        accessor.SetProcesses(
+        [
+            new CodexProcessEntry(
+                original.Identity with { CreationTimeUtcTicks = 200 },
+                original.ParentProcessId),
+            Process(101, 100, 201, "app", "resources", "reused-root-child.exe"),
+        ]);
 
         await controller.ForceTerminateAsync([100], default);
 
@@ -385,7 +437,7 @@ public sealed class CodexProcessControllerTests
         var controller = Controller(accessor);
         await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
 
-        await controller.ForceTerminateAsync([100, 101], default);
+        await controller.ForceTerminateAsync([101, 100], default);
 
         Assert.Equal([100, 101], accessor.KilledProcessIds);
         Assert.All(accessor.KillEntireTreeValues, Assert.True);
@@ -476,7 +528,7 @@ public sealed class CodexProcessControllerTests
 
     private sealed class FakeCodexProcessAccessor : ICodexProcessAccessor
     {
-        private readonly IReadOnlyList<CodexProcessEntry> _processes;
+        private IReadOnlyList<CodexProcessEntry> _processes;
 
         public FakeCodexProcessAccessor(IReadOnlyList<CodexProcessEntry> processes)
         {
@@ -510,6 +562,16 @@ public sealed class CodexProcessControllerTests
         {
             EnumerationCount++;
             return _processes;
+        }
+
+        public void SetProcesses(IReadOnlyList<CodexProcessEntry> processes)
+        {
+            _processes = processes;
+            CurrentIdentities.Clear();
+            foreach (var process in processes)
+            {
+                CurrentIdentities[process.Identity.Id] = process.Identity;
+            }
         }
 
         public bool CloseMainWindow(CodexProcessIdentity expectedIdentity)

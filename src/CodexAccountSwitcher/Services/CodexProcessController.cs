@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -52,20 +53,23 @@ internal interface IAppsFolderLauncher
     bool Start(AppsFolderLaunchRequest request, CancellationToken cancellationToken);
 }
 
-internal interface ISystemProcessHandleFactory
+internal interface IWindowsProcessApi
 {
-    ISystemProcessHandle? TryOpen(int processId);
-}
+    SafeProcessHandle? TryOpenProcess(int processId);
 
-internal interface ISystemProcessHandle : IDisposable
-{
-    bool TryGetIdentity(out CodexProcessIdentity processIdentity);
+    bool TryGetIdentity(
+        SafeProcessHandle processHandle,
+        int processId,
+        out CodexProcessIdentity processIdentity);
 
-    bool CloseMainWindow();
+    bool CloseMainWindows(SafeProcessHandle processHandle, int processId);
 
-    Task<bool> WaitForExitAsync(TimeSpan timeout, CancellationToken cancellationToken);
+    Task<bool> WaitForExitAsync(
+        SafeProcessHandle processHandle,
+        TimeSpan timeout,
+        CancellationToken cancellationToken);
 
-    bool Kill(bool entireProcessTree);
+    bool TerminateProcess(SafeProcessHandle processHandle);
 }
 
 public sealed class CodexProcessController : ICodexProcessController
@@ -302,76 +306,57 @@ internal sealed class SystemAppsFolderLauncher : IAppsFolderLauncher
     }
 }
 
-internal sealed class SystemProcessHandleFactory : ISystemProcessHandleFactory
+internal sealed class WindowsProcessApi : IWindowsProcessApi
 {
+    private const uint ProcessTerminate = 0x00000001;
     private const uint QueryLimitedInformation = 0x00001000;
+    private const uint Synchronize = 0x00100000;
+    private const uint WaitObject0 = 0x00000000;
+    private const uint WaitTimeout = 0x00000102;
+    private const uint WaitFailed = 0xffffffff;
+    private const uint CloseMessage = 0x0010;
     private const int ErrorAccessDenied = 5;
     private const int ErrorInvalidParameter = 87;
+    private const int ErrorInvalidWindowHandle = 1400;
+    private const int MaximumPathCharacters = 32768;
 
-    public ISystemProcessHandle? TryOpen(int processId)
+    public SafeProcessHandle? TryOpenProcess(int processId)
     {
-        var safeHandle = OpenProcess(QueryLimitedInformation, inheritHandle: false, processId);
-        if (safeHandle.IsInvalid)
+        var processHandle = OpenProcess(
+            ProcessTerminate | QueryLimitedInformation | Synchronize,
+            inheritHandle: false,
+            processId);
+        if (!processHandle.IsInvalid)
         {
-            var error = Marshal.GetLastWin32Error();
-            safeHandle.Dispose();
-            if (error is ErrorAccessDenied or ErrorInvalidParameter)
-            {
-                return null;
-            }
-
-            throw new Win32Exception(error);
+            return processHandle;
         }
 
-        try
+        var error = Marshal.GetLastWin32Error();
+        processHandle.Dispose();
+        if (error is ErrorAccessDenied or ErrorInvalidParameter)
         {
-            return new SystemProcessHandle(
-                processId,
-                Process.GetProcessById(processId),
-                safeHandle);
-        }
-        catch (ArgumentException)
-        {
-            safeHandle.Dispose();
             return null;
         }
-        catch
-        {
-            safeHandle.Dispose();
-            throw;
-        }
+
+        throw new Win32Exception(error);
     }
 
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern SafeProcessHandle OpenProcess(
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        int processId);
-}
-
-internal sealed class SystemProcessHandle : ISystemProcessHandle
-{
-    private const int MaximumPathCharacters = 32768;
-    private readonly Process _process;
-    private readonly int _processId;
-    private readonly SafeProcessHandle _safeHandle;
-
-    public SystemProcessHandle(
+    public bool TryGetIdentity(
+        SafeProcessHandle processHandle,
         int processId,
-        Process process,
-        SafeProcessHandle safeHandle)
+        out CodexProcessIdentity processIdentity)
     {
-        _processId = processId;
-        _process = process ?? throw new ArgumentNullException(nameof(process));
-        _safeHandle = safeHandle ?? throw new ArgumentNullException(nameof(safeHandle));
-    }
+        var retainedProcessId = GetRetainedProcessId(processHandle);
+        if (retainedProcessId != unchecked((uint)processId))
+        {
+            processIdentity = null!;
+            return false;
+        }
 
-    public bool TryGetIdentity(out CodexProcessIdentity processIdentity)
-    {
         var pathBuffer = new StringBuilder(MaximumPathCharacters);
         var characterCount = (uint)pathBuffer.Capacity;
         if (!QueryFullProcessImageName(
-                _safeHandle,
+                processHandle,
                 flags: 0,
                 pathBuffer,
                 ref characterCount))
@@ -380,7 +365,7 @@ internal sealed class SystemProcessHandle : ISystemProcessHandle
         }
 
         if (!GetProcessTimes(
-                _safeHandle,
+                processHandle,
                 out var creationTime,
                 out _,
                 out _,
@@ -397,76 +382,146 @@ internal sealed class SystemProcessHandle : ISystemProcessHandle
             return false;
         }
 
-        var executablePath = Path.GetFullPath(rawExecutablePath);
         processIdentity = new CodexProcessIdentity(
-            _processId,
-            executablePath,
+            unchecked((int)retainedProcessId),
+            Path.GetFullPath(rawExecutablePath),
             DateTime.FromFileTimeUtc(creationTime.ToInt64()).Ticks);
         return true;
     }
 
-    public bool CloseMainWindow()
+    public bool CloseMainWindows(SafeProcessHandle processHandle, int processId)
     {
-        if (_process.HasExited)
+        var retainedProcessId = GetRetainedProcessId(processHandle);
+        if (retainedProcessId != unchecked((uint)processId))
         {
             return false;
         }
 
-        try
-        {
-            return _process.CloseMainWindow();
-        }
-        catch (InvalidOperationException) when (_process.HasExited)
+        if (!IsProcessRunning(processHandle))
         {
             return false;
         }
+
+        var closePosted = false;
+        Exception? callbackException = null;
+        var enumerated = EnumWindows((windowHandle, _) =>
+        {
+            try
+            {
+                GetWindowThreadProcessId(windowHandle, out var windowProcessId);
+                if (windowProcessId != retainedProcessId ||
+                    !IsProcessRunning(processHandle))
+                {
+                    return true;
+                }
+
+                if (PostMessage(windowHandle, CloseMessage, UIntPtr.Zero, IntPtr.Zero))
+                {
+                    closePosted = true;
+                    return true;
+                }
+
+                var error = Marshal.GetLastWin32Error();
+                if (error != ErrorInvalidWindowHandle)
+                {
+                    throw new Win32Exception(error);
+                }
+
+                return true;
+            }
+            catch (Exception exception)
+            {
+                callbackException = exception;
+                return false;
+            }
+        }, IntPtr.Zero);
+
+        if (callbackException is not null)
+        {
+            ExceptionDispatchInfo.Capture(callbackException).Throw();
+        }
+
+        if (!enumerated)
+        {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+
+        return closePosted;
     }
 
     public async Task<bool> WaitForExitAsync(
+        SafeProcessHandle processHandle,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        if (_process.HasExited)
-        {
-            return true;
-        }
+        cancellationToken.ThrowIfCancellationRequested();
+        using var waitHandle = new NonOwningProcessWaitHandle(processHandle);
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancellationRegistration = cancellationToken.Register(
+            () => completion.TrySetCanceled(cancellationToken));
+        var registeredWait = ThreadPool.RegisterWaitForSingleObject(
+            waitHandle,
+            static (state, timedOut) => ((TaskCompletionSource<bool>)state!).TrySetResult(!timedOut),
+            completion,
+            timeout,
+            executeOnlyOnce: true);
 
-        using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutSource.CancelAfter(timeout);
         try
         {
-            await _process.WaitForExitAsync(timeoutSource.Token);
-            return true;
+            return await completion.Task;
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        finally
         {
-            return _process.HasExited;
+            registeredWait.Unregister(null);
         }
     }
 
-    public bool Kill(bool entireProcessTree)
+    public bool TerminateProcess(SafeProcessHandle processHandle)
     {
-        if (_process.HasExited)
+        if (!IsProcessRunning(processHandle))
         {
             return false;
         }
 
-        try
+        if (TerminateProcessNative(processHandle, exitCode: 1))
         {
-            _process.Kill(entireProcessTree);
             return true;
         }
-        catch (InvalidOperationException) when (_process.HasExited)
+
+        var error = Marshal.GetLastWin32Error();
+        if (!IsProcessRunning(processHandle))
         {
             return false;
         }
+
+        throw new Win32Exception(error);
     }
 
-    public void Dispose()
+    private static bool IsProcessRunning(SafeProcessHandle processHandle)
     {
-        _process.Dispose();
-        _safeHandle.Dispose();
+        var waitResult = WaitForSingleObject(processHandle, milliseconds: 0);
+        return waitResult switch
+        {
+            WaitTimeout => true,
+            WaitObject0 => false,
+            WaitFailed => throw new Win32Exception(Marshal.GetLastWin32Error()),
+            _ => throw new InvalidOperationException("Unexpected process wait result."),
+        };
     }
+
+    private static uint GetRetainedProcessId(SafeProcessHandle processHandle)
+    {
+        var processId = GetProcessId(processHandle);
+        return processId != 0
+            ? processId
+            : throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern SafeProcessHandle OpenProcess(
+        uint desiredAccess,
+        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
+        int processId);
 
     [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -485,6 +540,41 @@ internal sealed class SystemProcessHandle : ISystemProcessHandle
         out NativeFileTime kernelTime,
         out NativeFileTime userTime);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(
+        SafeProcessHandle process,
+        uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetProcessId(SafeProcessHandle process);
+
+    [DllImport("kernel32.dll", EntryPoint = "TerminateProcess", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateProcessNative(
+        SafeProcessHandle process,
+        uint exitCode);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr parameter);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(
+        IntPtr windowHandle,
+        out uint processId);
+
+    [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool PostMessage(
+        IntPtr windowHandle,
+        uint message,
+        UIntPtr wordParameter,
+        IntPtr longParameter);
+
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private delegate bool EnumWindowsCallback(IntPtr windowHandle, IntPtr parameter);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeFileTime
     {
@@ -494,20 +584,108 @@ internal sealed class SystemProcessHandle : ISystemProcessHandle
         public readonly long ToInt64() =>
             unchecked((long)(((ulong)HighDateTime << 32) | LowDateTime));
     }
+
+    private sealed class NonOwningProcessWaitHandle : WaitHandle
+    {
+        private readonly SafeProcessHandle _processHandle;
+        private bool _referenceAdded;
+
+        public NonOwningProcessWaitHandle(SafeProcessHandle processHandle)
+        {
+            _processHandle = processHandle;
+            processHandle.DangerousAddRef(ref _referenceAdded);
+            try
+            {
+                SafeWaitHandle = new SafeWaitHandle(
+                    processHandle.DangerousGetHandle(),
+                    ownsHandle: false);
+            }
+            catch
+            {
+                ReleaseReference();
+                throw;
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            ReleaseReference();
+        }
+
+        private void ReleaseReference()
+        {
+            if (!_referenceAdded)
+            {
+                return;
+            }
+
+            _processHandle.DangerousRelease();
+            _referenceAdded = false;
+        }
+    }
+}
+
+internal sealed class SystemProcessHandle : IDisposable
+{
+    private readonly IWindowsProcessApi _nativeApi;
+    private readonly int _processId;
+    private readonly SafeProcessHandle _safeHandle;
+
+    private SystemProcessHandle(
+        int processId,
+        SafeProcessHandle safeHandle,
+        IWindowsProcessApi nativeApi)
+    {
+        _processId = processId;
+        _safeHandle = safeHandle;
+        _nativeApi = nativeApi;
+    }
+
+    public static SystemProcessHandle? TryOpen(
+        int processId,
+        IWindowsProcessApi nativeApi)
+    {
+        var safeHandle = nativeApi.TryOpenProcess(processId);
+        return safeHandle is null
+            ? null
+            : new SystemProcessHandle(processId, safeHandle, nativeApi);
+    }
+
+    public bool TryGetIdentity(out CodexProcessIdentity processIdentity) =>
+        _nativeApi.TryGetIdentity(_safeHandle, _processId, out processIdentity);
+
+    public bool CloseMainWindow() =>
+        _nativeApi.CloseMainWindows(_safeHandle, _processId);
+
+    public Task<bool> WaitForExitAsync(TimeSpan timeout, CancellationToken cancellationToken) =>
+        _nativeApi.WaitForExitAsync(_safeHandle, timeout, cancellationToken);
+
+    public bool Kill(bool entireProcessTree)
+    {
+        if (!entireProcessTree)
+        {
+            throw new ArgumentException("Every authorized tree process must be terminated explicitly.", nameof(entireProcessTree));
+        }
+
+        return _nativeApi.TerminateProcess(_safeHandle);
+    }
+
+    public void Dispose() => _safeHandle.Dispose();
 }
 
 internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 {
     private const uint SnapshotProcesses = 0x00000002;
     private const int ErrorNoMoreFiles = 18;
-    private readonly ISystemProcessHandleFactory _handleFactory;
+    private readonly IWindowsProcessApi _nativeApi;
 
-    public SystemCodexProcessAccessor() : this(new SystemProcessHandleFactory())
+    public SystemCodexProcessAccessor() : this(new WindowsProcessApi())
     {
     }
 
-    internal SystemCodexProcessAccessor(ISystemProcessHandleFactory handleFactory) =>
-        _handleFactory = handleFactory ?? throw new ArgumentNullException(nameof(handleFactory));
+    internal SystemCodexProcessAccessor(IWindowsProcessApi nativeApi) =>
+        _nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
 
     public IReadOnlyList<CodexProcessEntry> GetProcesses()
     {
@@ -533,7 +711,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
         do
         {
             var processId = unchecked((int)nativeEntry.ProcessId);
-            using var processHandle = _handleFactory.TryOpen(processId);
+            using var processHandle = SystemProcessHandle.TryOpen(processId, _nativeApi);
             if (processHandle is not null &&
                 processHandle.TryGetIdentity(out var identity))
             {
@@ -557,7 +735,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 
     public bool CloseMainWindow(CodexProcessIdentity expectedIdentity)
     {
-        using var processHandle = _handleFactory.TryOpen(expectedIdentity.Id);
+        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))
@@ -573,7 +751,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        using var processHandle = _handleFactory.TryOpen(expectedIdentity.Id);
+        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))
@@ -593,7 +771,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 
     public bool Kill(CodexProcessIdentity expectedIdentity, bool entireProcessTree)
     {
-        using var processHandle = _handleFactory.TryOpen(expectedIdentity.Id);
+        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))

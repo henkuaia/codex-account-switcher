@@ -1,4 +1,5 @@
 using CodexAccountSwitcher.Services;
+using Microsoft.Win32.SafeHandles;
 
 namespace CodexAccountSwitcher.Tests;
 
@@ -594,115 +595,152 @@ public sealed class SystemCodexProcessAccessorTests
     [Fact]
     public void Close_uses_one_retained_handle_for_identity_action_and_disposal()
     {
-        var events = new List<string>();
-        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events);
-        var factory = new FakeSystemProcessHandleFactory(handle, events);
-        var accessor = new SystemCodexProcessAccessor(factory);
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity);
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
 
         var closed = accessor.CloseMainWindow(ExpectedIdentity);
 
         Assert.True(closed);
-        Assert.Equal(1, factory.OpenCount);
-        Assert.Equal(["open", "identity", "close", "dispose"], events);
+        Assert.Equal(1, nativeApi.OpenCount);
+        Assert.Equal(["open", "identity", "close"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
     }
 
     [Fact]
     public async Task Wait_uses_one_retained_handle_for_identity_action_and_disposal()
     {
-        var events = new List<string>();
-        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events) { WaitResult = true };
-        var factory = new FakeSystemProcessHandleFactory(handle, events);
-        var accessor = new SystemCodexProcessAccessor(factory);
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity) { WaitResult = true };
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
 
         var exited = await accessor.WaitForExitAsync(ExpectedIdentity, TimeSpan.FromSeconds(1), default);
 
         Assert.True(exited);
-        Assert.Equal(1, factory.OpenCount);
-        Assert.Equal(["open", "identity", "wait", "dispose"], events);
+        Assert.Equal(1, nativeApi.OpenCount);
+        Assert.Equal(["open", "identity", "wait"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
+    }
+
+    [Fact]
+    public async Task Wait_timeout_revalidates_identity_through_the_same_retained_handle()
+    {
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity) { WaitResult = false };
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
+
+        var exited = await accessor.WaitForExitAsync(ExpectedIdentity, TimeSpan.FromSeconds(1), default);
+
+        Assert.False(exited);
+        Assert.Equal(1, nativeApi.OpenCount);
+        Assert.Equal(["open", "identity", "wait", "identity"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
     }
 
     [Fact]
     public void Kill_uses_one_retained_handle_for_identity_action_and_disposal()
     {
-        var events = new List<string>();
-        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events);
-        var factory = new FakeSystemProcessHandleFactory(handle, events);
-        var accessor = new SystemCodexProcessAccessor(factory);
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity);
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
 
         var killed = accessor.Kill(ExpectedIdentity, entireProcessTree: true);
 
         Assert.True(killed);
-        Assert.Equal(1, factory.OpenCount);
-        Assert.True(handle.KilledEntireProcessTree);
-        Assert.Equal(["open", "identity", "kill", "dispose"], events);
+        Assert.Equal(1, nativeApi.OpenCount);
+        Assert.Equal(["open", "identity", "terminate"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
     }
 
     [Fact]
     public void Identity_mismatch_disposes_retained_handle_without_action()
     {
-        var events = new List<string>();
         var reusedIdentity = ExpectedIdentity with { CreationTimeUtcTicks = 5678 };
-        var handle = new FakeSystemProcessHandle(reusedIdentity, events);
-        var factory = new FakeSystemProcessHandleFactory(handle, events);
-        var accessor = new SystemCodexProcessAccessor(factory);
+        var nativeApi = new FakeWindowsProcessApi(reusedIdentity);
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
 
         var closed = accessor.CloseMainWindow(ExpectedIdentity);
 
         Assert.False(closed);
-        Assert.Equal(1, factory.OpenCount);
-        Assert.Equal(["open", "identity", "dispose"], events);
+        Assert.Equal(1, nativeApi.OpenCount);
+        Assert.Equal(["open", "identity"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
     }
 
-    private sealed class FakeSystemProcessHandleFactory(
-        ISystemProcessHandle handle,
-        List<string> events) : ISystemProcessHandleFactory
+    [Fact]
+    public void Action_failure_still_disposes_retained_handle()
     {
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity) { CloseResult = false };
+        var accessor = new SystemCodexProcessAccessor(nativeApi);
+
+        var closed = accessor.CloseMainWindow(ExpectedIdentity);
+
+        Assert.False(closed);
+        Assert.Equal(["open", "identity", "close"], nativeApi.Events);
+        Assert.True(nativeApi.OpenedHandle!.IsClosed);
+    }
+
+    private sealed class FakeWindowsProcessApi(CodexProcessIdentity identity) : IWindowsProcessApi
+    {
+        public bool CloseResult { get; init; } = true;
+
+        public List<string> Events { get; } = [];
+
         public int OpenCount { get; private set; }
 
-        public ISystemProcessHandle? TryOpen(int processId)
-        {
-            OpenCount++;
-            events.Add("open");
-            Assert.Equal(ExpectedIdentity.Id, processId);
-            return handle;
-        }
-    }
+        public SafeProcessHandle? OpenedHandle { get; private set; }
 
-    private sealed class FakeSystemProcessHandle(
-        CodexProcessIdentity identity,
-        List<string> events) : ISystemProcessHandle
-    {
-        public bool KilledEntireProcessTree { get; private set; }
+        public bool TerminateResult { get; init; } = true;
 
         public bool WaitResult { get; init; }
 
-        public bool TryGetIdentity(out CodexProcessIdentity processIdentity)
+        public SafeProcessHandle? TryOpenProcess(int processId)
         {
-            events.Add("identity");
+            Assert.Equal(ExpectedIdentity.Id, processId);
+            OpenCount++;
+            Events.Add("open");
+            OpenedHandle = new SafeProcessHandle(new IntPtr(1234), ownsHandle: false);
+            return OpenedHandle;
+        }
+
+        public bool TryGetIdentity(
+            SafeProcessHandle processHandle,
+            int processId,
+            out CodexProcessIdentity processIdentity)
+        {
+            AssertOpenHandle(processHandle);
+            Assert.Equal(ExpectedIdentity.Id, processId);
+            Events.Add("identity");
             processIdentity = identity;
             return true;
         }
 
-        public bool CloseMainWindow()
+        public bool CloseMainWindows(SafeProcessHandle processHandle, int processId)
         {
-            events.Add("close");
-            return true;
+            AssertOpenHandle(processHandle);
+            Assert.Equal(ExpectedIdentity.Id, processId);
+            Events.Add("close");
+            return CloseResult;
         }
 
-        public Task<bool> WaitForExitAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        public Task<bool> WaitForExitAsync(
+            SafeProcessHandle processHandle,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
         {
+            AssertOpenHandle(processHandle);
             cancellationToken.ThrowIfCancellationRequested();
-            events.Add("wait");
+            Events.Add("wait");
             return Task.FromResult(WaitResult);
         }
 
-        public bool Kill(bool entireProcessTree)
+        public bool TerminateProcess(SafeProcessHandle processHandle)
         {
-            events.Add("kill");
-            KilledEntireProcessTree = entireProcessTree;
-            return true;
+            AssertOpenHandle(processHandle);
+            Events.Add("terminate");
+            return TerminateResult;
         }
 
-        public void Dispose() => events.Add("dispose");
+        private void AssertOpenHandle(SafeProcessHandle processHandle)
+        {
+            Assert.Same(OpenedHandle, processHandle);
+            Assert.False(processHandle.IsClosed);
+        }
     }
 }

@@ -1,4 +1,5 @@
 using CodexAccountSwitcher.Models;
+using System.Net.Http;
 
 namespace CodexAccountSwitcher.Tests;
 
@@ -42,6 +43,66 @@ internal sealed class TemporaryFile : IDisposable
 
 internal static class Accounts
 {
-    public static AccountRecord Record(string key, string email, string alias = "") =>
-        new(key, "acct", "user", email, alias, null, "plus", "chatgpt");
+    public static AccountRecord Record(
+        string key,
+        string email,
+        string alias = "",
+        string accountId = "acct-1") =>
+        new(key, accountId, "user", email, alias, null, "plus", "chatgpt");
+}
+
+internal sealed class RecordingHttpMessageHandler : HttpMessageHandler
+{
+    private readonly Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> _sendAsync;
+    private int _activeRequests;
+    private int _maximumActiveRequests;
+
+    public RecordingHttpMessageHandler(
+        Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> sendAsync)
+    {
+        _sendAsync = sendAsync;
+    }
+
+    public List<HttpRequestMessage> Requests { get; } = [];
+
+    public int MaximumActiveRequests => _maximumActiveRequests;
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken)
+    {
+        Requests.Add(request);
+        var activeRequests = Interlocked.Increment(ref _activeRequests);
+        UpdateMaximumActiveRequests(activeRequests);
+
+        try
+        {
+            return await _sendAsync(request, cancellationToken);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeRequests);
+        }
+    }
+
+    private void UpdateMaximumActiveRequests(int activeRequests)
+    {
+        int observed;
+        do
+        {
+            observed = _maximumActiveRequests;
+            if (observed >= activeRequests)
+            {
+                return;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _maximumActiveRequests, activeRequests, observed) != observed);
+    }
+}
+
+internal sealed class CollectingProgress<T> : IProgress<T>
+{
+    public List<T> Values { get; } = [];
+
+    public void Report(T value) => Values.Add(value);
 }

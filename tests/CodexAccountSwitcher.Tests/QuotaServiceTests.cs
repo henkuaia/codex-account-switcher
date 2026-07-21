@@ -1,0 +1,178 @@
+using System.Net;
+using System.Net.Http;
+using CodexAccountSwitcher.Models;
+using CodexAccountSwitcher.Services;
+
+namespace CodexAccountSwitcher.Tests;
+
+public sealed class QuotaServiceTests
+{
+    [Fact]
+    public async Task Refresh_account_sends_authenticated_usage_request_and_parses_successful_response()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+        var service = new QuotaService(client);
+
+        var update = await service.RefreshAccountAsync(account, home.Path, default);
+
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Get, request.Method);
+        Assert.Equal("https://chatgpt.com/backend-api/wham/usage", request.RequestUri!.ToString());
+        Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+        Assert.Equal("access-secret", request.Headers.Authorization.Parameter);
+        Assert.Equal("acct-1", request.Headers.GetValues("ChatGPT-Account-Id").Single());
+        Assert.Contains("CodexAccountSwitcher/1.0 codex-auth/0.2.10", request.Headers.UserAgent.ToString(), StringComparison.Ordinal);
+        Assert.Null(update.Error);
+        Assert.Equal("user-1::acct-1", update.AccountKey);
+        Assert.Equal(73, update.Display!.RemainingPercent);
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    public async Task Refresh_account_returns_redacted_error_for_unauthorized_response(HttpStatusCode statusCode)
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(statusCode) { Content = new StringContent("response-secret") }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(account.AccountKey, update.AccountKey);
+        Assert.Null(update.Display);
+        Assert.NotNull(update.Error);
+        Assert.DoesNotContain("access-secret", update.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("response-secret", update.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refresh_account_returns_redacted_error_when_request_times_out()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) =>
+            Task.FromException<HttpResponseMessage>(new TaskCanceledException("response-secret")));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(account.AccountKey, update.AccountKey);
+        Assert.Null(update.Display);
+        Assert.Equal("The quota refresh request timed out.", update.Error);
+        Assert.DoesNotContain("access-secret", update.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("response-secret", update.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refresh_account_returns_structured_error_for_malformed_response()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"token\":\"response-secret\"") }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(account.AccountKey, update.AccountKey);
+        Assert.Null(update.Display);
+        Assert.NotNull(update.Error);
+        Assert.DoesNotContain("access-secret", update.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("response-secret", update.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refresh_account_returns_structured_error_when_snapshot_is_missing()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(account.AccountKey, update.AccountKey);
+        Assert.Null(update.Display);
+        Assert.NotNull(update.Error);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Refresh_account_returns_structured_error_when_snapshot_account_id_mismatches_registry()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-mismatch-secret");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(account.AccountKey, update.AccountKey);
+        Assert.Null(update.Display);
+        Assert.NotNull(update.Error);
+        Assert.DoesNotContain("access-secret", update.Error, StringComparison.Ordinal);
+        Assert.DoesNotContain("acct-mismatch-secret", update.Error, StringComparison.Ordinal);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task Refresh_all_continues_after_failure_and_never_runs_multiple_requests_concurrently()
+    {
+        using var home = new TemporaryDirectory();
+        var accounts = new[]
+        {
+            Accounts.Record("user-1::acct-1", "first@example.com", accountId: "acct-1"),
+            Accounts.Record("user-2::acct-2", "second@example.com", accountId: "acct-2"),
+            Accounts.Record("user-3::acct-3", "third@example.com", accountId: "acct-3"),
+        };
+        foreach (var account in accounts)
+        {
+            WriteSnapshot(home, account, $"access-{account.ChatGptAccountId}", account.ChatGptAccountId);
+        }
+
+        var requestCount = 0;
+        using var handler = new RecordingHttpMessageHandler(async (_, _) =>
+        {
+            await Task.Yield();
+            return Interlocked.Increment(ref requestCount) == 1
+                ? new HttpResponseMessage(HttpStatusCode.Forbidden)
+                : JsonResponse();
+        });
+        using var client = new HttpClient(handler);
+        var progress = new CollectingProgress<QuotaUpdate>();
+
+        await new QuotaService(client).RefreshAllAsync(accounts, home.Path, progress, default);
+
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Equal(1, handler.MaximumActiveRequests);
+        Assert.Equal(3, progress.Values.Count);
+        Assert.NotNull(progress.Values[0].Error);
+        Assert.Null(progress.Values[1].Error);
+        Assert.Null(progress.Values[2].Error);
+    }
+
+    private static void WriteSnapshot(TemporaryDirectory home, AccountRecord account, string accessToken, string accountId)
+    {
+        var path = AccountSnapshotPathResolver.Resolve(home.Path, account.AccountKey);
+        var relativePath = Path.GetRelativePath(home.Path, path);
+        home.Write(relativePath,
+            $"{{\"auth_mode\":\"chatgpt\",\"tokens\":{{\"access_token\":\"{accessToken}\",\"account_id\":\"{accountId}\"}}}}");
+    }
+
+    private static HttpResponseMessage JsonResponse() => new(HttpStatusCode.OK)
+    {
+        Content = new StringContent("""
+            {"rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":604800}}}
+            """),
+    };
+}

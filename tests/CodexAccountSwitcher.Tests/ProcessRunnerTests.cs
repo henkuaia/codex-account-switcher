@@ -8,6 +8,27 @@ public sealed class ProcessRunnerTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task Pre_cancelled_call_does_not_start_process(bool visible)
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+        var process = new FakeStartedProcess();
+        var factory = new FakeProcessFactory(process);
+        var runner = new ProcessRunner(factory);
+        var request = new ProcessRequest("fake.exe", ["command"], Visible: visible);
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => visible
+            ? runner.RunVisibleAsync(request, cancellationSource.Token)
+            : runner.RunCapturedAsync(request, cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.Equal(0, process.StartCallCount);
+        Assert.Equal(visible, factory.StartInfo!.UseShellExecute);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task Cancellation_terminates_process_tree_waits_for_exit_and_rethrows(bool visible)
     {
         using var cancellationSource = new CancellationTokenSource();

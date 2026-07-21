@@ -67,6 +67,7 @@ public sealed class ProcessRunner : IProcessRunner
         startInfo.RedirectStandardError = true;
 
         using var process = _processFactory.Create(startInfo);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
             throw new InvalidOperationException("The process did not start.");
@@ -93,6 +94,7 @@ public sealed class ProcessRunner : IProcessRunner
 
         var startInfo = CreateStartInfo(request, useShellExecute: true);
         using var process = _processFactory.Create(startInfo);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
             throw new InvalidOperationException("The process did not start.");

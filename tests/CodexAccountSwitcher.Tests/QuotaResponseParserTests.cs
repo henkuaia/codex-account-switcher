@@ -148,4 +148,19 @@ public sealed class QuotaResponseParserTests
         Assert.NotNull(result.Error);
         Assert.DoesNotContain("raw-response-secret", result.Error, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Unrepresentable_window_duration_returns_sanitized_parse_error()
+    {
+        const string duration = "9223372036854775807";
+        var json = """
+        {"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":9223372036854775807}}}
+        """;
+
+        var result = QuotaResponseParser.Parse(json);
+
+        Assert.Null(result.Display);
+        Assert.NotNull(result.Error);
+        Assert.DoesNotContain(duration, result.Error, StringComparison.Ordinal);
+    }
 }

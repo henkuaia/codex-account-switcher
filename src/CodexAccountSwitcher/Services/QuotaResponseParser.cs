@@ -29,6 +29,14 @@ public static class QuotaResponseParser
         {
             return QuotaParseResult.Failure(InvalidResponseError);
         }
+        catch (ArgumentOutOfRangeException)
+        {
+            return QuotaParseResult.Failure(InvalidResponseError);
+        }
+        catch (OverflowException)
+        {
+            return QuotaParseResult.Failure(InvalidResponseError);
+        }
     }
 
     private static List<QuotaDisplay> ReadCandidates(JsonElement root)

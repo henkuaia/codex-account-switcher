@@ -30,7 +30,9 @@ public sealed class CodexPackageServiceTests
         Assert.Equal("-NonInteractive", runner.LastRequest.Arguments[1]);
         Assert.Equal("-Command", runner.LastRequest.Arguments[2]);
         Assert.Contains("Get-AppxPackage -Name OpenAI.Codex", runner.LastRequest.Arguments[3], StringComparison.Ordinal);
+        Assert.Contains("$packages.Count -ne 1", runner.LastRequest.Arguments[3], StringComparison.Ordinal);
         Assert.Contains("ConvertTo-Json -Compress", runner.LastRequest.Arguments[3], StringComparison.Ordinal);
+        Assert.DoesNotContain("Select-Object -First 1", runner.LastRequest.Arguments[3], StringComparison.Ordinal);
     }
 
     [Fact]
@@ -68,6 +70,18 @@ public sealed class CodexPackageServiceTests
 
         Assert.Equal("The Codex package manifest must contain exactly one application.", exception.Message);
         Assert.DoesNotContain(secondApplicationId, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Discover_rejects_multiple_installed_packages_without_exposing_output()
+    {
+        const string rawError = "MultiplePackages";
+        var service = CreateService($$"""{"DiscoveryError":"{{rawError}}"}""");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.DiscoverAsync(default));
+
+        Assert.Equal("Multiple Codex packages are installed.", exception.Message);
+        Assert.DoesNotContain(rawError, exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -169,21 +183,20 @@ public sealed class CodexProcessControllerTests
         @"C:\Program Files\WindowsApps\OpenAI.Codex_26.715.7063.0_x64__2p2nqsd0c76g0";
 
     [Fact]
-    public async Task Close_targets_only_installed_chatgpt_and_its_installed_descendants()
+    public async Task Close_targets_only_installed_chatgpt_and_valid_installed_descendants()
     {
         var accessor = new FakeCodexProcessAccessor(
         [
-            Process(100, 1, "app", "ChatGPT.exe"),
-            Process(101, 100, "app", "resources", "codex.exe"),
-            Process(102, 101, "app", "resources", "helper.exe"),
-            new CodexProcessEntry(200, 100, @"C:\Other\escaped-child.exe"),
-            Process(300, 1, "app", "unrelated.exe"),
-            new CodexProcessEntry(400, 1, @"C:\Other\ChatGPT.exe"),
-            new CodexProcessEntry(500, 1, InstallLocation + @".attacker\ChatGPT.exe"),
-            new CodexProcessEntry(600, 1, null),
+            Process(100, 1, 100, "app", "ChatGPT.exe"),
+            Process(101, 100, 101, "app", "resources", "codex.exe"),
+            Process(102, 101, 102, "app", "resources", "helper.exe"),
+            Process(200, 100, 103, @"C:\Other\escaped-child.exe"),
+            Process(300, 1, 104, "app", "unrelated.exe"),
+            Process(400, 1, 105, @"C:\Other\ChatGPT.exe"),
+            Process(500, 1, 106, InstallLocation + @".attacker\ChatGPT.exe"),
         ]);
         accessor.ExitResults[101] = false;
-        var controller = new CodexProcessController(accessor, new FakeProcessRunner());
+        var controller = Controller(accessor);
 
         var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(30), default);
 
@@ -196,13 +209,62 @@ public sealed class CodexProcessControllerTests
     }
 
     [Fact]
+    public async Task Close_rejects_child_when_reused_parent_is_newer_than_child()
+    {
+        var accessor = new FakeCodexProcessAccessor(
+        [
+            Process(100, 1, 200, "app", "ChatGPT.exe"),
+            Process(101, 100, 100, "app", "resources", "codex.exe"),
+        ]);
+        var controller = Controller(accessor);
+
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        Assert.Equal([100], accessor.ClosedProcessIds);
+        Assert.Equal([100], accessor.WaitedProcessIds);
+    }
+
+    [Fact]
+    public async Task Close_does_not_touch_reused_pid()
+    {
+        var original = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([original]);
+        accessor.CurrentIdentities[100] = original.Identity with { ExecutablePath = @"C:\Other\ChatGPT.exe" };
+        var controller = Controller(accessor);
+
+        var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        Assert.True(result.AllExited);
+        Assert.Empty(accessor.ClosedProcessIds);
+        Assert.Empty(result.RemainingProcessIds);
+    }
+
+    [Fact]
+    public async Task Close_does_not_issue_target_when_pid_is_reused_before_wait()
+    {
+        var original = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([original]);
+        accessor.OnClose = identity =>
+            accessor.CurrentIdentities[identity.Id] = identity with { CreationTimeUtcTicks = 200 };
+        var controller = Controller(accessor);
+
+        var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        Assert.True(result.AllExited);
+        Assert.Equal([100], accessor.ClosedProcessIds);
+        Assert.Empty(result.RemainingProcessIds);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.ForceTerminateAsync([100], default));
+    }
+
+    [Fact]
     public async Task Close_propagates_programming_failures()
     {
-        var accessor = new FakeCodexProcessAccessor([Process(100, 1, "app", "ChatGPT.exe")])
+        var accessor = new FakeCodexProcessAccessor([Process(100, 1, 100, "app", "ChatGPT.exe")])
         {
             CloseException = new InvalidOperationException("programming failure"),
         };
-        var controller = new CodexProcessController(accessor, new FakeProcessRunner());
+        var controller = Controller(accessor);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default));
@@ -216,7 +278,7 @@ public sealed class CodexProcessControllerTests
         using var cancellationSource = new CancellationTokenSource();
         cancellationSource.Cancel();
         var accessor = new FakeCodexProcessAccessor([]);
-        var controller = new CodexProcessController(accessor, new FakeProcessRunner());
+        var controller = Controller(accessor);
 
         var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), cancellationSource.Token));
@@ -226,46 +288,152 @@ public sealed class CodexProcessControllerTests
     }
 
     [Fact]
-    public async Task Force_terminate_kills_each_supplied_process_tree()
+    public async Task Force_terminate_rejects_unissued_process_id()
     {
         var accessor = new FakeCodexProcessAccessor([]);
-        var controller = new CodexProcessController(accessor, new FakeProcessRunner());
+        var controller = Controller(accessor);
 
-        await controller.ForceTerminateAsync([101, 102], default);
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.ForceTerminateAsync([999], default));
 
-        Assert.Equal([(101, true), (102, true)], accessor.KillCalls);
+        Assert.Equal("Force termination target was not issued by the latest close operation.", exception.Message);
+        Assert.Empty(accessor.KilledProcessIds);
     }
 
     [Fact]
-    public async Task Launch_uses_exact_apps_folder_target_through_explorer()
+    public async Task Force_terminate_validates_all_ids_before_killing_any_target()
     {
-        var runner = new FakeProcessRunner();
-        var controller = new CodexProcessController(new FakeCodexProcessAccessor([]), runner);
+        var accessor = new FakeCodexProcessAccessor(
+        [
+            Process(100, 1, 100, "app", "ChatGPT.exe"),
+            Process(101, 100, 101, "app", "resources", "codex.exe"),
+        ]);
+        accessor.ExitResults[100] = false;
+        accessor.ExitResults[101] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.ForceTerminateAsync([100, 999], default));
+
+        Assert.Empty(accessor.KilledProcessIds);
+        await controller.ForceTerminateAsync([100, 101], default);
+        Assert.Equal([100, 101], accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_terminate_revalidates_identity_and_consumes_reused_target()
+    {
+        var original = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([original]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.CurrentIdentities[100] = original.Identity with { CreationTimeUtcTicks = 200 };
+
+        await controller.ForceTerminateAsync([100], default);
+
+        Assert.Empty(accessor.KilledProcessIds);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.ForceTerminateAsync([100], default));
+    }
+
+    [Fact]
+    public async Task Later_close_replaces_force_authority_from_previous_close()
+    {
+        var accessor = new FakeCodexProcessAccessor([Process(100, 1, 100, "app", "ChatGPT.exe")]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.ExitResults[100] = true;
+
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            controller.ForceTerminateAsync([100], default));
+        Assert.Empty(accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_terminate_kills_each_issued_process_tree()
+    {
+        var accessor = new FakeCodexProcessAccessor(
+        [
+            Process(100, 1, 100, "app", "ChatGPT.exe"),
+            Process(101, 100, 101, "app", "resources", "codex.exe"),
+        ]);
+        accessor.ExitResults[100] = false;
+        accessor.ExitResults[101] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        await controller.ForceTerminateAsync([100, 101], default);
+
+        Assert.Equal([100, 101], accessor.KilledProcessIds);
+        Assert.All(accessor.KillEntireTreeValues, Assert.True);
+    }
+
+    [Fact]
+    public async Task Launch_uses_exact_apps_folder_request()
+    {
+        var launcher = new FakeAppsFolderLauncher();
+        var controller = Controller(new FakeCodexProcessAccessor([]), launcher);
 
         await controller.LaunchAsync(Package(), default);
 
-        Assert.Equal("explorer.exe", runner.LastRequest!.FileName);
-        Assert.Equal(["shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App"], runner.LastRequest.Arguments);
-        Assert.True(runner.LastRequest.Visible);
-        Assert.Equal(1, runner.VisibleCallCount);
+        Assert.Equal("explorer.exe", launcher.LastRequest!.FileName);
+        Assert.Equal(["shell:AppsFolder\\OpenAI.Codex_2p2nqsd0c76g0!App"], launcher.LastRequest.Arguments);
+        Assert.True(launcher.LastRequest.UseShellExecute);
+        Assert.Equal(1, launcher.StartCallCount);
     }
 
     [Fact]
-    public async Task Launch_reports_nonzero_explorer_exit_without_exposing_output()
+    public async Task Pre_cancelled_launch_does_not_start_explorer()
     {
-        const string rawError = "launch-secret";
-        var runner = new FakeProcessRunner
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+        var launcher = new FakeAppsFolderLauncher();
+        var controller = Controller(new FakeCodexProcessAccessor([]), launcher);
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            controller.LaunchAsync(Package(), cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.Equal(0, launcher.StartCallCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_activation_start_is_non_destructive()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var launcher = new FakeAppsFolderLauncher
         {
-            VisibleResult = new CommandResult(1, string.Empty, rawError),
+            OnStart = cancellationSource.Cancel,
         };
-        var controller = new CodexProcessController(new FakeCodexProcessAccessor([]), runner);
+        var controller = Controller(new FakeCodexProcessAccessor([]), launcher);
+
+        await controller.LaunchAsync(Package(), cancellationSource.Token);
+
+        Assert.Equal(1, launcher.StartCallCount);
+        Assert.True(cancellationSource.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task Launch_reports_expected_start_failure_with_fixed_message()
+    {
+        var launcher = new FakeAppsFolderLauncher { StartResult = false };
+        var controller = Controller(new FakeCodexProcessAccessor([]), launcher);
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             controller.LaunchAsync(Package(), default));
 
         Assert.Equal("Codex launch failed.", exception.Message);
-        Assert.DoesNotContain(rawError, exception.ToString(), StringComparison.Ordinal);
     }
+
+    private static CodexProcessController Controller(
+        FakeCodexProcessAccessor accessor,
+        FakeAppsFolderLauncher? launcher = null) =>
+        new(accessor, launcher ?? new FakeAppsFolderLauncher());
 
     private static CodexPackageInfo Package() => new(
         "OpenAI.Codex_2p2nqsd0c76g0",
@@ -274,15 +442,35 @@ public sealed class CodexProcessControllerTests
         Path.Combine(InstallLocation, "app", "ChatGPT.exe"),
         Path.Combine(InstallLocation, "app", "resources"));
 
-    private static CodexProcessEntry Process(int id, int parentId, params string[] pathParts) =>
-        new(id, parentId, Path.Combine([InstallLocation, .. pathParts]));
-
-    private sealed class FakeCodexProcessAccessor(IReadOnlyList<CodexProcessEntry> processes)
-        : ICodexProcessAccessor
+    private static CodexProcessEntry Process(
+        int id,
+        int parentId,
+        long creationTimeUtcTicks,
+        params string[] pathParts)
     {
+        var executablePath = pathParts.Length == 1 && Path.IsPathFullyQualified(pathParts[0])
+            ? pathParts[0]
+            : Path.Combine([InstallLocation, .. pathParts]);
+        return new CodexProcessEntry(
+            new CodexProcessIdentity(id, executablePath, creationTimeUtcTicks),
+            parentId);
+    }
+
+    private sealed class FakeCodexProcessAccessor : ICodexProcessAccessor
+    {
+        private readonly IReadOnlyList<CodexProcessEntry> _processes;
+
+        public FakeCodexProcessAccessor(IReadOnlyList<CodexProcessEntry> processes)
+        {
+            _processes = processes;
+            CurrentIdentities = processes.ToDictionary(process => process.Identity.Id, process => process.Identity);
+        }
+
         public List<int> ClosedProcessIds { get; } = [];
 
         public InvalidOperationException? CloseException { get; init; }
+
+        public Dictionary<int, CodexProcessIdentity> CurrentIdentities { get; }
 
         public int EnumerationCount { get; private set; }
 
@@ -290,7 +478,11 @@ public sealed class CodexProcessControllerTests
 
         public List<string> Events { get; } = [];
 
-        public List<(int ProcessId, bool EntireProcessTree)> KillCalls { get; } = [];
+        public List<bool> KillEntireTreeValues { get; } = [];
+
+        public List<int> KilledProcessIds { get; } = [];
+
+        public Action<CodexProcessIdentity>? OnClose { get; set; }
 
         public List<int> WaitedProcessIds { get; } = [];
 
@@ -299,56 +491,78 @@ public sealed class CodexProcessControllerTests
         public IReadOnlyList<CodexProcessEntry> GetProcesses()
         {
             EnumerationCount++;
-            return processes;
+            return _processes;
         }
 
-        public bool CloseMainWindow(int processId)
+        public bool CloseMainWindow(CodexProcessIdentity expectedIdentity)
         {
             if (CloseException is not null)
             {
                 throw CloseException;
             }
 
-            ClosedProcessIds.Add(processId);
-            Events.Add($"close:{processId}");
+            if (!Matches(expectedIdentity))
+            {
+                return false;
+            }
+
+            ClosedProcessIds.Add(expectedIdentity.Id);
+            Events.Add($"close:{expectedIdentity.Id}");
+            OnClose?.Invoke(expectedIdentity);
             return true;
         }
 
         public Task<bool> WaitForExitAsync(
-            int processId,
+            CodexProcessIdentity expectedIdentity,
             TimeSpan timeout,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            WaitedProcessIds.Add(processId);
+            WaitedProcessIds.Add(expectedIdentity.Id);
             WaitTimeouts.Add(timeout);
-            Events.Add($"wait:{processId}");
-            return Task.FromResult(!ExitResults.TryGetValue(processId, out var exited) || exited);
+            Events.Add($"wait:{expectedIdentity.Id}");
+            if (!Matches(expectedIdentity))
+            {
+                return Task.FromResult(true);
+            }
+
+            return Task.FromResult(
+                !ExitResults.TryGetValue(expectedIdentity.Id, out var exited) || exited);
         }
 
-        public void Kill(int processId, bool entireProcessTree)
+        public bool Kill(CodexProcessIdentity expectedIdentity, bool entireProcessTree)
         {
-            KillCalls.Add((processId, entireProcessTree));
+            if (!Matches(expectedIdentity))
+            {
+                return false;
+            }
+
+            KilledProcessIds.Add(expectedIdentity.Id);
+            KillEntireTreeValues.Add(entireProcessTree);
+            return true;
         }
+
+        private bool Matches(CodexProcessIdentity expectedIdentity) =>
+            CurrentIdentities.TryGetValue(expectedIdentity.Id, out var currentIdentity) &&
+            currentIdentity == expectedIdentity;
     }
 
-    private sealed class FakeProcessRunner : IProcessRunner
+    private sealed class FakeAppsFolderLauncher : IAppsFolderLauncher
     {
-        public ProcessRequest? LastRequest { get; private set; }
+        public AppsFolderLaunchRequest? LastRequest { get; private set; }
 
-        public int VisibleCallCount { get; private set; }
+        public Action? OnStart { get; init; }
 
-        public CommandResult VisibleResult { get; init; } = new(0, string.Empty, string.Empty);
+        public int StartCallCount { get; private set; }
 
-        public Task<CommandResult> RunCapturedAsync(ProcessRequest request, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+        public bool StartResult { get; init; } = true;
 
-        public Task<CommandResult> RunVisibleAsync(ProcessRequest request, CancellationToken cancellationToken)
+        public bool Start(AppsFolderLaunchRequest request, CancellationToken cancellationToken)
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            StartCallCount++;
             LastRequest = request;
-            VisibleCallCount++;
-            return Task.FromResult(VisibleResult);
+            OnStart?.Invoke();
+            return StartResult;
         }
     }
 }

@@ -15,11 +15,16 @@ public sealed class CodexPackageService
     private const string InvalidOutputMessage = "The Codex package discovery output is invalid.";
     private const string DiscoveryScript = """
         $ErrorActionPreference = 'Stop'
-        $package = Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1
-        if ($null -eq $package) {
+        $packages = @(Get-AppxPackage -Name OpenAI.Codex)
+        if ($packages.Count -eq 0) {
             Write-Output 'null'
             exit 0
         }
+        if ($packages.Count -ne 1) {
+            [pscustomobject]@{ DiscoveryError = 'MultiplePackages' } | ConvertTo-Json -Compress
+            exit 0
+        }
+        $package = $packages[0]
         $manifest = Get-AppxPackageManifest -Package $package
         [pscustomobject]@{
             PackageFamilyName = [string]$package.PackageFamilyName
@@ -70,6 +75,16 @@ public sealed class CodexPackageService
         if (payload is null)
         {
             throw new InvalidOperationException("The Codex package is not installed.");
+        }
+
+        if (string.Equals(payload.DiscoveryError, "MultiplePackages", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("Multiple Codex packages are installed.");
+        }
+
+        if (payload.DiscoveryError is not null)
+        {
+            throw new InvalidDataException(InvalidOutputMessage);
         }
 
         if (payload.Applications is null ||
@@ -137,6 +152,8 @@ public sealed class CodexPackageService
 
     private sealed class PackagePayload
     {
+        public string? DiscoveryError { get; init; }
+
         public string? PackageFamilyName { get; init; }
 
         public string? InstallLocation { get; init; }

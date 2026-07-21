@@ -22,6 +22,7 @@ public sealed class AuthStateTransactionTests
         Assert.True(restored);
         Assert.Equal(originalAuth, File.ReadAllBytes(Path.Combine(home.Path, "auth.json")));
         Assert.Equal(originalRegistry, File.ReadAllBytes(Path.Combine(home.Path, "accounts", "registry.json")));
+        AssertNoTemporaryFiles(home.Path);
     }
 
     [Fact]
@@ -72,11 +73,61 @@ public sealed class AuthStateTransactionTests
             ReadException = new IOException(secret),
         };
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+        var exception = await Assert.ThrowsAsync<AuthStateCheckpointException>(
             () => AuthStateTransaction.CaptureAsync("home", fileSystem, default));
 
         Assert.Equal("Authentication state checkpoint failed.", exception.Message);
         Assert.DoesNotContain(secret, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Capture_unexpected_second_read_failure_clears_first_owned_buffer_before_rethrow()
+    {
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            Files =
+            {
+                ["home/auth.json"] = [1, 2, 3, 4],
+                ["home/accounts/registry.json"] = [5, 6, 7, 8],
+            },
+            SecondReadException = new UnexpectedTestException("unexpected-second-read"),
+        };
+
+        var exception = await Assert.ThrowsAsync<UnexpectedTestException>(
+            () => AuthStateTransaction.CaptureAsync("home", fileSystem, default));
+
+        Assert.Equal("unexpected-second-read", exception.Message);
+        Assert.NotNull(fileSystem.FirstReturnedBuffer);
+        Assert.All(fileSystem.FirstReturnedBuffer, value => Assert.Equal((byte)0, value));
+    }
+
+    [Fact]
+    public async Task Atomic_replace_failure_removes_temp_file_and_preserves_destination()
+    {
+        using var home = new TemporaryDirectory();
+        var authPath = Path.Combine(home.Path, "auth.json");
+        var registryPath = Path.Combine(home.Path, "accounts", "registry.json");
+        WriteBytes(home.Path, "auth.json", [1, 2]);
+        WriteBytes(home.Path, "accounts/registry.json", [3, 4]);
+        var fileSystem = new AuthStateFileSystem((source, destination) =>
+        {
+            if (string.Equals(destination, authPath, StringComparison.Ordinal))
+            {
+                throw new IOException("injected-move-failure");
+            }
+
+            File.Move(source, destination, overwrite: true);
+        });
+        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, fileSystem, default);
+        WriteBytes(home.Path, "auth.json", [9]);
+        WriteBytes(home.Path, "accounts/registry.json", [8]);
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.False(restored);
+        Assert.Equal([9], File.ReadAllBytes(authPath));
+        Assert.Equal([3, 4], File.ReadAllBytes(registryPath));
+        AssertNoTemporaryFiles(home.Path);
     }
 
     [Fact]
@@ -113,6 +164,9 @@ public sealed class AuthStateTransactionTests
         File.WriteAllBytes(path, bytes);
     }
 
+    private static void AssertNoTemporaryFiles(string home) =>
+        Assert.Empty(Directory.EnumerateFiles(home, ".*.tmp", SearchOption.AllDirectories));
+
     private sealed class FakeAuthStateFileSystem : IAuthStateFileSystem
     {
         public Dictionary<string, byte[]> Files { get; } = new(StringComparer.Ordinal);
@@ -121,18 +175,38 @@ public sealed class AuthStateTransactionTests
 
         public Exception? ReadException { get; init; }
 
+        public Exception? SecondReadException { get; init; }
+
+        public byte[]? FirstReturnedBuffer { get; private set; }
+
         public string? CorruptAfterRestorePath { get; set; }
 
         public Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _readCount++;
             if (ReadException is not null)
             {
                 throw ReadException;
             }
 
-            return Task.FromResult(
-                Files.TryGetValue(Normalize(path), out var bytes) ? bytes.ToArray() : null);
+            if (_readCount == 2 && SecondReadException is not null)
+            {
+                throw SecondReadException;
+            }
+
+            if (!Files.TryGetValue(Normalize(path), out var bytes))
+            {
+                return Task.FromResult<byte[]?>(null);
+            }
+
+            var returned = bytes.ToArray();
+            if (_readCount == 1)
+            {
+                FirstReturnedBuffer = returned;
+            }
+
+            return Task.FromResult<byte[]?>(returned);
         }
 
         public Task WriteAtomicallyAsync(
@@ -162,5 +236,9 @@ public sealed class AuthStateTransactionTests
         }
 
         private static string Normalize(string path) => path.Replace('\\', '/');
+
+        private int _readCount;
     }
+
+    private sealed class UnexpectedTestException(string message) : Exception(message);
 }

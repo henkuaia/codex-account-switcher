@@ -20,9 +20,11 @@ internal interface IAuthStateFileSystem
     Task DeleteIfExistsAsync(string path, CancellationToken cancellationToken);
 }
 
+internal sealed class AuthStateCheckpointException()
+    : InvalidOperationException("Authentication state checkpoint failed.");
+
 internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 {
-    private const string CheckpointFailureMessage = "Authentication state checkpoint failed.";
     private readonly string _authPath;
     private readonly string _registryPath;
     private readonly IAuthStateFileSystem _fileSystem;
@@ -63,30 +65,37 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 
         byte[]? authBytes = null;
         byte[]? registryBytes = null;
+        var ownershipTransferred = false;
         try
         {
             var authPath = Path.Combine(codexHome, "auth.json");
             var registryPath = Path.Combine(codexHome, "accounts", "registry.json");
             authBytes = await fileSystem.ReadAsync(authPath, cancellationToken);
             registryBytes = await fileSystem.ReadAsync(registryPath, cancellationToken);
-            return new AuthStateTransaction(
+            var transaction = new AuthStateTransaction(
                 authPath,
                 authBytes,
                 registryPath,
                 registryBytes,
                 fileSystem);
+            ownershipTransferred = true;
+            return transaction;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            Clear(authBytes);
-            Clear(registryBytes);
             throw;
         }
         catch (Exception exception) when (IsFileFailure(exception))
         {
-            Clear(authBytes);
-            Clear(registryBytes);
-            throw new InvalidOperationException(CheckpointFailureMessage);
+            throw new AuthStateCheckpointException();
+        }
+        finally
+        {
+            if (!ownershipTransferred)
+            {
+                Clear(authBytes);
+                Clear(registryBytes);
+            }
         }
     }
 
@@ -211,6 +220,16 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 
 internal sealed class AuthStateFileSystem : IAuthStateFileSystem
 {
+    private readonly Action<string, string> _replaceFile;
+
+    public AuthStateFileSystem()
+        : this(static (source, destination) => File.Move(source, destination, overwrite: true))
+    {
+    }
+
+    internal AuthStateFileSystem(Action<string, string> replaceFile) =>
+        _replaceFile = replaceFile ?? throw new ArgumentNullException(nameof(replaceFile));
+
     public async Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken)
     {
         byte[]? bytes = null;
@@ -274,7 +293,7 @@ internal sealed class AuthStateFileSystem : IAuthStateFileSystem
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            File.Move(temporaryPath, path, overwrite: true);
+            _replaceFile(temporaryPath, path);
         }
         finally
         {

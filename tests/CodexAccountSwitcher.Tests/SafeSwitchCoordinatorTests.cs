@@ -122,6 +122,45 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
+    public async Task Cancellation_thrown_after_close_side_effect_relaunches_without_checkpoint()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseCallback = cancellationSource.Cancel;
+        fixture.ProcessController.CloseException = new OperationCanceledException(cancellationSource.Token);
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(["close", "launch"], fixture.Operations);
+        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task Cancellation_thrown_during_force_relaunches_without_checkpoint()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41, 73]);
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+        fixture.ProcessController.ForceException = new OperationCanceledException(cancellationSource.Token);
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
+        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
     public async Task Cancellation_after_close_restores_and_launches_with_recovery_tokens()
     {
         using var cancellationSource = new CancellationTokenSource();
@@ -151,7 +190,7 @@ public sealed class SafeSwitchCoordinatorTests
         {
             CancelAfterClose = cancellationSource,
         };
-        fixture.ProcessController.LaunchException = new InvalidOperationException("raw launch detail");
+        fixture.ProcessController.LaunchException = new InvalidOperationException("Codex launch failed.");
 
         var result = await fixture.Coordinator.SwitchAsync(
             fixture.Target,
@@ -164,7 +203,6 @@ public sealed class SafeSwitchCoordinatorTests
             "Account switch was canceled after Codex closed. " +
             "The prior authentication state was restored, but Codex launch failed.",
             result.Message);
-        Assert.DoesNotContain("raw launch detail", result.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -190,14 +228,27 @@ public sealed class SafeSwitchCoordinatorTests
     public async Task Launch_failure_after_verified_switch_preserves_switch_success()
     {
         var fixture = new Fixture();
-        fixture.ProcessController.LaunchException = new InvalidOperationException("raw launch detail");
+        fixture.ProcessController.LaunchException = new InvalidOperationException("Codex launch failed.");
 
         var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
 
         Assert.True(result.Succeeded);
         Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account switch was verified, but Codex launch failed.", result.Message);
-        Assert.DoesNotContain("raw launch detail", result.Message, StringComparison.Ordinal);
+        Assert.Equal("launch", fixture.Operations[^1]);
+    }
+
+    [Fact]
+    public async Task Unexpected_launch_invalid_state_is_rethrown_after_verified_switch()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.LaunchException =
+            new InvalidOperationException("unexpected-launch-state");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-launch-state", exception.Message);
         Assert.Equal("launch", fixture.Operations[^1]);
     }
 
@@ -216,6 +267,96 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.DoesNotContain("raw auth json secret", result.Message, StringComparison.Ordinal);
         Assert.Equal("restore", fixture.Operations[^2]);
         Assert.Equal("launch", fixture.Operations[^1]);
+    }
+
+    [Fact]
+    public async Task Unexpected_close_error_relaunches_then_rethrows_original_exception()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseException = new UnexpectedTestException("unexpected-close");
+
+        var exception = await Assert.ThrowsAsync<UnexpectedTestException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-close", exception.Message);
+        Assert.Equal(["close", "launch"], fixture.Operations);
+        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task Unexpected_force_error_relaunches_then_rethrows_original_exception()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41]);
+        fixture.ProcessController.ForceException = new UnexpectedTestException("unexpected-force");
+
+        var exception = await Assert.ThrowsAsync<UnexpectedTestException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-force", exception.Message);
+        Assert.Equal(["close", "force:41", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unexpected_capture_error_relaunches_then_rethrows_original_exception()
+    {
+        var fixture = new Fixture
+        {
+            CaptureException = new InvalidOperationException("unexpected-capture"),
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-capture", exception.Message);
+        Assert.Equal(["close", "capture", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unexpected_helper_error_restores_and_launches_then_rethrows_original_exception()
+    {
+        var fixture = new Fixture
+        {
+            SwitchException = new InvalidOperationException("unexpected-helper"),
+        };
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-helper", exception.Message);
+        Assert.Equal("prior", fixture.AuthStateMarker);
+        Assert.Equal(["close", "capture", "switch:target", "restore", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unexpected_verification_error_restores_and_launches_then_rethrows_original_exception()
+    {
+        var fixture = new Fixture
+        {
+            VerificationException = new NullReferenceException("unexpected-verify"),
+        };
+
+        var exception = await Assert.ThrowsAsync<NullReferenceException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-verify", exception.Message);
+        Assert.Equal(["close", "capture", "switch:target", "reload", "restore", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unexpected_helper_error_is_preserved_when_restore_cannot_be_verified()
+    {
+        var fixture = new Fixture
+        {
+            SwitchException = new InvalidOperationException("unexpected-helper"),
+        };
+        fixture.Checkpoint.RestoreSucceeded = false;
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-helper", exception.Message);
+        Assert.Equal(["close", "capture", "switch:target", "restore"], fixture.Operations);
     }
 
     private sealed class Fixture
@@ -260,7 +401,11 @@ public sealed class SafeSwitchCoordinatorTests
 
         public CommandResult SwitchResult { get; init; } = new(0, string.Empty, string.Empty);
 
+        public Exception? SwitchException { get; init; }
+
         public Exception? VerificationException { get; init; }
+
+        public Exception? CaptureException { get; init; }
 
         public CancellationTokenSource? CancelAfterClose { get; init; }
 
@@ -279,6 +424,11 @@ public sealed class SafeSwitchCoordinatorTests
             Operations.Add($"switch:{selector}");
             cancellationToken.ThrowIfCancellationRequested();
             AuthStateMarker = "target-mutated";
+            if (SwitchException is not null)
+            {
+                throw SwitchException;
+            }
+
             return Task.FromResult(SwitchResult);
         }
 
@@ -308,6 +458,11 @@ public sealed class SafeSwitchCoordinatorTests
             Operations.Add("capture");
             CaptureToken = cancellationToken;
             cancellationToken.ThrowIfCancellationRequested();
+            if (CaptureException is not null)
+            {
+                throw CaptureException;
+            }
+
             return Task.FromResult<IAuthStateCheckpoint>(Checkpoint);
         }
     }
@@ -347,6 +502,14 @@ public sealed class SafeSwitchCoordinatorTests
 
         public Exception? LaunchException { get; set; }
 
+        public Exception? CloseException { get; set; }
+
+        public Exception? ForceException { get; set; }
+
+        public Action? CloseCallback { get; set; }
+
+        public Action? ForceCallback { get; set; }
+
         public Task<CloseResult> CloseAsync(
             CodexPackageInfo package,
             TimeSpan timeout,
@@ -356,6 +519,12 @@ public sealed class SafeSwitchCoordinatorTests
             operations.Add("close");
             CloseTimeout = timeout;
             afterClose();
+            CloseCallback?.Invoke();
+            if (CloseException is not null)
+            {
+                throw CloseException;
+            }
+
             return Task.FromResult(CloseResult);
         }
 
@@ -366,6 +535,12 @@ public sealed class SafeSwitchCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             ForcedProcessIds = processIds.ToArray();
             operations.Add($"force:{string.Join(',', processIds)}");
+            ForceCallback?.Invoke();
+            if (ForceException is not null)
+            {
+                throw ForceException;
+            }
+
             return Task.CompletedTask;
         }
 
@@ -381,4 +556,6 @@ public sealed class SafeSwitchCoordinatorTests
             return Task.CompletedTask;
         }
     }
+
+    private sealed class UnexpectedTestException(string message) : Exception(message);
 }

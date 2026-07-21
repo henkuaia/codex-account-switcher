@@ -1,4 +1,6 @@
 using System.IO;
+using System.ComponentModel;
+using System.Runtime.ExceptionServices;
 using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.Services;
@@ -20,6 +22,10 @@ public sealed class SafeSwitchCoordinator
         "Account switch was verified, but Codex launch failed.";
     private const string FailedLaunchFailureMessage =
         "The prior authentication state was restored, but Codex launch failed.";
+    private const string PreMutationFailureMessage =
+        "Account switch failed before authentication changed.";
+    private const string PreMutationLaunchFailureMessage =
+        "Account switch failed before authentication changed, and Codex launch failed.";
     private const string CancellationLaunchFailureMessage =
         "Account switch was canceled after Codex closed. " +
         "The prior authentication state was restored, but Codex launch failed.";
@@ -90,25 +96,35 @@ public sealed class SafeSwitchCoordinator
             return new SwitchResult(false, SelectorUnavailableMessage, true);
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        var closeResult = await _processController.CloseAsync(_package, CloseTimeout, cancellationToken);
-        if (!closeResult.AllExited)
-        {
-            await _processController.ForceTerminateAsync(
-                closeResult.RemainingProcessIds,
-                cancellationToken);
-        }
-
         IAuthStateCheckpoint? checkpoint = null;
         var result = new SwitchResult(false, SwitchFailedMessage, false);
+        var stage = SwitchStage.Close;
+        var recoveryResponsible = false;
         var restoreRequired = false;
         var launchAllowed = false;
+        var priorStateRestored = false;
+        ExceptionDispatchInfo? pendingException = null;
 
         try
         {
+            recoveryResponsible = true;
+            var closeResult = await _processController.CloseAsync(
+                _package,
+                CloseTimeout,
+                cancellationToken);
+            if (!closeResult.AllExited)
+            {
+                stage = SwitchStage.Force;
+                await _processController.ForceTerminateAsync(
+                    closeResult.RemainingProcessIds,
+                    cancellationToken);
+            }
+
+            stage = SwitchStage.Capture;
             checkpoint = await _captureAsync(_codexHome, CancellationToken.None);
             cancellationToken.ThrowIfCancellationRequested();
 
+            stage = SwitchStage.Switch;
             var commandResult = await _switchAsync(selector.Value!, cancellationToken);
             if (!commandResult.Succeeded)
             {
@@ -118,6 +134,7 @@ public sealed class SafeSwitchCoordinator
             else
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                stage = SwitchStage.Verify;
                 var registry = await _loadRegistryAsync(_codexHome, cancellationToken);
                 var authAccountId = await _readAuthAccountIdAsync(_codexHome, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -143,23 +160,48 @@ public sealed class SafeSwitchCoordinator
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            restoreRequired = true;
+            restoreRequired = checkpoint is not null;
+            launchAllowed = checkpoint is null && recoveryResponsible;
             result = new SwitchResult(false, CancellationMessage, false);
         }
-        catch (Exception)
+        catch (Exception exception) when (IsOperationalFailure(stage, exception))
         {
-            restoreRequired = true;
-            result = new SwitchResult(false, SwitchFailedMessage, false);
+            restoreRequired = checkpoint is not null;
+            launchAllowed = checkpoint is null && recoveryResponsible;
+            result = new SwitchResult(
+                false,
+                checkpoint is null ? PreMutationFailureMessage : SwitchFailedMessage,
+                false);
+        }
+        catch (Exception exception)
+        {
+            pendingException = ExceptionDispatchInfo.Capture(exception);
+            restoreRequired = checkpoint is not null;
+            launchAllowed = checkpoint is null && recoveryResponsible;
         }
         finally
         {
             if (restoreRequired)
             {
-                var restored = checkpoint is not null &&
-                    await RestoreWithoutCancellationAsync(checkpoint);
+                var restored = false;
+                try
+                {
+                    restored = checkpoint is not null &&
+                        await checkpoint.RestoreAndVerifyAsync(CancellationToken.None);
+                }
+                catch (Exception exception) when (IsOperationalRestoreFailure(exception))
+                {
+                    restored = false;
+                }
+                catch (Exception exception)
+                {
+                    pendingException ??= ExceptionDispatchInfo.Capture(exception);
+                }
+
                 if (restored)
                 {
                     launchAllowed = true;
+                    priorStateRestored = true;
                 }
                 else
                 {
@@ -168,7 +210,14 @@ public sealed class SafeSwitchCoordinator
                 }
             }
 
-            checkpoint?.Dispose();
+            try
+            {
+                checkpoint?.Dispose();
+            }
+            catch (Exception exception)
+            {
+                pendingException ??= ExceptionDispatchInfo.Capture(exception);
+            }
 
             if (launchAllowed)
             {
@@ -177,34 +226,56 @@ public sealed class SafeSwitchCoordinator
                     await _processController.LaunchAsync(_package, CancellationToken.None);
                     result = result with { LaunchSucceeded = true };
                 }
-                catch (Exception)
+                catch (Exception exception) when (IsOperationalLaunchFailure(exception))
                 {
-                    result = new SwitchResult(
-                        result.Succeeded,
-                        result.Succeeded
-                            ? SuccessfulLaunchFailureMessage
-                            : string.Equals(result.Message, CancellationMessage, StringComparison.Ordinal)
-                                ? CancellationLaunchFailureMessage
-                                : FailedLaunchFailureMessage,
-                        false);
+                    if (pendingException is null)
+                    {
+                        result = new SwitchResult(
+                            result.Succeeded,
+                            result.Succeeded
+                                ? SuccessfulLaunchFailureMessage
+                                : string.Equals(result.Message, CancellationMessage, StringComparison.Ordinal)
+                                    ? CancellationLaunchFailureMessage
+                                    : priorStateRestored
+                                        ? FailedLaunchFailureMessage
+                                        : PreMutationLaunchFailureMessage,
+                            false);
+                    }
+                }
+                catch (Exception exception)
+                {
+                    pendingException ??= ExceptionDispatchInfo.Capture(exception);
                 }
             }
         }
 
+        pendingException?.Throw();
         return result;
     }
 
-    private static async Task<bool> RestoreWithoutCancellationAsync(IAuthStateCheckpoint checkpoint)
+    private static bool IsOperationalFailure(SwitchStage stage, Exception exception) => stage switch
     {
-        try
-        {
-            return await checkpoint.RestoreAndVerifyAsync(CancellationToken.None);
-        }
-        catch (Exception)
-        {
-            return false;
-        }
-    }
+        SwitchStage.Close or SwitchStage.Force =>
+            exception is Win32Exception or IOException or UnauthorizedAccessException,
+        SwitchStage.Capture =>
+            exception is AuthStateCheckpointException or IOException or UnauthorizedAccessException,
+        SwitchStage.Switch =>
+            exception is Win32Exception or IOException or UnauthorizedAccessException,
+        SwitchStage.Verify =>
+            exception is InvalidDataException or IOException or UnauthorizedAccessException,
+        _ => false,
+    };
+
+    private static bool IsOperationalRestoreFailure(Exception exception) =>
+        exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException;
+
+    private static bool IsOperationalLaunchFailure(Exception exception) =>
+        exception is InvalidOperationException invalidOperationException &&
+            string.Equals(
+                invalidOperationException.Message,
+                "Codex launch failed.",
+                StringComparison.Ordinal) ||
+        exception is Win32Exception or IOException or UnauthorizedAccessException;
 
     private static async Task<string> ReadAuthAccountIdAsync(
         string codexHome,
@@ -233,5 +304,14 @@ public sealed class SafeSwitchCoordinator
     {
         ArgumentNullException.ThrowIfNull(accountRegistryService);
         return accountRegistryService.LoadAsync;
+    }
+
+    private enum SwitchStage
+    {
+        Close,
+        Force,
+        Capture,
+        Switch,
+        Verify,
     }
 }

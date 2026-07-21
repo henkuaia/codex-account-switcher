@@ -168,3 +168,139 @@ Result: exit `0`; `115/115` passed, `0` failed, `0` skipped.
   verification are outside the coordinator's locking authority. Such a mismatch is
   detected and routed through exact-byte recovery; an unverifiable recovery suppresses
   launch.
+
+## Review Fixes (2026-07-21)
+
+### Findings Addressed
+
+- Recovery responsibility now becomes active immediately before invoking
+  `CloseAsync`. Cancellation or unexpected failure from close/force therefore enters
+  non-cancelled launch cleanup even when no checkpoint exists yet.
+- Close/force cancellation after a simulated process side effect returns the accepted
+  structured cancellation result instead of rethrowing. It performs no checkpoint or
+  restore because the helper has not been invoked.
+- Routine results are limited to stage-specific operational exceptions. Unexpected
+  close, force, capture, helper, verification, restore, dispose, and launch exceptions
+  are captured with `ExceptionDispatchInfo`, cleanup runs, and the original exception
+  is rethrown with its type/message/stack preserved.
+- A dedicated `AuthStateCheckpointException` distinguishes the transaction's fixed
+  operational checkpoint failure from arbitrary `InvalidOperationException` internal
+  failures.
+- Launch recognizes only the process controller's defined fixed
+  `InvalidOperationException("Codex launch failed.")` plus OS/file failures as routine.
+  Other invalid launch state is rethrown.
+- Capture ownership transfer is explicit. A `finally` block zeroes every buffer read
+  before any exception unless ownership was successfully transferred to the returned
+  transaction.
+- The concrete filesystem has a narrow replace delegate for fault injection. Both
+  successful replacement and injected move failure tests assert that no
+  `.<name>.<guid>.tmp` file remains.
+
+### Review RED Evidence
+
+The first focused run after adding the review tests stopped at the expected missing
+fault-injection seam:
+
+```text
+CS1729: AuthStateFileSystem does not contain a constructor that takes 1 argument
+```
+
+After adding only that constructor/delegate seam, the focused command reached behavior:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter "FullyQualifiedName~AuthStateTransactionTests|FullyQualifiedName~SafeSwitchCoordinatorTests"
+```
+
+Result: exit `1`; `8` failed, `19` passed.
+
+The intended failures were:
+
+```text
+Cancellation_thrown_after_close_side_effect_relaunches_without_checkpoint
+Cancellation_thrown_during_force_relaunches_without_checkpoint
+Unexpected_close_error_relaunches_then_rethrows_original_exception
+Unexpected_force_error_relaunches_then_rethrows_original_exception
+Unexpected_helper_error_restores_and_launches_then_rethrows_original_exception
+Unexpected_verification_error_restores_and_launches_then_rethrows_original_exception
+Unexpected_helper_error_is_preserved_when_restore_cannot_be_verified
+Capture_unexpected_second_read_failure_clears_first_owned_buffer_before_rethrow
+```
+
+Observed causes matched the findings: close/force cancellation escaped, pre-checkpoint
+unexpected failures skipped launch, post-checkpoint unexpected failures were converted
+to results, and the retained first capture buffer still contained `[1,2,3,4]`.
+
+The capture-classification regression was then run separately. It failed because an
+arbitrary `InvalidOperationException("unexpected-capture")` was converted to a normal
+result instead of being rethrown after launch:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter FullyQualifiedName~Unexpected_capture_error_relaunches_then_rethrows_original_exception
+```
+
+The launch-classification regression likewise failed because arbitrary invalid launch
+state was treated as the defined operational launch failure:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter FullyQualifiedName~Unexpected_launch_invalid_state_is_rethrown_after_verified_switch
+```
+
+Both failures were corrected by the dedicated checkpoint exception and exact launch
+failure classification.
+
+### Review Focused GREEN
+
+Command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter "FullyQualifiedName~AuthStateTransactionTests|FullyQualifiedName~SafeSwitchCoordinatorTests"
+```
+
+Result: exit `0`; `29/29` passed, `0` failed, `0` skipped.
+
+The transaction class alone passed `7/7`; the coordinator class passed `22/22` in the
+combined final run.
+
+### Review Full Solution
+
+Command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test CodexAccountSwitcher.sln -c Debug --no-restore
+```
+
+Result: exit `0`; `126/126` passed, `0` failed, `0` skipped.
+
+`git diff --check` also passed before staging.
+
+### Review Self-review
+
+- The pre-close caller-token check remains before any process side effect. Recovery
+  responsibility is set synchronously immediately before the `CloseAsync` call.
+- Close/force cancellation with no checkpoint attempts exactly one launch with
+  `CancellationToken.None`; it does not read or rewrite auth files.
+- Cancellation after checkpoint capture still restores and pair-verifies prior bytes
+  before launch, preserving the accepted prior semantics.
+- `ExceptionDispatchInfo` is populated only for unexpected failures. Operational
+  filters are stage-specific: native/file close/force failures, the dedicated
+  checkpoint failure, native/file helper failures, local verification data/file
+  failures, restore file failures, and the controller's fixed launch failure.
+- Broad catches exist only to record an unexpected exception, continue required
+  cleanup, and rethrow afterward. No broad catch returns a routine `SwitchResult`.
+- If an unexpected helper/verification failure is pending and restore verification
+  fails, launch remains suppressed and the original unexpected exception is rethrown.
+  Cleanup failures do not replace an earlier pending exception.
+- A retained capture buffer is zeroed even when the second fake read throws an
+  unexpected exception. Successful ownership transfer leaves buffers intact only for
+  the transaction, whose existing dispose test proves later zeroing.
+- Injected auth replacement failure leaves the existing destination bytes unchanged,
+  still restores the registry independently, returns pair verification failure, and
+  leaves no transaction temp file. Successful replacement also leaves no temp file.
+- Tests continue to use only fakes and temporary directories. No live Codex process,
+  package, helper, AppsFolder activation, or `%USERPROFILE%\.codex` file was touched.
+
+### Review Residual Boundary
+
+- The same real-Windows durability and cross-file non-atomicity boundaries remain.
+  Fault injection covers managed write/replace cleanup and launch gating, not power
+  loss or native filesystem behavior outside the process.

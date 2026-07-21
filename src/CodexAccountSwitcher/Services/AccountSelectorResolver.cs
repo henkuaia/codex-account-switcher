@@ -15,12 +15,12 @@ public static class AccountSelectorResolver
 
     public static SelectorResolution Resolve(AccountRecord target, IReadOnlyList<AccountRecord> all)
     {
-        if (IsUnique(target.Alias, all, static account => account.Alias))
+        if (IsUnique(target, target.Alias, all, static account => account.Alias))
         {
             return SelectorResolution.Available(target.Alias);
         }
 
-        if (IsUnique(target.Email, all, static account => account.Email))
+        if (IsUnique(target, target.Email, all, static account => account.Email))
         {
             return SelectorResolution.Available(target.Email);
         }
@@ -29,9 +29,13 @@ public static class AccountSelectorResolver
     }
 
     private static bool IsUnique(
+        AccountRecord target,
         string value,
         IReadOnlyList<AccountRecord> accounts,
         Func<AccountRecord, string> selector) =>
         !string.IsNullOrEmpty(value) &&
-        accounts.Count(account => string.Equals(selector(account), value, StringComparison.OrdinalIgnoreCase)) == 1;
+        accounts.Count(account => string.Equals(selector(account), value, StringComparison.OrdinalIgnoreCase)) == 1 &&
+        accounts.Any(account =>
+            string.Equals(selector(account), value, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(account.AccountKey, target.AccountKey, StringComparison.Ordinal));
 }

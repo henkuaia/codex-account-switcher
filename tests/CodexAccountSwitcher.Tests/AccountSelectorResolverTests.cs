@@ -54,6 +54,30 @@ public sealed class AccountSelectorResolverTests
     }
 
     [Fact]
+    public void Alias_from_a_different_account_is_rejected_when_target_is_absent()
+    {
+        var target = Accounts.Record("key-1", "first@example.com", "main");
+        var other = Accounts.Record("key-2", "second@example.com", "main");
+
+        var result = AccountSelectorResolver.Resolve(target, [other]);
+
+        Assert.False(result.IsAvailable);
+        Assert.Null(result.Value);
+    }
+
+    [Fact]
+    public void Email_from_a_different_account_is_rejected_when_target_is_absent()
+    {
+        var target = Accounts.Record("key-1", "first@example.com");
+        var other = Accounts.Record("key-2", "first@example.com");
+
+        var result = AccountSelectorResolver.Resolve(target, [other]);
+
+        Assert.False(result.IsAvailable);
+        Assert.Null(result.Value);
+    }
+
+    [Fact]
     public void Matching_uses_case_insensitive_full_string_equality()
     {
         var target = Accounts.Record("key-1", "first@example.com", "main");

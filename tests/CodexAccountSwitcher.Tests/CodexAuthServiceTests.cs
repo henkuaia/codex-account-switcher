@@ -43,9 +43,9 @@ public sealed class CodexAuthServiceTests
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
         var service = new CodexAuthService(helperPath, directory.Path, runner);
-        var progress = new InlineProgress<ProcessOutputLine>(_ => { });
+        ProcessOutputHandler outputHandler = (_, _) => ValueTask.CompletedTask;
 
-        await service.LoginAsync(progress, default);
+        await service.LoginAsync(outputHandler, default);
 
         Assert.Equal(["login", "--device-auth"], runner.LastRequest!.Arguments);
         Assert.False(runner.LastRequest.Visible);
@@ -166,17 +166,12 @@ public sealed class CodexAuthServiceTests
 
         public Task<CommandResult> RunCapturedAsync(
             ProcessRequest request,
-            IProgress<ProcessOutputLine> progress,
+            ProcessOutputHandler outputHandler,
             CancellationToken cancellationToken)
         {
             LastRequest = request;
             StreamingCallCount++;
             return Task.FromResult(CapturedResult);
         }
-    }
-
-    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
-    {
-        public void Report(T value) => report(value);
     }
 }

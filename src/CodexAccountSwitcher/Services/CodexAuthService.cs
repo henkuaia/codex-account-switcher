@@ -28,19 +28,19 @@ public sealed class CodexAuthService
 
     public Task<CommandResult> LoginAsync(CancellationToken cancellationToken)
     {
-        return LoginAsyncCore(progress: null, cancellationToken);
+        return LoginAsyncCore(outputHandler: null, cancellationToken);
     }
 
     public Task<CommandResult> LoginAsync(
-        IProgress<ProcessOutputLine> progress,
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(progress);
-        return LoginAsyncCore(progress, cancellationToken);
+        ArgumentNullException.ThrowIfNull(outputHandler);
+        return LoginAsyncCore(outputHandler, cancellationToken);
     }
 
     private Task<CommandResult> LoginAsyncCore(
-        IProgress<ProcessOutputLine>? progress,
+        ProcessOutputHandler? outputHandler,
         CancellationToken cancellationToken)
     {
         if (!TryResolveCliDirectory(out var cliDirectory))
@@ -57,9 +57,9 @@ public sealed class CodexAuthService
             ["PATH"] = childPath,
         };
 
-        return progress is null
+        return outputHandler is null
             ? RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken)
-            : RunCapturedAsync(["login", "--device-auth"], environment, progress, cancellationToken);
+            : RunCapturedAsync(["login", "--device-auth"], environment, outputHandler, cancellationToken);
     }
 
     public async Task<CommandResult> RemoveAsync(CancellationToken cancellationToken)
@@ -97,7 +97,7 @@ public sealed class CodexAuthService
     private async Task<CommandResult> RunCapturedAsync(
         IReadOnlyList<string> arguments,
         IReadOnlyDictionary<string, string>? environment,
-        IProgress<ProcessOutputLine> progress,
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
         if (!TryResolveHelperPath(out var helperPath))
@@ -107,7 +107,7 @@ public sealed class CodexAuthService
 
         var result = await _processRunner.RunCapturedAsync(
             new ProcessRequest(helperPath, arguments, Environment: environment),
-            progress,
+            outputHandler,
             cancellationToken);
         return result with
         {

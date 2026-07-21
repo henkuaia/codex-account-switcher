@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading.Channels;
 using CodexAccountSwitcher.Services;
 
 namespace CodexAccountSwitcher.Tests;
@@ -6,45 +7,98 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class ProcessRunnerTests
 {
     [Fact]
-    public async Task Streaming_delivers_standard_output_before_process_exit_and_preserves_stream_identity()
+    public async Task Streaming_awaits_standard_output_handler_after_process_exit()
     {
-        var process = new FakeStartedProcess { WaitForExplicitExit = true };
-        process.StandardOutputLines.Enqueue("Open https://example.test/device and enter ABCD-EFGH");
-        process.StandardErrorLines.Enqueue("Waiting for authorization");
+        var process = new BlockingStartedProcess();
         var runner = new ProcessRunner(new FakeProcessFactory(process));
         var lines = new List<ProcessOutputLine>();
-        var outputDelivered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var progress = new InlineProgress<ProcessOutputLine>(line =>
+        var handlerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseHandler = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ProcessOutputHandler outputHandler = async (line, cancellationToken) =>
         {
             lines.Add(line);
             if (line.Stream == ProcessOutputStream.StandardOutput)
             {
-                outputDelivered.TrySetResult();
+                handlerStarted.TrySetResult();
+                await releaseHandler.Task.WaitAsync(cancellationToken);
             }
-        });
+        };
 
         var runTask = runner.RunCapturedAsync(
             new ProcessRequest("fake.exe", ["login"]),
-            progress,
+            outputHandler,
             CancellationToken.None);
 
-        await outputDelivered.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.False(runTask.IsCompleted);
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("Open https://example.test/device and enter ABCD-EFGH");
+        process.CompleteStandardOutput();
+        process.CompleteStandardError();
+        await handlerStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         process.AllowExit();
+        await Task.Yield();
+        Assert.False(runTask.IsCompleted);
+        releaseHandler.TrySetResult();
         var result = await runTask;
 
-        Assert.Contains(lines, line =>
-            line.Stream == ProcessOutputStream.StandardOutput
-            && line.Text == "Open https://example.test/device and enter ABCD-EFGH");
-        Assert.Contains(lines, line =>
-            line.Stream == ProcessOutputStream.StandardError
-            && line.Text == "Waiting for authorization");
+        Assert.Equal(
+            new ProcessOutputLine(
+                ProcessOutputStream.StandardOutput,
+                "Open https://example.test/device and enter ABCD-EFGH"),
+            Assert.Single(lines));
         Assert.Equal("Open https://example.test/device and enter ABCD-EFGH" + Environment.NewLine, result.StandardOutput);
-        Assert.Equal("Waiting for authorization" + Environment.NewLine, result.StandardError);
+        Assert.Empty(result.StandardError);
     }
 
     [Fact]
-    public async Task Streaming_redacts_each_line_before_delivery_and_final_result()
+    public async Task Streaming_preserves_within_stream_order_and_stream_identity_with_concurrent_pipes()
+    {
+        var process = new BlockingStartedProcess();
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        var lines = new List<ProcessOutputLine>();
+        var linesLock = new object();
+        ProcessOutputHandler outputHandler = async (line, _) =>
+        {
+            await Task.Yield();
+            lock (linesLock)
+            {
+                lines.Add(line);
+            }
+        };
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            outputHandler,
+            CancellationToken.None);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("stdout-1");
+        process.WriteStandardError("stderr-1");
+        process.WriteStandardOutput("stdout-2");
+        process.WriteStandardError("stderr-2");
+        process.WriteStandardOutput("stdout-3");
+        process.CompleteStandardOutput();
+        process.CompleteStandardError();
+        process.AllowExit();
+        var result = await runTask;
+
+        Assert.Equal(
+            ["stdout-1", "stdout-2", "stdout-3"],
+            lines.Where(line => line.Stream == ProcessOutputStream.StandardOutput).Select(line => line.Text));
+        Assert.Equal(
+            ["stderr-1", "stderr-2"],
+            lines.Where(line => line.Stream == ProcessOutputStream.StandardError).Select(line => line.Text));
+        Assert.Equal(
+            string.Join(Environment.NewLine, "stdout-1", "stdout-2", "stdout-3") + Environment.NewLine,
+            result.StandardOutput);
+        Assert.Equal(
+            string.Join(Environment.NewLine, "stderr-1", "stderr-2") + Environment.NewLine,
+            result.StandardError);
+    }
+
+    [Fact]
+    public async Task Streaming_redacts_each_line_before_awaited_delivery_and_final_result()
     {
         const string bearerSecret = "bearer-secret";
         const string tokenSecret = "token-secret";
@@ -53,10 +107,15 @@ public sealed class ProcessRunnerTests
         process.StandardErrorLines.Enqueue($"{{\"access_token\":\"{tokenSecret}\"}}");
         var runner = new ProcessRunner(new FakeProcessFactory(process));
         var lines = new List<ProcessOutputLine>();
+        ProcessOutputHandler outputHandler = (line, _) =>
+        {
+            lines.Add(line);
+            return ValueTask.CompletedTask;
+        };
 
         var result = await runner.RunCapturedAsync(
             new ProcessRequest("fake.exe", ["login"]),
-            new InlineProgress<ProcessOutputLine>(lines.Add),
+            outputHandler,
             CancellationToken.None);
 
         Assert.Equal(2, lines.Count);
@@ -76,42 +135,64 @@ public sealed class ProcessRunnerTests
     public async Task Streaming_cancellation_terminates_process_tree_waits_for_exit_and_rethrows_caller_token()
     {
         using var cancellationSource = new CancellationTokenSource();
-        var process = new FakeStartedProcess
-        {
-            OnStart = cancellationSource.Cancel,
-            WaitForExplicitExit = true,
-        };
+        var process = new BlockingStartedProcess();
         var runner = new ProcessRunner(new FakeProcessFactory(process));
+        ProcessOutputHandler outputHandler = (_, _) => ValueTask.CompletedTask;
 
-        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runner.RunCapturedAsync(
+        var runTask = runner.RunCapturedAsync(
             new ProcessRequest("fake.exe", ["login"]),
-            new InlineProgress<ProcessOutputLine>(_ => { }),
-            cancellationSource.Token));
+            outputHandler,
+            cancellationSource.Token);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        cancellationSource.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => runTask);
 
         Assert.Equal(cancellationSource.Token, exception.CancellationToken);
         Assert.True(process.KillCalled);
         Assert.True(process.KilledEntireProcessTree);
         Assert.Equal(cancellationSource.Token, process.WaitTokens[0]);
         Assert.Contains(process.WaitTokens, token => !token.CanBeCanceled);
+        Assert.True(process.StandardOutputReadCanceled.Task.IsCompleted);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
     }
 
     [Fact]
     public async Task Streaming_observer_failure_terminates_process_tree_waits_for_exit_and_propagates()
     {
-        var process = new FakeStartedProcess { WaitForExplicitExit = true };
-        process.StandardOutputLines.Enqueue("device code");
+        var process = new BlockingStartedProcess();
         var runner = new ProcessRunner(new FakeProcessFactory(process));
         var expected = new InvalidOperationException("observer failed");
+        var callbackCount = 0;
+        ProcessOutputHandler outputHandler = (line, _) =>
+        {
+            Interlocked.Increment(ref callbackCount);
+            return line.Stream == ProcessOutputStream.StandardOutput
+                ? ValueTask.FromException(expected)
+                : ValueTask.CompletedTask;
+        };
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runner.RunCapturedAsync(
+        var runTask = runner.RunCapturedAsync(
             new ProcessRequest("fake.exe", ["login"]),
-            new InlineProgress<ProcessOutputLine>(_ => throw expected),
-            CancellationToken.None));
+            outputHandler,
+            CancellationToken.None);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("device code");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runTask);
 
         Assert.Same(expected, exception);
         Assert.True(process.KillCalled);
         Assert.True(process.KilledEntireProcessTree);
         Assert.Contains(process.WaitTokens, token => !token.CanBeCanceled);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
+        var countAfterReturn = Volatile.Read(ref callbackCount);
+        await Task.Yield();
+        Assert.Equal(countAfterReturn, Volatile.Read(ref callbackCount));
     }
 
     [Fact]
@@ -120,15 +201,30 @@ public sealed class ProcessRunnerTests
         var legacyRunner = new LegacyProcessRunner();
         IProcessRunner runner = legacyRunner;
         var lines = new List<ProcessOutputLine>();
+        var firstDeliveryStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstDelivery = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ProcessOutputHandler outputHandler = async (line, cancellationToken) =>
+        {
+            lines.Add(line);
+            if (lines.Count == 1)
+            {
+                firstDeliveryStarted.TrySetResult();
+                await releaseFirstDelivery.Task.WaitAsync(cancellationToken);
+            }
+        };
 
         var runTask = runner.RunCapturedAsync(
             new ProcessRequest("fake.exe", ["login"]),
-            new InlineProgress<ProcessOutputLine>(lines.Add),
+            outputHandler,
             CancellationToken.None);
 
         Assert.Empty(lines);
         var expected = new CommandResult(0, "first" + Environment.NewLine + "second", "warning");
         legacyRunner.Complete(expected);
+        await firstDeliveryStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(runTask.IsCompleted);
+        Assert.Single(lines);
+        releaseFirstDelivery.TrySetResult();
         var result = await runTask;
 
         Assert.Same(expected, result);
@@ -208,7 +304,7 @@ public sealed class ProcessRunnerTests
         Assert.False(process.WaitTokens[1].CanBeCanceled);
     }
 
-    private sealed class FakeProcessFactory(FakeStartedProcess process) : IProcessFactory
+    private sealed class FakeProcessFactory(IStartedProcess process) : IProcessFactory
     {
         public ProcessStartInfo? StartInfo { get; private set; }
 
@@ -216,6 +312,115 @@ public sealed class ProcessRunnerTests
         {
             StartInfo = startInfo;
             return process;
+        }
+    }
+
+    private sealed class BlockingStartedProcess : IStartedProcess
+    {
+        private readonly Channel<string> _standardOutput = CreateChannel();
+        private readonly Channel<string> _standardError = CreateChannel();
+        private readonly TaskCompletionSource _exitSignal =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource StandardOutputReadStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource StandardErrorReadStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource StandardOutputReadCanceled { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource StandardErrorReadCanceled { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public List<CancellationToken> WaitTokens { get; } = [];
+
+        public bool HasExited { get; private set; }
+
+        public int ExitCode => 0;
+
+        public bool KillCalled { get; private set; }
+
+        public bool KilledEntireProcessTree { get; private set; }
+
+        public bool Start() => true;
+
+        public Task<string> ReadStandardOutputAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(string.Empty);
+
+        public Task<string> ReadStandardErrorAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(string.Empty);
+
+        public ValueTask<string?> ReadStandardOutputLineAsync(CancellationToken cancellationToken) =>
+            ReadLineAsync(
+                _standardOutput.Reader,
+                StandardOutputReadStarted,
+                StandardOutputReadCanceled,
+                cancellationToken);
+
+        public ValueTask<string?> ReadStandardErrorLineAsync(CancellationToken cancellationToken) =>
+            ReadLineAsync(
+                _standardError.Reader,
+                StandardErrorReadStarted,
+                StandardErrorReadCanceled,
+                cancellationToken);
+
+        public async Task WaitForExitAsync(CancellationToken cancellationToken)
+        {
+            WaitTokens.Add(cancellationToken);
+            await _exitSignal.Task.WaitAsync(cancellationToken);
+            HasExited = true;
+        }
+
+        public void Kill(bool entireProcessTree)
+        {
+            KillCalled = true;
+            KilledEntireProcessTree = entireProcessTree;
+            HasExited = true;
+            _exitSignal.TrySetResult();
+        }
+
+        public void WriteStandardOutput(string line) => _standardOutput.Writer.TryWrite(line);
+
+        public void WriteStandardError(string line) => _standardError.Writer.TryWrite(line);
+
+        public void CompleteStandardOutput() => _standardOutput.Writer.TryComplete();
+
+        public void CompleteStandardError() => _standardError.Writer.TryComplete();
+
+        public void AllowExit() => _exitSignal.TrySetResult();
+
+        public void Dispose()
+        {
+        }
+
+        private static Channel<string> CreateChannel() =>
+            Channel.CreateUnbounded<string>(new UnboundedChannelOptions
+            {
+                SingleReader = true,
+                SingleWriter = false,
+                AllowSynchronousContinuations = false,
+            });
+
+        private static async ValueTask<string?> ReadLineAsync(
+            ChannelReader<string> reader,
+            TaskCompletionSource readStarted,
+            TaskCompletionSource readCanceled,
+            CancellationToken cancellationToken)
+        {
+            readStarted.TrySetResult();
+            try
+            {
+                return await reader.WaitToReadAsync(cancellationToken) && reader.TryRead(out var line)
+                    ? line
+                    : null;
+            }
+            catch (OperationCanceledException)
+            {
+                readCanceled.TrySetResult();
+                throw;
+            }
         }
     }
 
@@ -324,8 +529,4 @@ public sealed class ProcessRunnerTests
         public void Complete(CommandResult result) => _completion.TrySetResult(result);
     }
 
-    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
-    {
-        public void Report(T value) => report(value);
-    }
 }

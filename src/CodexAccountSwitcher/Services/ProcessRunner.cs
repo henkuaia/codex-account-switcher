@@ -27,31 +27,44 @@ public enum ProcessOutputStream
 
 public sealed record ProcessOutputLine(ProcessOutputStream Stream, string Text);
 
+public delegate ValueTask ProcessOutputHandler(
+    ProcessOutputLine output,
+    CancellationToken cancellationToken);
+
 public interface IProcessRunner
 {
     Task<CommandResult> RunCapturedAsync(ProcessRequest request, CancellationToken cancellationToken);
 
     async Task<CommandResult> RunCapturedAsync(
         ProcessRequest request,
-        IProgress<ProcessOutputLine> progress,
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(progress);
+        ArgumentNullException.ThrowIfNull(outputHandler);
 
         var result = await RunCapturedAsync(request, cancellationToken);
-        ReportLines(result.StandardOutput, ProcessOutputStream.StandardOutput, progress);
-        ReportLines(result.StandardError, ProcessOutputStream.StandardError, progress);
+        await ReportLinesAsync(
+            result.StandardOutput,
+            ProcessOutputStream.StandardOutput,
+            outputHandler,
+            cancellationToken);
+        await ReportLinesAsync(
+            result.StandardError,
+            ProcessOutputStream.StandardError,
+            outputHandler,
+            cancellationToken);
         return result;
 
-        static void ReportLines(
+        static async ValueTask ReportLinesAsync(
             string text,
             ProcessOutputStream stream,
-            IProgress<ProcessOutputLine> progress)
+            ProcessOutputHandler outputHandler,
+            CancellationToken cancellationToken)
         {
             using var reader = new StringReader(text);
             while (reader.ReadLine() is { } line)
             {
-                progress.Report(new ProcessOutputLine(stream, line));
+                await outputHandler(new ProcessOutputLine(stream, line), cancellationToken);
             }
         }
     }
@@ -125,11 +138,11 @@ public sealed class ProcessRunner : IProcessRunner
 
     public async Task<CommandResult> RunCapturedAsync(
         ProcessRequest request,
-        IProgress<ProcessOutputLine> progress,
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        ArgumentNullException.ThrowIfNull(progress);
+        ArgumentNullException.ThrowIfNull(outputHandler);
 
         var startInfo = CreateStartInfo(request, useShellExecute: false);
         startInfo.CreateNoWindow = true;
@@ -143,22 +156,28 @@ public sealed class ProcessRunner : IProcessRunner
             throw new InvalidOperationException("The process did not start.");
         }
 
+        using var pumpCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var standardOutput = new StringBuilder();
         var standardError = new StringBuilder();
         var outputTask = PumpLinesAsync(
             process.ReadStandardOutputLineAsync,
             ProcessOutputStream.StandardOutput,
             standardOutput,
-            progress,
-            cancellationToken);
+            outputHandler,
+            pumpCancellationSource.Token);
         var errorTask = PumpLinesAsync(
             process.ReadStandardErrorLineAsync,
             ProcessOutputStream.StandardError,
             standardError,
-            progress,
-            cancellationToken);
+            outputHandler,
+            pumpCancellationSource.Token);
 
-        await WaitForExitAndPumpsAsync(process, outputTask, errorTask, cancellationToken);
+        await WaitForExitAndPumpsAsync(
+            process,
+            outputTask,
+            errorTask,
+            pumpCancellationSource,
+            cancellationToken);
         return new CommandResult(process.ExitCode, standardOutput.ToString(), standardError.ToString());
     }
 
@@ -199,14 +218,14 @@ public sealed class ProcessRunner : IProcessRunner
         Func<CancellationToken, ValueTask<string?>> readLineAsync,
         ProcessOutputStream stream,
         StringBuilder destination,
-        IProgress<ProcessOutputLine> progress,
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
         while (await readLineAsync(cancellationToken) is { } line)
         {
             var sanitizedLine = SensitiveTextRedactor.Redact(line, Array.Empty<string>());
             destination.AppendLine(sanitizedLine);
-            progress.Report(new ProcessOutputLine(stream, sanitizedLine));
+            await outputHandler(new ProcessOutputLine(stream, sanitizedLine), cancellationToken);
         }
     }
 
@@ -214,13 +233,15 @@ public sealed class ProcessRunner : IProcessRunner
         IStartedProcess process,
         Task outputTask,
         Task errorTask,
+        CancellationTokenSource pumpCancellationSource,
         CancellationToken cancellationToken)
     {
-        var waitTask = process.WaitForExitAsync(cancellationToken);
-        var pendingTasks = new List<Task> { waitTask, outputTask, errorTask };
+        Task? waitTask = null;
 
         try
         {
+            waitTask = process.WaitForExitAsync(cancellationToken);
+            var pendingTasks = new List<Task> { waitTask, outputTask, errorTask };
             while (pendingTasks.Count > 0)
             {
                 var completedTask = await Task.WhenAny(pendingTasks);
@@ -230,9 +251,42 @@ public sealed class ProcessRunner : IProcessRunner
         }
         catch
         {
-            await TerminateAndWaitForExitAsync(process);
+            try
+            {
+                pumpCancellationSource.Cancel();
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                await TerminateAndWaitForExitAsync(process);
+            }
+            catch
+            {
+            }
+
+            if (waitTask is not null)
+            {
+                await ObserveTaskAsync(waitTask);
+            }
+
+            await ObserveTaskAsync(outputTask);
+            await ObserveTaskAsync(errorTask);
             cancellationToken.ThrowIfCancellationRequested();
             throw;
+        }
+    }
+
+    private static async Task ObserveTaskAsync(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch
+        {
         }
     }
 

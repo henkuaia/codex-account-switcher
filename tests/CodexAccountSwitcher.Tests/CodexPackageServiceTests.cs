@@ -73,6 +73,23 @@ public sealed class CodexPackageServiceTests
     }
 
     [Fact]
+    public async Task Discover_rejects_zero_manifest_applications()
+    {
+        var output = $$"""
+            {
+              "PackageFamilyName": "OpenAI.Codex_2p2nqsd0c76g0",
+              "InstallLocation": "{{JsonInstallLocation()}}",
+              "Applications": []
+            }
+            """;
+        var service = CreateService(output);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => service.DiscoverAsync(default));
+
+        Assert.Equal("The Codex package manifest must contain exactly one application.", exception.Message);
+    }
+
+    [Fact]
     public async Task Discover_rejects_multiple_installed_packages_without_exposing_output()
     {
         const string rawError = "MultiplePackages";
@@ -564,5 +581,128 @@ public sealed class CodexProcessControllerTests
             OnStart?.Invoke();
             return StartResult;
         }
+    }
+}
+
+public sealed class SystemCodexProcessAccessorTests
+{
+    private static readonly CodexProcessIdentity ExpectedIdentity = new(
+        100,
+        @"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__family\app\ChatGPT.exe",
+        1234);
+
+    [Fact]
+    public void Close_uses_one_retained_handle_for_identity_action_and_disposal()
+    {
+        var events = new List<string>();
+        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events);
+        var factory = new FakeSystemProcessHandleFactory(handle, events);
+        var accessor = new SystemCodexProcessAccessor(factory);
+
+        var closed = accessor.CloseMainWindow(ExpectedIdentity);
+
+        Assert.True(closed);
+        Assert.Equal(1, factory.OpenCount);
+        Assert.Equal(["open", "identity", "close", "dispose"], events);
+    }
+
+    [Fact]
+    public async Task Wait_uses_one_retained_handle_for_identity_action_and_disposal()
+    {
+        var events = new List<string>();
+        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events) { WaitResult = true };
+        var factory = new FakeSystemProcessHandleFactory(handle, events);
+        var accessor = new SystemCodexProcessAccessor(factory);
+
+        var exited = await accessor.WaitForExitAsync(ExpectedIdentity, TimeSpan.FromSeconds(1), default);
+
+        Assert.True(exited);
+        Assert.Equal(1, factory.OpenCount);
+        Assert.Equal(["open", "identity", "wait", "dispose"], events);
+    }
+
+    [Fact]
+    public void Kill_uses_one_retained_handle_for_identity_action_and_disposal()
+    {
+        var events = new List<string>();
+        var handle = new FakeSystemProcessHandle(ExpectedIdentity, events);
+        var factory = new FakeSystemProcessHandleFactory(handle, events);
+        var accessor = new SystemCodexProcessAccessor(factory);
+
+        var killed = accessor.Kill(ExpectedIdentity, entireProcessTree: true);
+
+        Assert.True(killed);
+        Assert.Equal(1, factory.OpenCount);
+        Assert.True(handle.KilledEntireProcessTree);
+        Assert.Equal(["open", "identity", "kill", "dispose"], events);
+    }
+
+    [Fact]
+    public void Identity_mismatch_disposes_retained_handle_without_action()
+    {
+        var events = new List<string>();
+        var reusedIdentity = ExpectedIdentity with { CreationTimeUtcTicks = 5678 };
+        var handle = new FakeSystemProcessHandle(reusedIdentity, events);
+        var factory = new FakeSystemProcessHandleFactory(handle, events);
+        var accessor = new SystemCodexProcessAccessor(factory);
+
+        var closed = accessor.CloseMainWindow(ExpectedIdentity);
+
+        Assert.False(closed);
+        Assert.Equal(1, factory.OpenCount);
+        Assert.Equal(["open", "identity", "dispose"], events);
+    }
+
+    private sealed class FakeSystemProcessHandleFactory(
+        ISystemProcessHandle handle,
+        List<string> events) : ISystemProcessHandleFactory
+    {
+        public int OpenCount { get; private set; }
+
+        public ISystemProcessHandle? TryOpen(int processId)
+        {
+            OpenCount++;
+            events.Add("open");
+            Assert.Equal(ExpectedIdentity.Id, processId);
+            return handle;
+        }
+    }
+
+    private sealed class FakeSystemProcessHandle(
+        CodexProcessIdentity identity,
+        List<string> events) : ISystemProcessHandle
+    {
+        public bool KilledEntireProcessTree { get; private set; }
+
+        public bool WaitResult { get; init; }
+
+        public bool TryGetIdentity(out CodexProcessIdentity processIdentity)
+        {
+            events.Add("identity");
+            processIdentity = identity;
+            return true;
+        }
+
+        public bool CloseMainWindow()
+        {
+            events.Add("close");
+            return true;
+        }
+
+        public Task<bool> WaitForExitAsync(TimeSpan timeout, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            events.Add("wait");
+            return Task.FromResult(WaitResult);
+        }
+
+        public bool Kill(bool entireProcessTree)
+        {
+            events.Add("kill");
+            KilledEntireProcessTree = entireProcessTree;
+            return true;
+        }
+
+        public void Dispose() => events.Add("dispose");
     }
 }

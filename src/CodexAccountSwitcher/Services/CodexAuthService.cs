@@ -28,6 +28,21 @@ public sealed class CodexAuthService
 
     public Task<CommandResult> LoginAsync(CancellationToken cancellationToken)
     {
+        return LoginAsyncCore(progress: null, cancellationToken);
+    }
+
+    public Task<CommandResult> LoginAsync(
+        IProgress<ProcessOutputLine> progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(progress);
+        return LoginAsyncCore(progress, cancellationToken);
+    }
+
+    private Task<CommandResult> LoginAsyncCore(
+        IProgress<ProcessOutputLine>? progress,
+        CancellationToken cancellationToken)
+    {
         if (!TryResolveCliDirectory(out var cliDirectory))
         {
             return Task.FromResult(CommandResult.Failed("The Codex CLI directory is unavailable."));
@@ -42,7 +57,9 @@ public sealed class CodexAuthService
             ["PATH"] = childPath,
         };
 
-        return RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken);
+        return progress is null
+            ? RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken)
+            : RunCapturedAsync(["login", "--device-auth"], environment, progress, cancellationToken);
     }
 
     public async Task<CommandResult> RemoveAsync(CancellationToken cancellationToken)
@@ -69,6 +86,28 @@ public sealed class CodexAuthService
 
         var result = await _processRunner.RunCapturedAsync(
             new ProcessRequest(helperPath, arguments, Environment: environment),
+            cancellationToken);
+        return result with
+        {
+            StandardOutput = SensitiveTextRedactor.Redact(result.StandardOutput, Array.Empty<string>()),
+            StandardError = SensitiveTextRedactor.Redact(result.StandardError, Array.Empty<string>()),
+        };
+    }
+
+    private async Task<CommandResult> RunCapturedAsync(
+        IReadOnlyList<string> arguments,
+        IReadOnlyDictionary<string, string>? environment,
+        IProgress<ProcessOutputLine> progress,
+        CancellationToken cancellationToken)
+    {
+        if (!TryResolveHelperPath(out var helperPath))
+        {
+            return CommandResult.Failed("The codex-auth helper is unavailable.");
+        }
+
+        var result = await _processRunner.RunCapturedAsync(
+            new ProcessRequest(helperPath, arguments, Environment: environment),
+            progress,
             cancellationToken);
         return result with
         {

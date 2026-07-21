@@ -16,6 +16,8 @@ public sealed class CodexAuthServiceTests
 
         Assert.Equal(["switch", "main"], runner.LastRequest!.Arguments);
         Assert.False(runner.LastRequest.Visible);
+        Assert.Equal(1, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
     }
 
     [Fact]
@@ -30,6 +32,25 @@ public sealed class CodexAuthServiceTests
 
         Assert.Equal(["login", "--device-auth"], runner.LastRequest!.Arguments);
         Assert.False(runner.LastRequest.Visible);
+        Assert.Equal(1, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
+    }
+
+    [Fact]
+    public async Task Streaming_login_uses_streaming_overload_and_exact_stable_command_arguments()
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var progress = new InlineProgress<ProcessOutputLine>(_ => { });
+
+        await service.LoginAsync(progress, default);
+
+        Assert.Equal(["login", "--device-auth"], runner.LastRequest!.Arguments);
+        Assert.False(runner.LastRequest.Visible);
+        Assert.Equal(0, runner.CapturedCallCount);
+        Assert.Equal(1, runner.StreamingCallCount);
     }
 
     [Fact]
@@ -44,6 +65,8 @@ public sealed class CodexAuthServiceTests
 
         Assert.Equal(["remove"], runner.LastRequest!.Arguments);
         Assert.True(runner.LastRequest.Visible);
+        Assert.Equal(0, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
         Assert.Equal(1, runner.VisibleCallCount);
     }
 
@@ -125,6 +148,8 @@ public sealed class CodexAuthServiceTests
 
         public int VisibleCallCount { get; private set; }
 
+        public int StreamingCallCount { get; private set; }
+
         public Task<CommandResult> RunCapturedAsync(ProcessRequest request, CancellationToken cancellationToken)
         {
             LastRequest = request;
@@ -138,5 +163,20 @@ public sealed class CodexAuthServiceTests
             VisibleCallCount++;
             return Task.FromResult(new CommandResult(0, string.Empty, string.Empty));
         }
+
+        public Task<CommandResult> RunCapturedAsync(
+            ProcessRequest request,
+            IProgress<ProcessOutputLine> progress,
+            CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            StreamingCallCount++;
+            return Task.FromResult(CapturedResult);
+        }
+    }
+
+    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
+    {
+        public void Report(T value) => report(value);
     }
 }

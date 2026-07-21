@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.IO;
+using System.Text;
 using CodexAccountSwitcher.Security;
 
 namespace CodexAccountSwitcher.Services;
@@ -17,9 +19,42 @@ public sealed record CommandResult(int ExitCode, string StandardOutput, string S
     public static CommandResult Failed(string error) => new(1, string.Empty, error);
 }
 
+public enum ProcessOutputStream
+{
+    StandardOutput,
+    StandardError,
+}
+
+public sealed record ProcessOutputLine(ProcessOutputStream Stream, string Text);
+
 public interface IProcessRunner
 {
     Task<CommandResult> RunCapturedAsync(ProcessRequest request, CancellationToken cancellationToken);
+
+    async Task<CommandResult> RunCapturedAsync(
+        ProcessRequest request,
+        IProgress<ProcessOutputLine> progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(progress);
+
+        var result = await RunCapturedAsync(request, cancellationToken);
+        ReportLines(result.StandardOutput, ProcessOutputStream.StandardOutput, progress);
+        ReportLines(result.StandardError, ProcessOutputStream.StandardError, progress);
+        return result;
+
+        static void ReportLines(
+            string text,
+            ProcessOutputStream stream,
+            IProgress<ProcessOutputLine> progress)
+        {
+            using var reader = new StringReader(text);
+            while (reader.ReadLine() is { } line)
+            {
+                progress.Report(new ProcessOutputLine(stream, line));
+            }
+        }
+    }
 
     Task<CommandResult> RunVisibleAsync(ProcessRequest request, CancellationToken cancellationToken);
 }
@@ -40,6 +75,10 @@ internal interface IStartedProcess : IDisposable
     Task<string> ReadStandardOutputAsync(CancellationToken cancellationToken);
 
     Task<string> ReadStandardErrorAsync(CancellationToken cancellationToken);
+
+    ValueTask<string?> ReadStandardOutputLineAsync(CancellationToken cancellationToken);
+
+    ValueTask<string?> ReadStandardErrorLineAsync(CancellationToken cancellationToken);
 
     Task WaitForExitAsync(CancellationToken cancellationToken);
 
@@ -84,6 +123,45 @@ public sealed class ProcessRunner : IProcessRunner
             SensitiveTextRedactor.Redact(await errorTask, Array.Empty<string>()));
     }
 
+    public async Task<CommandResult> RunCapturedAsync(
+        ProcessRequest request,
+        IProgress<ProcessOutputLine> progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(progress);
+
+        var startInfo = CreateStartInfo(request, useShellExecute: false);
+        startInfo.CreateNoWindow = true;
+        startInfo.RedirectStandardOutput = true;
+        startInfo.RedirectStandardError = true;
+
+        using var process = _processFactory.Create(startInfo);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!process.Start())
+        {
+            throw new InvalidOperationException("The process did not start.");
+        }
+
+        var standardOutput = new StringBuilder();
+        var standardError = new StringBuilder();
+        var outputTask = PumpLinesAsync(
+            process.ReadStandardOutputLineAsync,
+            ProcessOutputStream.StandardOutput,
+            standardOutput,
+            progress,
+            cancellationToken);
+        var errorTask = PumpLinesAsync(
+            process.ReadStandardErrorLineAsync,
+            ProcessOutputStream.StandardError,
+            standardError,
+            progress,
+            cancellationToken);
+
+        await WaitForExitAndPumpsAsync(process, outputTask, errorTask, cancellationToken);
+        return new CommandResult(process.ExitCode, standardOutput.ToString(), standardError.ToString());
+    }
+
     public async Task<CommandResult> RunVisibleAsync(ProcessRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -112,20 +190,66 @@ public sealed class ProcessRunner : IProcessRunner
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            if (!process.HasExited)
-            {
-                try
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-                catch (InvalidOperationException) when (process.HasExited)
-                {
-                }
-            }
-
-            await process.WaitForExitAsync(CancellationToken.None);
+            await TerminateAndWaitForExitAsync(process);
             throw;
         }
+    }
+
+    private static async Task PumpLinesAsync(
+        Func<CancellationToken, ValueTask<string?>> readLineAsync,
+        ProcessOutputStream stream,
+        StringBuilder destination,
+        IProgress<ProcessOutputLine> progress,
+        CancellationToken cancellationToken)
+    {
+        while (await readLineAsync(cancellationToken) is { } line)
+        {
+            var sanitizedLine = SensitiveTextRedactor.Redact(line, Array.Empty<string>());
+            destination.AppendLine(sanitizedLine);
+            progress.Report(new ProcessOutputLine(stream, sanitizedLine));
+        }
+    }
+
+    private static async Task WaitForExitAndPumpsAsync(
+        IStartedProcess process,
+        Task outputTask,
+        Task errorTask,
+        CancellationToken cancellationToken)
+    {
+        var waitTask = process.WaitForExitAsync(cancellationToken);
+        var pendingTasks = new List<Task> { waitTask, outputTask, errorTask };
+
+        try
+        {
+            while (pendingTasks.Count > 0)
+            {
+                var completedTask = await Task.WhenAny(pendingTasks);
+                pendingTasks.Remove(completedTask);
+                await completedTask;
+            }
+        }
+        catch
+        {
+            await TerminateAndWaitForExitAsync(process);
+            cancellationToken.ThrowIfCancellationRequested();
+            throw;
+        }
+    }
+
+    private static async Task TerminateAndWaitForExitAsync(IStartedProcess process)
+    {
+        if (!process.HasExited)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (InvalidOperationException) when (process.HasExited)
+            {
+            }
+        }
+
+        await process.WaitForExitAsync(CancellationToken.None);
     }
 
     private static ProcessStartInfo CreateStartInfo(ProcessRequest request, bool useShellExecute)
@@ -182,6 +306,12 @@ public sealed class ProcessRunner : IProcessRunner
 
         public Task<string> ReadStandardErrorAsync(CancellationToken cancellationToken) =>
             _process.StandardError.ReadToEndAsync(cancellationToken);
+
+        public ValueTask<string?> ReadStandardOutputLineAsync(CancellationToken cancellationToken) =>
+            _process.StandardOutput.ReadLineAsync(cancellationToken);
+
+        public ValueTask<string?> ReadStandardErrorLineAsync(CancellationToken cancellationToken) =>
+            _process.StandardError.ReadLineAsync(cancellationToken);
 
         public Task WaitForExitAsync(CancellationToken cancellationToken) =>
             _process.WaitForExitAsync(cancellationToken);

@@ -69,7 +69,9 @@ public sealed class AccountRegistryServiceTests
               "active_email": "legacy@example.com",
               "accounts": [{
                 "email": "legacy@example.com",
-                "alias": "secondary"
+                "alias": "secondary",
+                "plan": "plus",
+                "auth_mode": "chatgpt"
               }]
             }
             """);
@@ -77,7 +79,7 @@ public sealed class AccountRegistryServiceTests
             {
               "tokens": {
                 "account_id": "{{accountId}}",
-                "id_token": "header.{{Base64UrlEncode($$"""{"sub":"{{userId}}","https://api.openai.com/auth.chatgpt_account_id":"{{accountId}}"}""")}}.signature"
+                "id_token": "{{LegacyIdToken("LEGACY@EXAMPLE.COM", accountId, "plus", userId)}}"
               }
             }
             """);
@@ -92,6 +94,75 @@ public sealed class AccountRegistryServiceTests
         Assert.Equal(userId, account.ChatGptUserId);
         Assert.Equal(email, account.Email);
         Assert.Equal("secondary", account.Alias);
+        Assert.Equal("plus", account.Plan);
+        Assert.Equal("chatgpt", account.AuthMode);
+    }
+
+    [Fact]
+    public async Task Valid_v2_registry_uses_fallback_user_id_claim()
+    {
+        using var home = new TemporaryDirectory();
+        const string email = "fallback@example.com";
+        const string accountId = "acct-fallback";
+        const string userId = "user-fallback";
+        home.Write("accounts/registry.json", """
+            {
+              "version": 2,
+              "active_email": "fallback@example.com",
+              "accounts": [{
+                "email": "fallback@example.com",
+                "alias": "fallback",
+                "plan": "free",
+                "auth_mode": "chatgpt"
+              }]
+            }
+            """);
+        home.Write($"accounts/{Base64UrlEncode(email)}.auth.json", $$"""
+            {
+              "tokens": {
+                "account_id": "{{accountId}}",
+                "id_token": "{{LegacyIdToken(email, accountId, "free", userId, useFallbackUserId: true)}}"
+              }
+            }
+            """);
+
+        var result = await new AccountRegistryService().LoadAsync(home.Path, default);
+
+        var account = Assert.Single(result.Accounts);
+        Assert.Equal($"{userId}::{accountId}", account.AccountKey);
+        Assert.Equal(userId, account.ChatGptUserId);
+    }
+
+    [Fact]
+    public async Task Valid_v2_registry_rejects_mismatched_token_email_without_exposing_it()
+    {
+        using var home = new TemporaryDirectory();
+        const string registryEmail = "registry@example.com";
+        const string tokenEmail = "token-email-secret@example.com";
+        home.Write("accounts/registry.json", """
+            {
+              "version": 2,
+              "accounts": [{
+                "email": "registry@example.com",
+                "alias": "mismatch",
+                "plan": "plus",
+                "auth_mode": "chatgpt"
+              }]
+            }
+            """);
+        home.Write($"accounts/{Base64UrlEncode(registryEmail)}.auth.json", $$"""
+            {
+              "tokens": {
+                "account_id": "acct-mismatch",
+                "id_token": "{{LegacyIdToken(tokenEmail, "acct-mismatch", "plus", "user-mismatch")}}"
+              }
+            }
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
+
+        Assert.DoesNotContain(tokenEmail, exception.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -165,4 +236,26 @@ public sealed class AccountRegistryServiceTests
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+
+    private static string LegacyIdToken(
+        string email,
+        string accountId,
+        string plan,
+        string userId,
+        bool useFallbackUserId = false)
+    {
+        var auth = new Dictionary<string, string>
+        {
+            ["chatgpt_account_id"] = accountId,
+            ["chatgpt_plan_type"] = plan,
+            [useFallbackUserId ? "user_id" : "chatgpt_user_id"] = userId,
+        };
+        var payload = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["email"] = email,
+            ["https://api.openai.com/auth"] = auth,
+        });
+
+        return $"header.{Base64UrlEncode(payload)}.signature";
+    }
 }

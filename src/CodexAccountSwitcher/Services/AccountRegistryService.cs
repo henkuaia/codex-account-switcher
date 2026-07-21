@@ -9,7 +9,7 @@ namespace CodexAccountSwitcher.Services;
 public sealed class AccountRegistryService
 {
     private const string RegistryRelativePath = "accounts/registry.json";
-    private const string ChatGptAccountIdClaim = "https://api.openai.com/auth.chatgpt_account_id";
+    private const string ChatGptAuthClaim = "https://api.openai.com/auth";
 
     public async Task<AccountRegistry> LoadAsync(string codexHome, CancellationToken cancellationToken)
     {
@@ -124,22 +124,26 @@ public sealed class AccountRegistryService
             }
 
             var claims = ParseIdToken(snapshot.Tokens.IdToken);
-            if (string.IsNullOrWhiteSpace(claims.Subject) ||
-                string.IsNullOrWhiteSpace(claims.ChatGptAccountId) ||
-                !string.Equals(snapshot.Tokens.AccountId, claims.ChatGptAccountId, StringComparison.Ordinal))
+            var userId = claims.Auth?.ChatGptUserId ?? claims.Auth?.UserId;
+            var accountId = claims.Auth?.ChatGptAccountId;
+            if (string.IsNullOrWhiteSpace(claims.Email) ||
+                string.IsNullOrWhiteSpace(userId) ||
+                string.IsNullOrWhiteSpace(accountId) ||
+                !string.Equals(NormalizeEmail(claims.Email), NormalizeEmail(account.Email), StringComparison.Ordinal) ||
+                !string.Equals(snapshot.Tokens.AccountId, accountId, StringComparison.Ordinal))
             {
                 throw new InvalidDataException("The account registry contains an invalid account.");
             }
 
             accounts.Add(new AccountRecord(
-                $"{claims.Subject}::{claims.ChatGptAccountId}",
-                claims.ChatGptAccountId,
-                claims.Subject,
+                $"{userId}::{accountId}",
+                accountId,
+                userId,
                 account.Email,
                 account.Alias ?? string.Empty,
                 null,
-                null,
-                null));
+                account.Plan,
+                account.AuthMode));
         }
 
         return accounts;
@@ -187,6 +191,8 @@ public sealed class AccountRegistryService
             .TrimEnd('=')
             .Replace('+', '-')
             .Replace('/', '_');
+
+    private static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
 
     private static byte[] Base64UrlDecode(string value)
     {
@@ -264,10 +270,25 @@ public sealed class AccountRegistryService
 
     private sealed class JwtClaimsDto
     {
-        [JsonPropertyName("sub")]
-        public string? Subject { get; init; }
+        [JsonPropertyName("email")]
+        public string? Email { get; init; }
 
-        [JsonPropertyName(ChatGptAccountIdClaim)]
+        [JsonPropertyName(ChatGptAuthClaim)]
+        public JwtAuthClaimsDto? Auth { get; init; }
+    }
+
+    private sealed class JwtAuthClaimsDto
+    {
+        [JsonPropertyName("chatgpt_account_id")]
         public string? ChatGptAccountId { get; init; }
+
+        [JsonPropertyName("chatgpt_plan_type")]
+        public string? ChatGptPlanType { get; init; }
+
+        [JsonPropertyName("chatgpt_user_id")]
+        public string? ChatGptUserId { get; init; }
+
+        [JsonPropertyName("user_id")]
+        public string? UserId { get; init; }
     }
 }

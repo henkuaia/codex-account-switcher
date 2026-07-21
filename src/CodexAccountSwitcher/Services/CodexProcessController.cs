@@ -8,7 +8,10 @@ using Microsoft.Win32.SafeHandles;
 
 namespace CodexAccountSwitcher.Services;
 
-public sealed record CloseResult(bool AllExited, IReadOnlyList<int> RemainingProcessIds);
+public sealed record CloseResult(bool AllExited, IReadOnlyList<int> RemainingProcessIds)
+{
+    public bool SideEffectsStarted { get; init; }
+}
 
 public sealed class CodexCloseCanceledException : OperationCanceledException
 {
@@ -22,6 +25,25 @@ public sealed class CodexCloseCanceledException : OperationCanceledException
         CancellationToken cancellationToken,
         OperationCanceledException? innerException)
         : base("Codex close was canceled.", innerException, cancellationToken) =>
+        SideEffectsStarted = sideEffectsStarted;
+
+    public bool SideEffectsStarted { get; }
+}
+
+public sealed class CodexForceTerminateCanceledException : OperationCanceledException
+{
+    public CodexForceTerminateCanceledException(
+        bool sideEffectsStarted,
+        CancellationToken cancellationToken)
+        : this(sideEffectsStarted, cancellationToken, null)
+    {
+    }
+
+    internal CodexForceTerminateCanceledException(
+        bool sideEffectsStarted,
+        CancellationToken cancellationToken,
+        OperationCanceledException? innerException)
+        : base("Codex force termination was canceled.", innerException, cancellationToken) =>
         SideEffectsStarted = sideEffectsStarted;
 
     public bool SideEffectsStarted { get; }
@@ -168,7 +190,10 @@ public sealed class CodexProcessController : ICodexProcessController
 
             return new CloseResult(
                 remainingTargets.Length == 0,
-                remainingTargets.Select(identity => identity.Id).ToArray());
+                remainingTargets.Select(identity => identity.Id).ToArray())
+            {
+                SideEffectsStarted = sideEffectsStarted,
+            };
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
@@ -191,10 +216,13 @@ public sealed class CodexProcessController : ICodexProcessController
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(processIds);
-        cancellationToken.ThrowIfCancellationRequested();
-        await _lifecycleGate.WaitAsync(cancellationToken);
+        var gateEntered = false;
+        var sideEffectsStarted = false;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            await _lifecycleGate.WaitAsync(cancellationToken);
+            gateEntered = true;
             var requestedTargets = new List<CodexProcessIdentity>(processIds.Count);
             var requestedProcessIds = new HashSet<int>();
             foreach (var processId in processIds)
@@ -234,12 +262,24 @@ public sealed class CodexProcessController : ICodexProcessController
             foreach (var identity in terminationTargets)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                _processAccessor.Kill(identity, entireProcessTree: true);
+                sideEffectsStarted |= _processAccessor.Kill(identity, entireProcessTree: true);
             }
+
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new CodexForceTerminateCanceledException(
+                sideEffectsStarted,
+                cancellationToken,
+                exception);
         }
         finally
         {
-            _lifecycleGate.Release();
+            if (gateEntered)
+            {
+                _lifecycleGate.Release();
+            }
         }
     }
 

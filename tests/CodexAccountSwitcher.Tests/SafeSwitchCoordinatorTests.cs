@@ -223,13 +223,37 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
-    public async Task Cancellation_thrown_during_force_relaunches_without_checkpoint()
+    public async Task Force_cancellation_without_close_or_force_side_effect_is_rethrown()
     {
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
         fixture.ProcessController.CloseResult = new CloseResult(false, [41, 73]);
         fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
-        fixture.ProcessController.ForceException = new OperationCanceledException(cancellationSource.Token);
+        fixture.ProcessController.ForceException =
+            new CodexForceTerminateCanceledException(sideEffectsStarted: false, cancellationSource.Token);
+
+        var exception = await Assert.ThrowsAsync<CodexForceTerminateCanceledException>(() =>
+            fixture.Coordinator.SwitchAsync(
+                fixture.Target,
+                fixture.Registry,
+                cancellationSource.Token));
+
+        Assert.False(exception.SideEffectsStarted);
+        Assert.Equal(["close", "force:41,73"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_with_close_side_effect_relaunches_even_before_first_kill()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41, 73])
+        {
+            SideEffectsStarted = true,
+        };
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+        fixture.ProcessController.ForceException =
+            new CodexForceTerminateCanceledException(sideEffectsStarted: false, cancellationSource.Token);
 
         var result = await fixture.Coordinator.SwitchAsync(
             fixture.Target,
@@ -238,11 +262,48 @@ public sealed class SafeSwitchCoordinatorTests
 
         Assert.False(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
-        Assert.Equal(
-            "Account switch was canceled before authentication changed. Codex was restarted.",
-            result.Message);
         Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
-        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_after_kill_relaunches_without_close_side_effect()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41, 73]);
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+        fixture.ProcessController.ForceException =
+            new CodexForceTerminateCanceledException(sideEffectsStarted: true, cancellationSource.Token);
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Cancellation_after_force_before_checkpoint_uses_close_side_effect_evidence()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41])
+        {
+            SideEffectsStarted = true,
+        };
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(["close", "force:41", "launch"], fixture.Operations);
     }
 
     [Fact]

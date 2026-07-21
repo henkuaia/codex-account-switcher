@@ -219,6 +219,7 @@ public sealed class CodexProcessControllerTests
         var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(30), default);
 
         Assert.False(result.AllExited);
+        Assert.True(result.SideEffectsStarted);
         Assert.Equal([101], result.RemainingProcessIds);
         Assert.Equal([100, 101, 102], accessor.ClosedProcessIds);
         Assert.Equal([100, 101, 102], accessor.WaitedProcessIds);
@@ -253,8 +254,17 @@ public sealed class CodexProcessControllerTests
         var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
 
         Assert.True(result.AllExited);
+        Assert.False(result.SideEffectsStarted);
         Assert.Empty(accessor.ClosedProcessIds);
         Assert.Empty(result.RemainingProcessIds);
+    }
+
+    [Fact]
+    public void Two_argument_close_result_defaults_side_effect_evidence_to_false()
+    {
+        var result = new CloseResult(true, []);
+
+        Assert.False(result.SideEffectsStarted);
     }
 
     [Fact]
@@ -378,6 +388,52 @@ public sealed class CodexProcessControllerTests
         Assert.Equal(enumerationCountAfterClose, accessor.EnumerationCount);
         await controller.ForceTerminateAsync([100, 101], default);
         Assert.Equal([100, 101], accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_before_first_kill_reports_no_side_effect()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var accessor = new FakeCodexProcessAccessor(
+        [
+            Process(100, 1, 100, "app", "ChatGPT.exe"),
+            Process(101, 100, 101, "app", "resources", "codex.exe"),
+        ]);
+        accessor.ExitResults[100] = false;
+        accessor.ExitResults[101] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnGetProcesses = cancellationSource.Cancel;
+
+        var exception = await Assert.ThrowsAsync<CodexForceTerminateCanceledException>(() =>
+            controller.ForceTerminateAsync([100, 101], cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.False(exception.SideEffectsStarted);
+        Assert.Empty(accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_after_one_successful_kill_reports_side_effect_started()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var accessor = new FakeCodexProcessAccessor(
+        [
+            Process(100, 1, 100, "app", "ChatGPT.exe"),
+            Process(101, 100, 101, "app", "resources", "codex.exe"),
+        ]);
+        accessor.ExitResults[100] = false;
+        accessor.ExitResults[101] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnKill = _ => cancellationSource.Cancel();
+
+        var exception = await Assert.ThrowsAsync<CodexForceTerminateCanceledException>(() =>
+            controller.ForceTerminateAsync([100, 101], cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.True(exception.SideEffectsStarted);
+        Assert.Equal([100], accessor.KilledProcessIds);
     }
 
     [Fact]
@@ -593,7 +649,9 @@ public sealed class CodexProcessControllerTests
 
         public Action<CodexProcessIdentity>? OnClose { get; set; }
 
-        public Action? OnGetProcesses { get; init; }
+        public Action? OnGetProcesses { get; set; }
+
+        public Action<CodexProcessIdentity>? OnKill { get; set; }
 
         public List<int> WaitedProcessIds { get; } = [];
 
@@ -661,6 +719,7 @@ public sealed class CodexProcessControllerTests
 
             KilledProcessIds.Add(expectedIdentity.Id);
             KillEntireTreeValues.Add(entireProcessTree);
+            OnKill?.Invoke(expectedIdentity);
             return true;
         }
 

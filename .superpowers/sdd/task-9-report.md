@@ -435,3 +435,103 @@ Result: exit `0`; `134/134` passed, `0` failed, `0` skipped.
 - The accuracy of `SideEffectsStarted` depends on the retained-handle native adapter's
   Boolean result, which is true only after a successful `WM_CLOSE` post. Real native
   window enumeration and message delivery remain a controlled integration boundary.
+
+## Final Authoritative Task 9 State (2026-07-21)
+
+This section supersedes every earlier changed-file list, behavior summary, test count,
+and completion statement in this report. Earlier sections remain only as chronological
+TDD and review evidence.
+
+### Final Changed Surface
+
+- `src/CodexAccountSwitcher/Services/CodexProcessController.cs`
+  - Includes the Task 8 retained-handle process identity, package-tree selection,
+    issued-target authorization, root ordering, `WM_CLOSE`, force termination, and
+    AppsFolder launch implementation.
+  - `CloseResult` preserves its two-argument constructor and now exposes init-only
+    `SideEffectsStarted`, defaulting to false for existing callers.
+  - Concrete close results set that property only from successful
+    `CloseMainWindow` Boolean returns.
+  - Added `CodexForceTerminateCanceledException`, preserving the caller token and
+    reporting whether a successful kill Boolean was observed.
+  - Force cancellation is wrapped across the initial check, gate wait, validation,
+    selection, and kill loop. The lifecycle gate is released only after acquisition,
+    and a final token check reports cancellation triggered by the last kill.
+- `src/CodexAccountSwitcher/Services/SafeSwitchCoordinator.cs`
+  - Combines close and force side-effect evidence for pre-authentication cancellation.
+  - Restarts only when at least one close or kill action was reported as issued.
+  - Rethrows cancellation without launch when both evidence flags are false.
+  - Checks caller cancellation after successful force and before checkpoint capture;
+    that post-return race uses close evidence only.
+- `src/CodexAccountSwitcher/Services/AuthStateTransaction.cs`
+  - Retains the Task 9 exact-byte checkpoint, restore, pair verification, buffer
+    clearing, and same-directory temporary replacement behavior described above.
+- `tests/CodexAccountSwitcher.Tests/CodexPackageServiceTests.cs`
+  - Includes the Task 8 concrete controller/native adapter tests for retained identity,
+    close timeout, issued authority, package descendants, PID reuse, ordering, handle
+    behavior, force termination, and AppsFolder launch.
+  - Adds close-result default/actual evidence tests and force cancellation tests before
+    the first kill and after one successful kill.
+- `tests/CodexAccountSwitcher.Tests/SafeSwitchCoordinatorTests.cs`
+  - Adds the four close-to-force boundary cases: no evidence, close-only evidence,
+    force-only evidence, and cancellation after force return before checkpoint.
+- `tests/CodexAccountSwitcher.Tests/AuthStateTransactionTests.cs`
+  - Retains the exact-byte restore, pair gating, cleanup, and buffer-zeroing coverage.
+- `.superpowers/sdd/task-9-report.md`
+  - Contains the chronological evidence plus this authoritative final state.
+
+### Final Boundary Semantics
+
+- A returned list of remaining process IDs is authority for force validation, not proof
+  that a close action was issued.
+- Close evidence becomes true only when the process accessor reports a successful close
+  action. Force evidence becomes true only when it reports a successful kill action.
+- `CodexForceTerminateCanceledException` is the concrete force cancellation contract.
+  Unexpected exceptions remain unchanged.
+- The coordinator performs non-cancelled restart recovery only when close evidence or
+  force evidence is true. With neither, the original cancellation is preserved and no
+  launch, checkpoint capture, helper call, auth write, or restore occurs.
+- Restart success and failure retain the fixed pre-authentication cancellation messages.
+- No public `ICodexProcessController` method signature, Task 8 identity check, retained
+  handle behavior, package-tree boundary, issued-target check, or checkpoint contract
+  was weakened.
+
+### Final RED Evidence
+
+Command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter "FullyQualifiedName~CodexProcessControllerTests|FullyQualifiedName~SafeSwitchCoordinatorTests|FullyQualifiedName~AuthStateTransactionTests"
+```
+
+Result: exit `1`. Compilation failed only on the intended missing contracts:
+
+```text
+CS1061: CloseResult does not contain a definition for SideEffectsStarted
+CS0246: CodexForceTerminateCanceledException could not be found
+```
+
+### Final Verification
+
+The focused command above then passed with exit `0`: `60/60` passed, `0` failed,
+`0` skipped.
+
+Full solution command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test CodexAccountSwitcher.sln -c Debug --no-restore
+```
+
+Result: exit `0`; `140/140` passed, `0` failed, `0` skipped.
+
+All tests used fakes or temporary directories. No live Codex process, Microsoft Store
+package, AppsFolder activation, `codex-auth` helper, package installation, or real auth
+file was accessed or modified.
+
+### Final Residual Boundary
+
+- Managed tests prove evidence propagation from accessor Boolean returns and coordinator
+  recovery decisions. They do not exercise real Windows window enumeration, `WM_CLOSE`
+  delivery, retained native process handles, `TerminateProcess`, AppsFolder activation,
+  power-loss durability, or cross-file atomicity. Those remain controlled native/manual
+  integration boundaries.

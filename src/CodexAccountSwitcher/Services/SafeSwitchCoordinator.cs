@@ -124,6 +124,7 @@ public sealed class SafeSwitchCoordinator
         var restoreRequired = false;
         var launchAllowed = false;
         var priorStateRestored = false;
+        var closeSideEffectsStarted = false;
         ExceptionDispatchInfo? pendingException = null;
 
         try
@@ -133,12 +134,14 @@ public sealed class SafeSwitchCoordinator
                 _package,
                 CloseTimeout,
                 cancellationToken);
+            closeSideEffectsStarted = closeResult.SideEffectsStarted;
             if (!closeResult.AllExited)
             {
                 stage = SwitchStage.Force;
                 await _processController.ForceTerminateAsync(
                     closeResult.RemainingProcessIds,
                     cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
             }
 
             stage = SwitchStage.Capture;
@@ -191,9 +194,23 @@ public sealed class SafeSwitchCoordinator
                 pendingException = ExceptionDispatchInfo.Capture(exception);
             }
         }
+        catch (CodexForceTerminateCanceledException exception)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            if (closeSideEffectsStarted || exception.SideEffectsStarted)
+            {
+                launchAllowed = true;
+                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+            }
+            else
+            {
+                pendingException = ExceptionDispatchInfo.Capture(exception);
+            }
+        }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
-            if (stage == SwitchStage.Close)
+            if (stage == SwitchStage.Close ||
+                (stage == SwitchStage.Force && checkpoint is null && !closeSideEffectsStarted))
             {
                 pendingException = ExceptionDispatchInfo.Capture(exception);
             }

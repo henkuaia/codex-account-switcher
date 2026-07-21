@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using CodexAccountSwitcher.Models;
@@ -72,7 +73,11 @@ public sealed class QuotaService
         {
             return Failure(account, "The quota refresh request timed out.", snapshot);
         }
-        catch (Exception)
+        catch (InvalidDataException)
+        {
+            return Failure(account, "The quota refresh request failed.", snapshot);
+        }
+        catch (HttpRequestException)
         {
             return Failure(account, "The quota refresh request failed.", snapshot);
         }

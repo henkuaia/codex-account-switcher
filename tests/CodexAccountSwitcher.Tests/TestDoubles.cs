@@ -1,4 +1,5 @@
 using CodexAccountSwitcher.Models;
+using System.Collections.Concurrent;
 using System.Net.Http;
 
 namespace CodexAccountSwitcher.Tests;
@@ -63,7 +64,7 @@ internal sealed class RecordingHttpMessageHandler : HttpMessageHandler
         _sendAsync = sendAsync;
     }
 
-    public List<HttpRequestMessage> Requests { get; } = [];
+    public ConcurrentQueue<HttpRequestMessage> Requests { get; } = [];
 
     public int MaximumActiveRequests => _maximumActiveRequests;
 
@@ -71,7 +72,7 @@ internal sealed class RecordingHttpMessageHandler : HttpMessageHandler
         HttpRequestMessage request,
         CancellationToken cancellationToken)
     {
-        Requests.Add(request);
+        Requests.Enqueue(request);
         var activeRequests = Interlocked.Increment(ref _activeRequests);
         UpdateMaximumActiveRequests(activeRequests);
 

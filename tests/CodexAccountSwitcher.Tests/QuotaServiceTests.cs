@@ -72,6 +72,22 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Refresh_account_propagates_unexpected_handler_failure()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) =>
+            Task.FromException<HttpResponseMessage>(new InvalidOperationException("unexpected-handler-failure")));
+        using var client = new HttpClient(handler);
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new QuotaService(client).RefreshAccountAsync(account, home.Path, default));
+
+        Assert.Equal("unexpected-handler-failure", exception.Message);
+    }
+
+    [Fact]
     public async Task Refresh_account_returns_structured_error_for_malformed_response()
     {
         using var home = new TemporaryDirectory();

@@ -1,0 +1,8 @@
+{
+  "name": "codex-auth",
+  "version": "0.2.10",
+  "platform": "Windows-X64",
+  "source": "https://github.com/Loongphy/codex-auth/releases/tag/v0.2.10",
+  "archive_sha256": "CDF2C4D9CC827C91C24EB4C032B9F6792F581B42808DF5DB167C39B255EA7108",
+  "executable_sha256": "7E8E79976FE6A106B200860738C81636D18C9EAAB0196F342C53FDAAA5791F11"
+}

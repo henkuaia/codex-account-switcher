@@ -1,1 +1,9 @@
 .worktrees/
+.tools/
+bin/
+obj/
+dist/
+TestResults/
+*.user
+*.suo
+vendor/codex-auth/*.zip

@@ -91,7 +91,43 @@ public sealed class SafeSwitchCoordinatorTests
 
         Assert.True(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
-        Assert.Empty(fixture.Operations);
+        Assert.Equal(["verify-auth"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Registry_active_target_with_mismatched_auth_runs_transactional_repair()
+    {
+        var fixture = new Fixture
+        {
+            AuthAccountIdBeforeSwitch = "wrong-account",
+        };
+        var activeRegistry = fixture.Registry with { ActiveAccountKey = fixture.Target.AccountKey };
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, activeRegistry, default);
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(
+            ["verify-auth", "close", "capture", "switch:target", "reload", "verify-auth", "launch"],
+            fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Registry_active_target_with_unreadable_auth_runs_transactional_repair()
+    {
+        var fixture = new Fixture
+        {
+            InitialAuthReadException = new InvalidDataException("invalid initial auth"),
+        };
+        var activeRegistry = fixture.Registry with { ActiveAccountKey = fixture.Target.AccountKey };
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, activeRegistry, default);
+
+        Assert.True(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(
+            ["verify-auth", "close", "capture", "switch:target", "reload", "verify-auth", "launch"],
+            fixture.Operations);
     }
 
     [Fact]
@@ -127,7 +163,8 @@ public sealed class SafeSwitchCoordinatorTests
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
         fixture.ProcessController.CloseCallback = cancellationSource.Cancel;
-        fixture.ProcessController.CloseException = new OperationCanceledException(cancellationSource.Token);
+        fixture.ProcessController.CloseException =
+            new CodexCloseCanceledException(sideEffectsStarted: true, cancellationSource.Token);
 
         var result = await fixture.Coordinator.SwitchAsync(
             fixture.Target,
@@ -136,8 +173,53 @@ public sealed class SafeSwitchCoordinatorTests
 
         Assert.False(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. Codex was restarted.",
+            result.Message);
         Assert.Equal(["close", "launch"], fixture.Operations);
         Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
+    public async Task Cancellation_before_close_side_effect_is_rethrown_without_launch()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseCallback = cancellationSource.Cancel;
+        fixture.ProcessController.CloseException =
+            new CodexCloseCanceledException(sideEffectsStarted: false, cancellationSource.Token);
+
+        var exception = await Assert.ThrowsAsync<CodexCloseCanceledException>(() =>
+            fixture.Coordinator.SwitchAsync(
+                fixture.Target,
+                fixture.Registry,
+                cancellationSource.Token));
+
+        Assert.False(exception.SideEffectsStarted);
+        Assert.Equal(["close"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Pre_mutation_cancellation_restart_failure_uses_fixed_message()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseCallback = cancellationSource.Cancel;
+        fixture.ProcessController.CloseException =
+            new CodexCloseCanceledException(sideEffectsStarted: true, cancellationSource.Token);
+        fixture.ProcessController.LaunchException = new CodexLaunchException();
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. Codex restart failed.",
+            result.Message);
+        Assert.Equal(["close", "launch"], fixture.Operations);
     }
 
     [Fact]
@@ -156,6 +238,9 @@ public sealed class SafeSwitchCoordinatorTests
 
         Assert.False(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. Codex was restarted.",
+            result.Message);
         Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
         Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
     }
@@ -190,7 +275,7 @@ public sealed class SafeSwitchCoordinatorTests
         {
             CancelAfterClose = cancellationSource,
         };
-        fixture.ProcessController.LaunchException = new InvalidOperationException("Codex launch failed.");
+        fixture.ProcessController.LaunchException = new CodexLaunchException();
 
         var result = await fixture.Coordinator.SwitchAsync(
             fixture.Target,
@@ -228,7 +313,7 @@ public sealed class SafeSwitchCoordinatorTests
     public async Task Launch_failure_after_verified_switch_preserves_switch_success()
     {
         var fixture = new Fixture();
-        fixture.ProcessController.LaunchException = new InvalidOperationException("Codex launch failed.");
+        fixture.ProcessController.LaunchException = new CodexLaunchException();
 
         var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
 
@@ -243,12 +328,12 @@ public sealed class SafeSwitchCoordinatorTests
     {
         var fixture = new Fixture();
         fixture.ProcessController.LaunchException =
-            new InvalidOperationException("unexpected-launch-state");
+            new InvalidOperationException("Codex launch failed.");
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(
             () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
 
-        Assert.Equal("unexpected-launch-state", exception.Message);
+        Assert.Equal("Codex launch failed.", exception.Message);
         Assert.Equal("launch", fixture.Operations[^1]);
     }
 
@@ -359,6 +444,38 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.Equal(["close", "capture", "switch:target", "restore"], fixture.Operations);
     }
 
+    [Fact]
+    public async Task Unexpected_restore_error_does_not_replace_original_helper_error()
+    {
+        var fixture = new Fixture
+        {
+            SwitchException = new InvalidOperationException("unexpected-helper"),
+        };
+        fixture.Checkpoint.RestoreException = new NullReferenceException("unexpected-restore");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-helper", exception.Message);
+        Assert.DoesNotContain("launch", fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unexpected_dispose_error_does_not_replace_original_and_safe_recovery_launches()
+    {
+        var fixture = new Fixture
+        {
+            SwitchException = new InvalidOperationException("unexpected-helper"),
+        };
+        fixture.Checkpoint.DisposeException = new NullReferenceException("unexpected-dispose");
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default));
+
+        Assert.Equal("unexpected-helper", exception.Message);
+        Assert.Equal("launch", fixture.Operations[^1]);
+    }
+
     private sealed class Fixture
     {
         private readonly CodexPackageInfo _package = new(
@@ -374,6 +491,7 @@ public sealed class SafeSwitchCoordinatorTests
             Target = Accounts.Record("target-key", "target@example.com", "target", "target-account");
             Registry = new AccountRegistry(3, Prior.AccountKey, [Prior, Target]);
             RegistryAfterSwitch = Registry with { ActiveAccountKey = Target.AccountKey };
+            AuthAccountIdBeforeSwitch = Target.ChatGptAccountId;
             AuthAccountIdAfterSwitch = Target.ChatGptAccountId;
             ProcessController = new FakeProcessController(Operations, () => CancelAfterClose?.Cancel());
             Checkpoint = new FakeCheckpoint(Operations, () => AuthStateMarker = "prior");
@@ -399,11 +517,15 @@ public sealed class SafeSwitchCoordinatorTests
 
         public string AuthAccountIdAfterSwitch { get; set; }
 
+        public string AuthAccountIdBeforeSwitch { get; init; }
+
         public CommandResult SwitchResult { get; init; } = new(0, string.Empty, string.Empty);
 
         public Exception? SwitchException { get; init; }
 
         public Exception? VerificationException { get; init; }
+
+        public Exception? InitialAuthReadException { get; init; }
 
         public Exception? CaptureException { get; init; }
 
@@ -423,6 +545,7 @@ public sealed class SafeSwitchCoordinatorTests
         {
             Operations.Add($"switch:{selector}");
             cancellationToken.ThrowIfCancellationRequested();
+            _switchStarted = true;
             AuthStateMarker = "target-mutated";
             if (SwitchException is not null)
             {
@@ -448,7 +571,18 @@ public sealed class SafeSwitchCoordinatorTests
         {
             Operations.Add("verify-auth");
             cancellationToken.ThrowIfCancellationRequested();
-            return Task.FromResult(AuthAccountIdAfterSwitch);
+            if (!_switchStarted && InitialAuthReadException is not null)
+            {
+                throw InitialAuthReadException;
+            }
+
+            if (_switchStarted && VerificationException is not null)
+            {
+                throw VerificationException;
+            }
+
+            return Task.FromResult(
+                _switchStarted ? AuthAccountIdAfterSwitch : AuthAccountIdBeforeSwitch);
         }
 
         private Task<IAuthStateCheckpoint> CaptureAsync(
@@ -465,6 +599,8 @@ public sealed class SafeSwitchCoordinatorTests
 
             return Task.FromResult<IAuthStateCheckpoint>(Checkpoint);
         }
+
+        private bool _switchStarted;
     }
 
     private sealed class FakeCheckpoint(
@@ -475,16 +611,29 @@ public sealed class SafeSwitchCoordinatorTests
 
         public CancellationToken RestoreToken { get; private set; }
 
+        public Exception? RestoreException { get; set; }
+
+        public Exception? DisposeException { get; set; }
+
         public Task<bool> RestoreAndVerifyAsync(CancellationToken cancellationToken)
         {
             operations.Add("restore");
             RestoreToken = cancellationToken;
+            if (RestoreException is not null)
+            {
+                throw RestoreException;
+            }
+
             restoreState();
             return Task.FromResult(RestoreSucceeded);
         }
 
         public void Dispose()
         {
+            if (DisposeException is not null)
+            {
+                throw DisposeException;
+            }
         }
     }
 

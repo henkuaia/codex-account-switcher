@@ -16,6 +16,8 @@ public sealed class SafeSwitchCoordinator
         "Account switch failed. The prior authentication state was restored.";
     private const string CancellationMessage =
         "Account switch was canceled after Codex closed. The prior authentication state was restored.";
+    private const string PreMutationCancellationMessage =
+        "Account switch was canceled before authentication changed. Codex was restarted.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
     private const string SuccessfulLaunchFailureMessage =
@@ -29,6 +31,8 @@ public sealed class SafeSwitchCoordinator
     private const string CancellationLaunchFailureMessage =
         "Account switch was canceled after Codex closed. " +
         "The prior authentication state was restored, but Codex launch failed.";
+    private const string PreMutationCancellationLaunchFailureMessage =
+        "Account switch was canceled before authentication changed. Codex restart failed.";
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(8);
 
     private readonly CodexPackageInfo _package;
@@ -87,7 +91,24 @@ public sealed class SafeSwitchCoordinator
 
         if (string.Equals(before.ActiveAccountKey, target.AccountKey, StringComparison.Ordinal))
         {
-            return new SwitchResult(true, AlreadyActiveMessage, true);
+            try
+            {
+                var activeAuthAccountId = await _readAuthAccountIdAsync(_codexHome, cancellationToken);
+                if (string.Equals(
+                    activeAuthAccountId,
+                    target.ChatGptAccountId,
+                    StringComparison.Ordinal))
+                {
+                    return new SwitchResult(true, AlreadyActiveMessage, true);
+                }
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (IsOperationalNoOpVerificationFailure(exception))
+            {
+            }
         }
 
         var selector = AccountSelectorResolver.Resolve(target, before.Accounts);
@@ -158,11 +179,33 @@ public sealed class SafeSwitchCoordinator
                 }
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch (CodexCloseCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
-            restoreRequired = checkpoint is not null;
-            launchAllowed = checkpoint is null && recoveryResponsible;
-            result = new SwitchResult(false, CancellationMessage, false);
+            if (exception.SideEffectsStarted)
+            {
+                launchAllowed = true;
+                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+            }
+            else
+            {
+                pendingException = ExceptionDispatchInfo.Capture(exception);
+            }
+        }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            if (stage == SwitchStage.Close)
+            {
+                pendingException = ExceptionDispatchInfo.Capture(exception);
+            }
+            else
+            {
+                restoreRequired = checkpoint is not null;
+                launchAllowed = checkpoint is null && recoveryResponsible;
+                result = new SwitchResult(
+                    false,
+                    checkpoint is null ? PreMutationCancellationMessage : CancellationMessage,
+                    false);
+            }
         }
         catch (Exception exception) when (IsOperationalFailure(stage, exception))
         {
@@ -234,6 +277,11 @@ public sealed class SafeSwitchCoordinator
                             result.Succeeded,
                             result.Succeeded
                                 ? SuccessfulLaunchFailureMessage
+                                : string.Equals(
+                                    result.Message,
+                                    PreMutationCancellationMessage,
+                                    StringComparison.Ordinal)
+                                    ? PreMutationCancellationLaunchFailureMessage
                                 : string.Equals(result.Message, CancellationMessage, StringComparison.Ordinal)
                                     ? CancellationLaunchFailureMessage
                                     : priorStateRestored
@@ -266,16 +314,14 @@ public sealed class SafeSwitchCoordinator
         _ => false,
     };
 
+    private static bool IsOperationalNoOpVerificationFailure(Exception exception) =>
+        exception is InvalidDataException or IOException or UnauthorizedAccessException;
+
     private static bool IsOperationalRestoreFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException;
 
     private static bool IsOperationalLaunchFailure(Exception exception) =>
-        exception is InvalidOperationException invalidOperationException &&
-            string.Equals(
-                invalidOperationException.Message,
-                "Codex launch failed.",
-                StringComparison.Ordinal) ||
-        exception is Win32Exception or IOException or UnauthorizedAccessException;
+        exception is CodexLaunchException or Win32Exception or IOException or UnauthorizedAccessException;
 
     private static async Task<string> ReadAuthAccountIdAsync(
         string codexHome,

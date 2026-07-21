@@ -298,11 +298,50 @@ public sealed class CodexProcessControllerTests
         var accessor = new FakeCodexProcessAccessor([]);
         var controller = Controller(accessor);
 
-        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+        var exception = await Assert.ThrowsAsync<CodexCloseCanceledException>(() =>
             controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), cancellationSource.Token));
 
         Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.False(exception.SideEffectsStarted);
         Assert.Equal(0, accessor.EnumerationCount);
+    }
+
+    [Fact]
+    public async Task Close_cancellation_before_first_close_action_reports_no_side_effect()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var accessor = new FakeCodexProcessAccessor(
+            [Process(100, 1, 100, "app", "ChatGPT.exe")])
+        {
+            OnGetProcesses = cancellationSource.Cancel,
+        };
+        var controller = Controller(accessor);
+
+        var exception = await Assert.ThrowsAsync<CodexCloseCanceledException>(() =>
+            controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.False(exception.SideEffectsStarted);
+        Assert.Empty(accessor.ClosedProcessIds);
+    }
+
+    [Fact]
+    public async Task Close_cancellation_after_close_action_reports_side_effect_started()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var accessor = new FakeCodexProcessAccessor(
+            [Process(100, 1, 100, "app", "ChatGPT.exe")])
+        {
+            OnClose = _ => cancellationSource.Cancel(),
+        };
+        var controller = Controller(accessor);
+
+        var exception = await Assert.ThrowsAsync<CodexCloseCanceledException>(() =>
+            controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.True(exception.SideEffectsStarted);
+        Assert.Equal([100], accessor.ClosedProcessIds);
     }
 
     [Fact]
@@ -494,7 +533,7 @@ public sealed class CodexProcessControllerTests
         var launcher = new FakeAppsFolderLauncher { StartResult = false };
         var controller = Controller(new FakeCodexProcessAccessor([]), launcher);
 
-        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var exception = await Assert.ThrowsAsync<CodexLaunchException>(() =>
             controller.LaunchAsync(Package(), default));
 
         Assert.Equal("Codex launch failed.", exception.Message);
@@ -554,6 +593,8 @@ public sealed class CodexProcessControllerTests
 
         public Action<CodexProcessIdentity>? OnClose { get; set; }
 
+        public Action? OnGetProcesses { get; init; }
+
         public List<int> WaitedProcessIds { get; } = [];
 
         public List<TimeSpan> WaitTimeouts { get; } = [];
@@ -561,6 +602,7 @@ public sealed class CodexProcessControllerTests
         public IReadOnlyList<CodexProcessEntry> GetProcesses()
         {
             EnumerationCount++;
+            OnGetProcesses?.Invoke();
             return _processes;
         }
 

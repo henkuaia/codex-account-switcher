@@ -10,6 +10,26 @@ namespace CodexAccountSwitcher.Services;
 
 public sealed record CloseResult(bool AllExited, IReadOnlyList<int> RemainingProcessIds);
 
+public sealed class CodexCloseCanceledException : OperationCanceledException
+{
+    public CodexCloseCanceledException(bool sideEffectsStarted, CancellationToken cancellationToken)
+        : this(sideEffectsStarted, cancellationToken, null)
+    {
+    }
+
+    internal CodexCloseCanceledException(
+        bool sideEffectsStarted,
+        CancellationToken cancellationToken,
+        OperationCanceledException? innerException)
+        : base("Codex close was canceled.", innerException, cancellationToken) =>
+        SideEffectsStarted = sideEffectsStarted;
+
+    public bool SideEffectsStarted { get; }
+}
+
+public sealed class CodexLaunchException()
+    : InvalidOperationException("Codex launch failed.");
+
 public interface ICodexProcessController
 {
     Task<CloseResult> CloseAsync(
@@ -107,17 +127,20 @@ public sealed class CodexProcessController : ICodexProcessController
             throw new ArgumentOutOfRangeException(nameof(timeout));
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-        await _lifecycleGate.WaitAsync(cancellationToken);
+        var gateEntered = false;
+        var sideEffectsStarted = false;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            await _lifecycleGate.WaitAsync(cancellationToken);
+            gateEntered = true;
             _issuedRemainingTargets.Clear();
             _issuedInstallLocation = null;
             var targets = SelectTargetProcesses(package, _processAccessor.GetProcesses());
             foreach (var process in targets)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                _processAccessor.CloseMainWindow(process.Identity);
+                sideEffectsStarted |= _processAccessor.CloseMainWindow(process.Identity);
             }
 
             var effectiveTimeout = timeout <= MaximumCloseTimeout ? timeout : MaximumCloseTimeout;
@@ -147,9 +170,19 @@ public sealed class CodexProcessController : ICodexProcessController
                 remainingTargets.Length == 0,
                 remainingTargets.Select(identity => identity.Id).ToArray());
         }
+        catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
+        {
+            throw new CodexCloseCanceledException(
+                sideEffectsStarted,
+                cancellationToken,
+                exception);
+        }
         finally
         {
-            _lifecycleGate.Release();
+            if (gateEntered)
+            {
+                _lifecycleGate.Release();
+            }
         }
     }
 
@@ -223,7 +256,7 @@ public sealed class CodexProcessController : ICodexProcessController
 
         if (!started)
         {
-            throw new InvalidOperationException("Codex launch failed.");
+            throw new CodexLaunchException();
         }
 
         return Task.CompletedTask;

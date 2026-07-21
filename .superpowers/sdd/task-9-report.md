@@ -304,3 +304,134 @@ Result: exit `0`; `126/126` passed, `0` failed, `0` skipped.
 - The same real-Windows durability and cross-file non-atomicity boundaries remain.
   Fault injection covers managed write/replace cleanup and launch gating, not power
   loss or native filesystem behavior outside the process.
+
+## Remaining Review Fixes (2026-07-21)
+
+### Cross-contract Changes
+
+- Added public `CodexCloseCanceledException : OperationCanceledException` with the
+  original caller token and `SideEffectsStarted` flag. Public
+  `ICodexProcessController` method signatures are unchanged.
+- `CodexProcessController.CloseAsync` now wraps caller cancellation from its initial
+  check, lifecycle-gate wait, process selection, close loop, and exit wait. The flag
+  changes to true only when `ICodexProcessAccessor.CloseMainWindow` returns true,
+  which means the retained-handle/native path actually reported at least one close
+  message/action issued.
+- The lifecycle gate is released only when it was acquired. Unexpected exceptions
+  still propagate unchanged.
+- Added public `CodexLaunchException : InvalidOperationException` for the controller's
+  one expected AppsFolder start failure. The coordinator catches this semantic type;
+  a generic `InvalidOperationException` with identical text is preserved and rethrown.
+- An already-active registry key now requires a direct local `auth.json` account-ID
+  match before returning a successful no-op. Mismatch or defined unreadable-auth
+  failure continues through selector resolution, close, checkpoint, helper switch,
+  dual verification, and launch.
+- Close cancellation with `SideEffectsStarted=false` is rethrown without launch.
+  Close cancellation with `SideEffectsStarted=true`, and force cancellation after a
+  returned close result, perform non-cancelled restart recovery and return a structured
+  result.
+- Pre-checkpoint cancellation messages now state that cancellation occurred before
+  authentication changed and separately report restart success or failure. They no
+  longer claim checkpoint restoration occurred.
+
+### Remaining Review RED
+
+The first focused run after adding the new controller/coordinator tests failed to
+compile because the semantic exception contracts did not exist:
+
+```text
+CS0246: CodexCloseCanceledException could not be found
+CS0246: CodexLaunchException could not be found
+```
+
+After adding only those types and making concrete launch throw `CodexLaunchException`,
+the focused command reached behavior:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter "FullyQualifiedName~CodexProcessControllerTests|FullyQualifiedName~SafeSwitchCoordinatorTests|FullyQualifiedName~AuthStateTransactionTests"
+```
+
+Result: exit `1`; `8` failed, `44` passed.
+
+The intended failures were:
+
+```text
+Pre_cancelled_close_does_not_enumerate_processes
+Close_cancellation_before_first_close_action_reports_no_side_effect
+Close_cancellation_after_close_action_reports_side_effect_started
+Already_active_target_is_successful_no_op
+Registry_active_target_with_mismatched_auth_runs_transactional_repair
+Cancellation_before_close_side_effect_is_rethrown_without_launch
+Cancellation_thrown_after_close_side_effect_relaunches_without_checkpoint
+Cancellation_thrown_during_force_relaunches_without_checkpoint
+```
+
+The concrete controller still emitted base `OperationCanceledException`; the
+coordinator still inferred responsibility from invocation, skipped no-op auth reads,
+and used the old restored-state cancellation message.
+
+### Remaining Review GREEN
+
+Concrete controller command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter FullyQualifiedName~CodexProcessControllerTests
+```
+
+Result: exit `0`; `19/19` passed.
+
+Final focused Task 8 controller plus Task 9 command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj -c Debug --no-restore --filter "FullyQualifiedName~CodexProcessControllerTests|FullyQualifiedName~SafeSwitchCoordinatorTests|FullyQualifiedName~AuthStateTransactionTests"
+```
+
+Result: exit `0`; `54/54` passed, `0` failed, `0` skipped.
+
+Coverage totals in that run were `19` concrete controller, `28` coordinator, and `7`
+auth-state transaction tests.
+
+Final full solution command:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test CodexAccountSwitcher.sln -c Debug --no-restore
+```
+
+Result: exit `0`; `134/134` passed, `0` failed, `0` skipped.
+
+`git diff --check` passed before staging.
+
+### Remaining Review Self-review
+
+- Pre-cancelled direct controller calls produce the dedicated close-cancellation type
+  with `SideEffectsStarted=false`, preserve the original token, do not enumerate, and
+  release no unacquired gate.
+- Cancellation after enumeration but before the first close call remains false.
+  Cancellation triggered after one fake close call returns true is caught during the
+  wait path and reports true.
+- `SystemCodexProcessAccessor.CloseMainWindow` already returned the native
+  `CloseMainWindows` Boolean. No Task 8 identity, retained-handle, process-tree,
+  authorization, or public controller method contract was weakened.
+- Coordinator close recovery now trusts only `CodexCloseCanceledException` evidence.
+  A false flag and a generic close-stage cancellation are rethrown without launch.
+  Force cancellation remains restart-responsible because a complete `CloseResult`
+  already issued the remaining-target authority.
+- Matching already-active registry/auth performs exactly one direct auth read and no
+  process action. Mismatched or operationally unreadable auth performs the complete
+  transactional repair and verifies the repaired account afterward.
+- Expected launch failure is identified by type, not message. The test suite proves a
+  plain `InvalidOperationException("Codex launch failed.")` is rethrown.
+- Unexpected checkpoint restore does not launch an unverified state and does not
+  replace an earlier helper exception. Unexpected checkpoint dispose still permits
+  launch after verified restoration, while the earlier helper exception remains the
+  one rethrown.
+- Close/force pre-mutation cancellation uses fixed restart-success/restart-failure
+  messages and `CancellationToken.None` for the restart attempt.
+- All tests use fakes only. No real process, package, helper, auth file, or AppsFolder
+  action was executed.
+
+### Remaining Boundary
+
+- The accuracy of `SideEffectsStarted` depends on the retained-handle native adapter's
+  Boolean result, which is true only after a successful `WM_CLOSE` post. Real native
+  window enumeration and message delivery remain a controlled integration boundary.

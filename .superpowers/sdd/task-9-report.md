@@ -459,10 +459,11 @@ TDD and review evidence.
     and a final token check reports cancellation triggered by the last kill.
 - `src/CodexAccountSwitcher/Services/SafeSwitchCoordinator.cs`
   - Combines close and force side-effect evidence for pre-authentication cancellation.
-  - Restarts only when at least one close or kill action was reported as issued.
-  - Rethrows cancellation without launch when both evidence flags are false.
+  - Cancellation thrown inside force restarts only when at least one close or kill
+    action was reported as issued; otherwise it is rethrown without launch.
   - Checks caller cancellation after successful force and before checkpoint capture;
-    that post-return race uses close evidence only.
+    successful force completion is a committed recovery boundary and therefore always
+    permits non-cancelled restart recovery.
 - `src/CodexAccountSwitcher/Services/AuthStateTransaction.cs`
   - Retains the Task 9 exact-byte checkpoint, restore, pair verification, buffer
     clearing, and same-directory temporary replacement behavior described above.
@@ -473,8 +474,9 @@ TDD and review evidence.
   - Adds close-result default/actual evidence tests and force cancellation tests before
     the first kill and after one successful kill.
 - `tests/CodexAccountSwitcher.Tests/SafeSwitchCoordinatorTests.cs`
-  - Adds the four close-to-force boundary cases: no evidence, close-only evidence,
-    force-only evidence, and cancellation after force return before checkpoint.
+  - Adds the close-to-force boundary cases for no evidence, close-only evidence,
+    force-only evidence, and cancellation after successful force return before
+    checkpoint with and without close evidence.
 - `tests/CodexAccountSwitcher.Tests/AuthStateTransactionTests.cs`
   - Retains the exact-byte restore, pair gating, cleanup, and buffer-zeroing coverage.
 - `.superpowers/sdd/task-9-report.md`
@@ -488,9 +490,14 @@ TDD and review evidence.
   action. Force evidence becomes true only when it reports a successful kill action.
 - `CodexForceTerminateCanceledException` is the concrete force cancellation contract.
   Unexpected exceptions remain unchanged.
-- The coordinator performs non-cancelled restart recovery only when close evidence or
-  force evidence is true. With neither, the original cancellation is preserved and no
-  launch, checkpoint capture, helper call, auth write, or restore occurs.
+- Cancellation thrown inside `ForceTerminateAsync` performs non-cancelled restart
+  recovery only when close evidence or force evidence is true. With neither, the
+  original cancellation is preserved and no launch, checkpoint capture, helper call,
+  auth write, or restore occurs.
+- A successful `ForceTerminateAsync` return commits the controller's authorized force
+  phase for the validated issued-target tree. Cancellation observed after that return
+  always performs non-cancelled restart recovery, including when no close or kill
+  Boolean was true because the issued target was already gone.
 - Restart success and failure retain the fixed pre-authentication cancellation messages.
 - No public `ICodexProcessController` method signature, Task 8 identity check, retained
   handle behavior, package-tree boundary, issued-target check, or checkpoint contract
@@ -513,7 +520,7 @@ CS0246: CodexForceTerminateCanceledException could not be found
 
 ### Final Verification
 
-The focused command above then passed with exit `0`: `60/60` passed, `0` failed,
+The focused command above then passed with exit `0`: `61/61` passed, `0` failed,
 `0` skipped.
 
 Full solution command:
@@ -522,7 +529,7 @@ Full solution command:
 .\.tools\dotnet\dotnet.exe test CodexAccountSwitcher.sln -c Debug --no-restore
 ```
 
-Result: exit `0`; `140/140` passed, `0` failed, `0` skipped.
+Result: exit `0`; `141/141` passed, `0` failed, `0` skipped.
 
 All tests used fakes or temporary directories. No live Codex process, Microsoft Store
 package, AppsFolder activation, `codex-auth` helper, package installation, or real auth
@@ -535,3 +542,29 @@ file was accessed or modified.
   delivery, retained native process handles, `TerminateProcess`, AppsFolder activation,
   power-loss durability, or cross-file atomicity. Those remain controlled native/manual
   integration boundaries.
+
+### Committed Force Boundary Correction
+
+The force call is made only with nonempty remaining IDs issued by the preceding close
+operation. A successful return means the controller completed validation and the
+authorized force phase for the current tree. It is therefore the committed recovery
+boundary even when no `TerminateProcess` call was needed because an issued target had
+already exited. The coordinator records this boundary as the immediate first statement
+after the awaited force call, before checking the caller token or starting checkpoint
+capture.
+
+Cancellation thrown from inside force remains governed by
+`CodexForceTerminateCanceledException`: false close evidence plus false force evidence
+is rethrown with no launch, while either true flag permits restart recovery. Only a
+successful force return establishes the additional committed-boundary responsibility.
+
+The focused RED run produced exactly one failure and `60` passes:
+
+```text
+Cancellation_after_successful_force_uses_committed_recovery_boundary
+System.OperationCanceledException at the post-force caller-token check
+```
+
+After adding only the committed-boundary flag, the focused Task 8 controller plus Task
+9 suite passed `61/61`, and the full solution passed `141/141`. No live process, auth,
+helper, package, or AppsFolder action was performed.

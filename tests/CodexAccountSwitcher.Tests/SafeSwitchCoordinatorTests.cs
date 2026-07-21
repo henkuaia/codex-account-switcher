@@ -307,6 +307,28 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
+    public async Task Cancellation_after_successful_force_uses_committed_recovery_boundary()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41]);
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. Codex was restarted.",
+            result.Message);
+        Assert.Equal(["close", "force:41", "launch"], fixture.Operations);
+        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+    }
+
+    [Fact]
     public async Task Cancellation_after_close_restores_and_launches_with_recovery_tokens()
     {
         using var cancellationSource = new CancellationTokenSource();

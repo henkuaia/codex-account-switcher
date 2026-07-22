@@ -53,7 +53,24 @@ public sealed class SafeLoginCoordinatorTests
         Assert.False(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
         Assert.Contains(@"C:\expected\tools\codex-auth.exe", result.Message, StringComparison.Ordinal);
+        var availabilityProperty = typeof(LoginResult).GetProperty("HelperAvailability");
+        Assert.NotNull(availabilityProperty);
+        Assert.Same(fixture.Availability, availabilityProperty.GetValue(result));
         Assert.Equal(["availability"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Unresolved_process_discovery_stops_before_capture_or_login()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseException = new CodexProcessDiscoveryException();
+
+        var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal("Account login failed before authentication changed.", result.Message);
+        Assert.Equal(["availability", "close", "launch"], fixture.Operations);
     }
 
     [Fact]
@@ -68,6 +85,21 @@ public sealed class SafeLoginCoordinatorTests
         Assert.Equal([41, 73], fixture.ProcessController.ForcedProcessIds);
         Assert.True(fixture.Operations.IndexOf("force:41,73") < fixture.Operations.IndexOf("capture"));
         Assert.True(fixture.Operations.IndexOf("capture") < fixture.Operations.IndexOf("login"));
+    }
+
+    [Fact]
+    public async Task Reused_package_pid_force_failure_stops_before_capture_or_login()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41]);
+        fixture.ProcessController.ForceException = new CodexProcessDiscoveryException();
+
+        var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal("Account login failed before authentication changed.", result.Message);
+        Assert.Equal(["availability", "close", "force:41", "launch"], fixture.Operations);
     }
 
     [Fact]
@@ -87,6 +119,53 @@ public sealed class SafeLoginCoordinatorTests
             ["availability", "close", "capture", "login", "output", "restore", "launch"],
             fixture.Operations);
         Assert.False(fixture.Checkpoint.RestoreToken.CanBeCanceled);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Helper_disappearance_after_preflight_is_attached_to_failed_login_result(
+        bool operationalStartFailure)
+    {
+        var missingAvailability = MissingAvailability();
+        var fixture = new Fixture
+        {
+            AvailabilityAfterLogin = missingAvailability,
+            LoginResult = CommandResult.Failed("simulated failure"),
+            LoginException = operationalStartFailure
+                ? new IOException("simulated operational start failure")
+                : null,
+        };
+
+        var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
+
+        Assert.False(result.Succeeded);
+        Assert.Same(missingAvailability, result.HelperAvailability);
+        Assert.Equal(2, fixture.AvailabilityCheckCount);
+    }
+
+    [Fact]
+    public async Task False_start_rechecks_availability_and_returns_structured_login_failure()
+    {
+        var runner = new ProcessRunner(new ConfiguredProcessFactory(
+            new ConfiguredStartedProcess { StartResult = false }));
+        var startException = await Record.ExceptionAsync(() => runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            default));
+        Assert.NotNull(startException);
+        var missingAvailability = MissingAvailability();
+        var fixture = new Fixture
+        {
+            AvailabilityAfterLogin = missingAvailability,
+            LoginException = startException,
+        };
+
+        var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("Account login failed. The prior authentication state was restored.", result.Message);
+        Assert.Same(missingAvailability, result.HelperAvailability);
+        Assert.Equal(2, fixture.AvailabilityCheckCount);
     }
 
     [Fact]
@@ -152,6 +231,28 @@ public sealed class SafeLoginCoordinatorTests
             "Authentication state recovery could not be verified. Codex was not launched.",
             result.Message);
         Assert.Equal("restore", fixture.Operations[^1]);
+    }
+
+    [Fact]
+    public async Task Unknown_helper_exit_suppresses_restore_launch_and_retry()
+    {
+        var exceptionType = typeof(SafeLoginCoordinator).Assembly.GetType(
+            "CodexAccountSwitcher.Services.HelperProcessExitUnverifiedException");
+        Assert.NotNull(exceptionType);
+        var fixture = new Fixture
+        {
+            LoginException = Assert.IsAssignableFrom<Exception>(Activator.CreateInstance(exceptionType)),
+        };
+
+        var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Codex remains closed because helper process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["availability", "close", "capture", "login"], fixture.Operations);
     }
 
     [Fact]
@@ -285,8 +386,12 @@ public sealed class SafeLoginCoordinatorTests
 
         public CancellationTokenSource? CancelDuringLogin { get; init; }
 
-        public HelperAvailability Availability { get; init; } =
+        public HelperAvailability Availability { get; set; } =
             new(true, @"C:\expected\tools\codex-auth.exe", string.Empty);
+
+        public HelperAvailability? AvailabilityAfterLogin { get; init; }
+
+        public int AvailabilityCheckCount { get; private set; }
 
         public CancellationToken CaptureToken { get; private set; }
 
@@ -305,7 +410,12 @@ public sealed class SafeLoginCoordinatorTests
 
         private HelperAvailability CheckAvailability()
         {
-            Operations.Add("availability");
+            AvailabilityCheckCount++;
+            if (AvailabilityCheckCount == 1)
+            {
+                Operations.Add("availability");
+            }
+
             return Availability;
         }
 
@@ -315,6 +425,11 @@ public sealed class SafeLoginCoordinatorTests
         {
             Operations.Add("login");
             AuthStateMarker = "login-mutated";
+            if (AvailabilityAfterLogin is not null)
+            {
+                Availability = AvailabilityAfterLogin;
+            }
+
             if (LoginException is not null)
             {
                 throw LoginException;
@@ -362,6 +477,11 @@ public sealed class SafeLoginCoordinatorTests
         }
     }
 
+    private static HelperAvailability MissingAvailability() => new(
+        false,
+        @"C:\expected\tools\codex-auth.exe",
+        @"The codex-auth helper is unavailable at the expected path: C:\expected\tools\codex-auth.exe");
+
     private sealed class FakeCheckpoint(
         ICollection<string> operations,
         Action restoreState) : IAuthStateCheckpoint
@@ -400,6 +520,10 @@ public sealed class SafeLoginCoordinatorTests
 
         public Exception? LaunchException { get; set; }
 
+        public Exception? CloseException { get; set; }
+
+        public Exception? ForceException { get; set; }
+
         public Task<CloseResult> CloseAsync(
             CodexPackageInfo package,
             TimeSpan timeout,
@@ -407,6 +531,11 @@ public sealed class SafeLoginCoordinatorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             operations.Add("close");
+            if (CloseException is not null)
+            {
+                throw CloseException;
+            }
+
             return Task.FromResult(CloseResult);
         }
 
@@ -417,6 +546,11 @@ public sealed class SafeLoginCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             ForcedProcessIds = processIds.ToArray();
             operations.Add($"force:{string.Join(',', processIds)}");
+            if (ForceException is not null)
+            {
+                throw ForceException;
+            }
+
             return Task.CompletedTask;
         }
 

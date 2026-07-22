@@ -8,6 +8,8 @@ namespace CodexAccountSwitcher.Services;
 public sealed record SwitchResult(bool Succeeded, string Message, bool LaunchSucceeded)
 {
     public bool CanRetryLaunch { get; init; }
+
+    public HelperAvailability? HelperAvailability { get; init; }
 }
 
 public sealed class SafeSwitchCoordinator
@@ -23,6 +25,8 @@ public sealed class SafeSwitchCoordinator
         "Account switch was canceled before authentication changed. Codex was restarted.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
+    private const string UnknownHelperExitMessage =
+        "Codex remains closed because helper process exit could not be verified.";
     private const string SuccessfulLaunchFailureMessage =
         "Account switch was verified, but Codex launch failed.";
     private const string FailedLaunchFailureMessage =
@@ -148,7 +152,10 @@ public sealed class SafeSwitchCoordinator
         var helperAvailability = _checkHelperAvailability();
         if (!helperAvailability.IsAvailable)
         {
-            return new SwitchResult(false, helperAvailability.Error, true);
+            return new SwitchResult(false, helperAvailability.Error, true)
+            {
+                HelperAvailability = helperAvailability,
+            };
         }
 
         IAuthStateCheckpoint? checkpoint = null;
@@ -160,6 +167,7 @@ public sealed class SafeSwitchCoordinator
         var priorStateRestored = false;
         var closeSideEffectsStarted = false;
         var forceRecoveryCommitted = false;
+        HelperAvailability? resultHelperAvailability = null;
         ExceptionDispatchInfo? pendingException = null;
 
         try
@@ -188,6 +196,7 @@ public sealed class SafeSwitchCoordinator
             var commandResult = await _switchAsync(selector.Value!, cancellationToken);
             if (!commandResult.Succeeded)
             {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
                 restoreRequired = true;
                 result = new SwitchResult(false, SwitchFailedMessage, false);
             }
@@ -243,6 +252,12 @@ public sealed class SafeSwitchCoordinator
                 pendingException = ExceptionDispatchInfo.Capture(exception);
             }
         }
+        catch (HelperProcessExitUnverifiedException)
+        {
+            restoreRequired = false;
+            launchAllowed = false;
+            result = new SwitchResult(false, UnknownHelperExitMessage, false);
+        }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
             if (stage == SwitchStage.Close ||
@@ -265,6 +280,11 @@ public sealed class SafeSwitchCoordinator
         }
         catch (Exception exception) when (IsOperationalFailure(stage, exception))
         {
+            if (stage == SwitchStage.Switch)
+            {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
+            }
+
             restoreRequired = checkpoint is not null;
             launchAllowed = checkpoint is null && recoveryResponsible;
             result = new SwitchResult(
@@ -357,7 +377,18 @@ public sealed class SafeSwitchCoordinator
         }
 
         pendingException?.Throw();
+        if (resultHelperAvailability is not null)
+        {
+            result = result with { HelperAvailability = resultHelperAvailability };
+        }
+
         return result;
+    }
+
+    private HelperAvailability? GetUnavailableHelperAvailability()
+    {
+        var availability = _checkHelperAvailability();
+        return availability.IsAvailable ? null : availability;
     }
 
     public async Task<bool> RetryLaunchAsync(CancellationToken cancellationToken)
@@ -380,7 +411,7 @@ public sealed class SafeSwitchCoordinator
         SwitchStage.Capture =>
             exception is AuthStateCheckpointException or IOException or UnauthorizedAccessException,
         SwitchStage.Switch =>
-            exception is Win32Exception or IOException or UnauthorizedAccessException,
+            exception is HelperProcessStartException or Win32Exception or IOException or UnauthorizedAccessException,
         SwitchStage.Verify =>
             exception is InvalidDataException or IOException or UnauthorizedAccessException,
         _ => false,

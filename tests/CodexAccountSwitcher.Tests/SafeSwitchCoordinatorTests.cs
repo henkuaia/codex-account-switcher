@@ -35,6 +35,86 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.Equal(["close", "capture", "switch:target", "restore", "launch"], fixture.Operations);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Helper_disappearance_after_preflight_is_attached_to_failed_switch_result(
+        bool operationalStartFailure)
+    {
+        var missingAvailability = MissingAvailability();
+        var fixture = new Fixture
+        {
+            AvailabilityAfterSwitch = missingAvailability,
+            SwitchResult = CommandResult.Failed("simulated failure"),
+            SwitchException = operationalStartFailure
+                ? new IOException("simulated operational start failure")
+                : null,
+        };
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
+
+        Assert.False(result.Succeeded);
+        Assert.Same(missingAvailability, result.HelperAvailability);
+        Assert.Equal(2, fixture.AvailabilityCheckCount);
+    }
+
+    [Fact]
+    public async Task False_start_rechecks_availability_and_returns_structured_switch_failure()
+    {
+        var runner = new ProcessRunner(new ConfiguredProcessFactory(
+            new ConfiguredStartedProcess { StartResult = false }));
+        var startException = await Record.ExceptionAsync(() => runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["switch"]),
+            default));
+        Assert.NotNull(startException);
+        var missingAvailability = MissingAvailability();
+        var fixture = new Fixture
+        {
+            AvailabilityAfterSwitch = missingAvailability,
+            SwitchException = startException,
+        };
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            default);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal("Account switch failed. The prior authentication state was restored.", result.Message);
+        Assert.Same(missingAvailability, result.HelperAvailability);
+        Assert.Equal(2, fixture.AvailabilityCheckCount);
+    }
+
+    [Fact]
+    public async Task Initial_wait_unknown_exit_suppresses_switch_recovery()
+    {
+        var runner = new ProcessRunner(new ConfiguredProcessFactory(
+            new ConfiguredStartedProcess
+            {
+                InitialWaitException = new IOException("secret initial wait failure"),
+                KeepAliveAfterKill = true,
+                FinalWaitException = new IOException("secret final wait failure"),
+            }));
+        var waitException = await Record.ExceptionAsync(() => runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["switch"]),
+            default));
+        Assert.NotNull(waitException);
+        var fixture = new Fixture { SwitchException = waitException };
+
+        var result = await fixture.Coordinator.SwitchAsync(
+            fixture.Target,
+            fixture.Registry,
+            default);
+
+        Assert.False(result.Succeeded);
+        Assert.Equal(
+            "Codex remains closed because helper process exit could not be verified.",
+            result.Message);
+        Assert.False(result.CanRetryLaunch);
+        Assert.DoesNotContain("restore", fixture.Operations);
+        Assert.DoesNotContain("launch", fixture.Operations);
+    }
+
     [Fact]
     public async Task Registry_verification_mismatch_restores_and_relaunches_prior_state()
     {
@@ -175,7 +255,41 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.False(result.Succeeded);
         Assert.True(result.LaunchSucceeded);
         Assert.Contains(Path.GetFullPath(missingHelperPath), result.Message, StringComparison.Ordinal);
+        var availabilityProperty = typeof(SwitchResult).GetProperty("HelperAvailability");
+        Assert.NotNull(availabilityProperty);
+        var availability = Assert.IsType<HelperAvailability>(availabilityProperty.GetValue(result));
+        Assert.False(availability.IsAvailable);
+        Assert.Equal(Path.GetFullPath(missingHelperPath), availability.ExpectedPath);
         Assert.Empty(operations);
+    }
+
+    [Fact]
+    public async Task Unresolved_process_discovery_stops_before_capture_or_switch()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseException = new CodexProcessDiscoveryException();
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal("Account switch failed before authentication changed.", result.Message);
+        Assert.Equal(["close", "launch"], fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Reused_package_pid_force_failure_stops_before_capture_or_switch()
+    {
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41]);
+        fixture.ProcessController.ForceException = new CodexProcessDiscoveryException();
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Equal("Account switch failed before authentication changed.", result.Message);
+        Assert.Equal(["close", "force:41", "launch"], fixture.Operations);
     }
 
     [Fact]
@@ -454,6 +568,25 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
+    public async Task Unknown_helper_exit_suppresses_restore_launch_and_retry()
+    {
+        var fixture = new Fixture
+        {
+            SwitchException = CreateUnknownHelperExitException(),
+        };
+
+        var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Codex remains closed because helper process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["close", "capture", "switch:target"], fixture.Operations);
+    }
+
+    [Fact]
     public async Task Launch_failure_after_verified_switch_preserves_switch_success()
     {
         var fixture = new Fixture();
@@ -670,7 +803,8 @@ public sealed class SafeSwitchCoordinatorTests
                 SwitchAsync,
                 ReloadAsync,
                 ReadAuthAccountIdAsync,
-                CaptureAsync);
+                CaptureAsync,
+                CheckAvailability);
         }
 
         public List<string> Operations { get; } = [];
@@ -688,6 +822,13 @@ public sealed class SafeSwitchCoordinatorTests
         public string AuthAccountIdBeforeSwitch { get; init; }
 
         public CommandResult SwitchResult { get; init; } = new(0, string.Empty, string.Empty);
+
+        public HelperAvailability Availability { get; private set; } =
+            new(true, @"C:\expected\tools\codex-auth.exe", string.Empty);
+
+        public HelperAvailability? AvailabilityAfterSwitch { get; init; }
+
+        public int AvailabilityCheckCount { get; private set; }
 
         public Exception? SwitchException { get; init; }
 
@@ -715,12 +856,23 @@ public sealed class SafeSwitchCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             _switchStarted = true;
             AuthStateMarker = "target-mutated";
+            if (AvailabilityAfterSwitch is not null)
+            {
+                Availability = AvailabilityAfterSwitch;
+            }
+
             if (SwitchException is not null)
             {
                 throw SwitchException;
             }
 
             return Task.FromResult(SwitchResult);
+        }
+
+        private HelperAvailability CheckAvailability()
+        {
+            AvailabilityCheckCount++;
+            return Availability;
         }
 
         private Task<AccountRegistry> ReloadAsync(string codexHome, CancellationToken cancellationToken)
@@ -777,6 +929,19 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.NotNull(property);
         return Assert.IsType<bool>(property.GetValue(instance));
     }
+
+    private static Exception CreateUnknownHelperExitException()
+    {
+        var exceptionType = typeof(SafeSwitchCoordinator).Assembly.GetType(
+            "CodexAccountSwitcher.Services.HelperProcessExitUnverifiedException");
+        Assert.NotNull(exceptionType);
+        return Assert.IsAssignableFrom<Exception>(Activator.CreateInstance(exceptionType));
+    }
+
+    private static HelperAvailability MissingAvailability() => new(
+        false,
+        @"C:\expected\tools\codex-auth.exe",
+        @"The codex-auth helper is unavailable at the expected path: C:\expected\tools\codex-auth.exe");
 
     private sealed class FakeCheckpoint(
         List<string> operations,

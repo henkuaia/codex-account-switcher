@@ -274,6 +274,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task RefreshQuotaAsync(CancellationToken cancellationToken)
     {
+        if (!await RecheckHelperAvailabilityAsync(cancellationToken))
+        {
+            return;
+        }
+
         var updates = new List<QuotaUpdate>();
         await _refreshQuotaAsync(
             _registry.Accounts.ToArray(),
@@ -297,6 +302,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task LoginAsync(CancellationToken cancellationToken)
     {
+        if (!await RecheckHelperAvailabilityAsync(cancellationToken))
+        {
+            return;
+        }
+
         if (!await _dialogService.ConfirmAddAsync(cancellationToken))
         {
             return;
@@ -315,6 +325,13 @@ public sealed class MainWindowViewModel : ObservableObject
             cancellationToken);
         var result = loginResult
             ?? throw new InvalidOperationException("The account login did not return a result.");
+        if (await ApplyResultHelperAvailabilityAsync(
+                result.HelperAvailability,
+                CancellationToken.None))
+        {
+            return;
+        }
+
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
@@ -328,6 +345,11 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task RemoveAsync(CancellationToken cancellationToken)
     {
+        if (!await RecheckHelperAvailabilityAsync(cancellationToken))
+        {
+            return;
+        }
+
         var target = await _dialogService.SelectRemovalTargetAsync(
             Accounts.ToArray(),
             cancellationToken);
@@ -337,6 +359,13 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         var result = await _removeAsync(target.Account, _registry, cancellationToken);
+        if (await ApplyResultHelperAvailabilityAsync(
+                result.HelperAvailability,
+                CancellationToken.None))
+        {
+            return;
+        }
+
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
@@ -361,12 +390,24 @@ public sealed class MainWindowViewModel : ObservableObject
         AccountRowViewModel target,
         CancellationToken cancellationToken)
     {
+        if (!await RecheckHelperAvailabilityAsync(cancellationToken))
+        {
+            return;
+        }
+
         if (!await _dialogService.ConfirmSwitchAsync(target, cancellationToken))
         {
             return;
         }
 
         var result = await _switchAsync(target.Account, _registry, cancellationToken);
+        if (await ApplyResultHelperAvailabilityAsync(
+                result.HelperAvailability,
+                CancellationToken.None))
+        {
+            return;
+        }
+
         if (result.Succeeded)
         {
             var registry = await _loadRegistryAsync(CancellationToken.None);
@@ -400,6 +441,31 @@ public sealed class MainWindowViewModel : ObservableObject
                 CanRetryLaunch = !succeeded;
             },
             CancellationToken.None);
+    }
+
+    private async Task<bool> RecheckHelperAvailabilityAsync(
+        CancellationToken cancellationToken)
+    {
+        var availability = _checkHelperAvailability();
+        await _dispatcher.InvokeAsync(
+            () => ApplyHelperAvailability(availability),
+            cancellationToken);
+        return availability.IsAvailable;
+    }
+
+    private async Task<bool> ApplyResultHelperAvailabilityAsync(
+        HelperAvailability? availability,
+        CancellationToken cancellationToken)
+    {
+        if (availability is null)
+        {
+            return false;
+        }
+
+        await _dispatcher.InvokeAsync(
+            () => ApplyHelperAvailability(availability),
+            cancellationToken);
+        return !availability.IsAvailable;
     }
 
     private async Task RunBusyAsync(

@@ -1,5 +1,7 @@
 using CodexAccountSwitcher.Models;
+using CodexAccountSwitcher.Services;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Net.Http;
 
 namespace CodexAccountSwitcher.Tests;
@@ -106,4 +108,63 @@ internal sealed class CollectingProgress<T> : IProgress<T>
     public List<T> Values { get; } = [];
 
     public void Report(T value) => Values.Add(value);
+}
+
+internal sealed class ConfiguredProcessFactory(ConfiguredStartedProcess process) : IProcessFactory
+{
+    public IStartedProcess Create(ProcessStartInfo startInfo) => process;
+}
+
+internal sealed class ConfiguredStartedProcess : IStartedProcess
+{
+    private int _waitCallCount;
+
+    public bool StartResult { get; init; } = true;
+
+    public Exception? InitialWaitException { get; init; }
+
+    public Exception? FinalWaitException { get; init; }
+
+    public bool KeepAliveAfterKill { get; init; }
+
+    public bool HasExited { get; private set; }
+
+    public int ExitCode => 0;
+
+    public bool Start() => StartResult;
+
+    public Task<string> ReadStandardOutputAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(string.Empty);
+
+    public Task<string> ReadStandardErrorAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(string.Empty);
+
+    public ValueTask<string?> ReadStandardOutputLineAsync(CancellationToken cancellationToken) =>
+        ValueTask.FromResult<string?>(null);
+
+    public ValueTask<string?> ReadStandardErrorLineAsync(CancellationToken cancellationToken) =>
+        ValueTask.FromResult<string?>(null);
+
+    public Task WaitForExitAsync(CancellationToken cancellationToken)
+    {
+        _waitCallCount++;
+        if (_waitCallCount == 1 && InitialWaitException is not null)
+        {
+            throw InitialWaitException;
+        }
+
+        if (!cancellationToken.CanBeCanceled && FinalWaitException is not null)
+        {
+            throw FinalWaitException;
+        }
+
+        HasExited = true;
+        return Task.CompletedTask;
+    }
+
+    public void Kill(bool entireProcessTree) => HasExited = !KeepAliveAfterKill;
+
+    public void Dispose()
+    {
+    }
 }

@@ -196,6 +196,140 @@ public sealed class ProcessRunnerTests
     }
 
     [Fact]
+    public async Task Streaming_observer_failure_remains_original_when_caller_cancels_during_cleanup()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var process = new BlockingStartedProcess
+        {
+            BlockNonCancelableWait = true,
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        var expected = new InvalidOperationException("observer failed");
+        ProcessOutputHandler outputHandler = (line, _) =>
+            line.Stream == ProcessOutputStream.StandardOutput
+                ? ValueTask.FromException(expected)
+                : ValueTask.CompletedTask;
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            outputHandler,
+            cancellationSource.Token);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("device code");
+        await process.NonCancelableWaitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(runTask.IsCompleted);
+        cancellationSource.Cancel();
+        process.ReleaseNonCancelableWait();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => runTask);
+
+        Assert.Same(expected, exception);
+        Assert.True(process.HasExited);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Streaming_observer_failure_reports_unknown_exit_when_kill_fails_and_process_remains_alive()
+    {
+        var process = new BlockingStartedProcess
+        {
+            KillException = new InvalidOperationException("secret kill failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        ProcessOutputHandler outputHandler = (line, _) =>
+            line.Stream == ProcessOutputStream.StandardOutput
+                ? ValueTask.FromException(new InvalidOperationException("observer failed"))
+                : ValueTask.CompletedTask;
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            outputHandler,
+            CancellationToken.None);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("device code");
+
+        var exception = await Record.ExceptionAsync(() => runTask);
+
+        Assert.NotNull(exception);
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.DoesNotContain("secret", exception.Message, StringComparison.Ordinal);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Streaming_cancellation_reports_unknown_exit_when_kill_fails_and_process_remains_alive()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var process = new BlockingStartedProcess
+        {
+            KillException = new InvalidOperationException("secret kill failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            (_, _) => ValueTask.CompletedTask,
+            cancellationSource.Token);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        cancellationSource.Cancel();
+
+        var exception = await Record.ExceptionAsync(() => runTask);
+
+        Assert.NotNull(exception);
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.DoesNotContain("secret", exception.Message, StringComparison.Ordinal);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+        Assert.True(process.StandardOutputReadCanceled.Task.IsCompleted);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Streaming_observer_failure_reports_unknown_exit_when_final_wait_fails_and_exit_is_unverifiable()
+    {
+        var process = new BlockingStartedProcess
+        {
+            KeepAliveAfterKill = true,
+            NonCancelableWaitException = new InvalidOperationException("secret wait failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        ProcessOutputHandler outputHandler = (line, _) =>
+            line.Stream == ProcessOutputStream.StandardOutput
+                ? ValueTask.FromException(new InvalidOperationException("observer failed"))
+                : ValueTask.CompletedTask;
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            outputHandler,
+            CancellationToken.None);
+
+        await Task.WhenAll(process.StandardOutputReadStarted.Task, process.StandardErrorReadStarted.Task)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+        process.WriteStandardOutput("device code");
+
+        var exception = await Record.ExceptionAsync(() => runTask);
+
+        Assert.NotNull(exception);
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.DoesNotContain("secret", exception.Message, StringComparison.Ordinal);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+        Assert.Contains(process.WaitTokens, token => !token.CanBeCanceled);
+        Assert.True(process.StandardErrorReadCanceled.Task.IsCompleted);
+    }
+
+    [Fact]
     public async Task Default_streaming_overload_keeps_legacy_runner_source_compatible()
     {
         var legacyRunner = new LegacyProcessRunner();
@@ -284,6 +418,118 @@ public sealed class ProcessRunnerTests
         Assert.Equal(visible, factory.StartInfo!.UseShellExecute);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Initial_wait_failure_reports_unknown_exit_when_final_exit_is_unverified(bool visible)
+    {
+        var process = new FakeStartedProcess
+        {
+            InitialWaitException = new IOException("secret initiating failure"),
+            KeepAliveAfterKill = true,
+            NonCancelableWaitException = new IOException("secret final wait failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        var request = new ProcessRequest("fake.exe", ["command"], Visible: visible);
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => visible
+            ? runner.RunVisibleAsync(request, default)
+            : runner.RunCapturedAsync(request, default));
+
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+        Assert.Equal(2, process.WaitTokens.Count);
+        Assert.False(process.WaitTokens[1].CanBeCanceled);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Initial_wait_failure_is_rethrown_when_cleanup_proves_exit(bool visible)
+    {
+        var initiatingException = new IOException("simulated initial wait failure");
+        var process = new FakeStartedProcess { InitialWaitException = initiatingException };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        var request = new ProcessRequest("fake.exe", ["command"], Visible: visible);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() => visible
+            ? runner.RunVisibleAsync(request, default)
+            : runner.RunCapturedAsync(request, default));
+
+        Assert.Same(initiatingException, exception);
+        Assert.True(process.KillCalled);
+        Assert.True(process.HasExited);
+        Assert.Equal(2, process.WaitTokens.Count);
+        Assert.False(process.WaitTokens[1].CanBeCanceled);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task False_start_uses_fixed_typed_process_start_failure(bool visible)
+    {
+        var process = new FakeStartedProcess { StartResult = false };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+        var request = new ProcessRequest("fake.exe", ["command"], Visible: visible);
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => visible
+            ? runner.RunVisibleAsync(request, default)
+            : runner.RunCapturedAsync(request, default));
+
+        Assert.Equal("HelperProcessStartException", exception.GetType().Name);
+        Assert.Equal("The process did not start.", exception.Message);
+        Assert.Equal(1, process.StartCallCount);
+        Assert.Empty(process.WaitTokens);
+        Assert.False(process.KillCalled);
+    }
+
+    [Fact]
+    public async Task Non_streamed_cancellation_reports_unknown_exit_when_kill_fails()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var process = new FakeStartedProcess
+        {
+            OnStart = cancellationSource.Cancel,
+            KillException = new InvalidOperationException("simulated kill failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["command"]),
+            cancellationSource.Token));
+
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+    }
+
+    [Fact]
+    public async Task Non_streamed_cancellation_reports_unknown_exit_when_final_wait_fails()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var process = new FakeStartedProcess
+        {
+            OnStart = cancellationSource.Cancel,
+            KeepAliveAfterKill = true,
+            NonCancelableWaitException = new IOException("simulated final wait failure"),
+        };
+        var runner = new ProcessRunner(new FakeProcessFactory(process));
+
+        var exception = await Assert.ThrowsAnyAsync<Exception>(() => runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["command"]),
+            cancellationSource.Token));
+
+        Assert.Equal("HelperProcessExitUnverifiedException", exception.GetType().Name);
+        Assert.Equal("Helper process exit could not be verified.", exception.Message);
+        Assert.True(process.KillCalled);
+        Assert.False(process.HasExited);
+        Assert.Equal(2, process.WaitTokens.Count);
+        Assert.False(process.WaitTokens[1].CanBeCanceled);
+    }
+
     [Fact]
     public async Task Cancellation_after_child_exit_does_not_kill_process()
     {
@@ -347,6 +593,8 @@ public sealed class ProcessRunnerTests
         private readonly Channel<string> _standardError = CreateChannel();
         private readonly TaskCompletionSource _exitSignal =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseNonCancelableWait =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource StandardOutputReadStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -369,6 +617,17 @@ public sealed class ProcessRunnerTests
         public bool KillCalled { get; private set; }
 
         public bool KilledEntireProcessTree { get; private set; }
+
+        public bool BlockNonCancelableWait { get; init; }
+
+        public Exception? KillException { get; init; }
+
+        public bool KeepAliveAfterKill { get; init; }
+
+        public Exception? NonCancelableWaitException { get; init; }
+
+        public TaskCompletionSource NonCancelableWaitStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public bool Start() => true;
 
@@ -395,6 +654,17 @@ public sealed class ProcessRunnerTests
         public async Task WaitForExitAsync(CancellationToken cancellationToken)
         {
             WaitTokens.Add(cancellationToken);
+            if (!cancellationToken.CanBeCanceled && BlockNonCancelableWait)
+            {
+                NonCancelableWaitStarted.TrySetResult();
+                await _releaseNonCancelableWait.Task;
+            }
+
+            if (!cancellationToken.CanBeCanceled && NonCancelableWaitException is not null)
+            {
+                throw NonCancelableWaitException;
+            }
+
             await _exitSignal.Task.WaitAsync(cancellationToken);
             HasExited = true;
         }
@@ -403,8 +673,21 @@ public sealed class ProcessRunnerTests
         {
             KillCalled = true;
             KilledEntireProcessTree = entireProcessTree;
-            HasExited = true;
-            _exitSignal.TrySetResult();
+            if (KillException is not null)
+            {
+                _exitSignal.TrySetException(KillException);
+                throw KillException;
+            }
+
+            HasExited = !KeepAliveAfterKill;
+            if (NonCancelableWaitException is not null)
+            {
+                _exitSignal.TrySetException(NonCancelableWaitException);
+            }
+            else
+            {
+                _exitSignal.TrySetResult();
+            }
         }
 
         public void WriteStandardOutput(string line) => _standardOutput.Writer.TryWrite(line);
@@ -416,6 +699,8 @@ public sealed class ProcessRunnerTests
         public void CompleteStandardError() => _standardError.Writer.TryComplete();
 
         public void AllowExit() => _exitSignal.TrySetResult();
+
+        public void ReleaseNonCancelableWait() => _releaseNonCancelableWait.TrySetResult();
 
         public void Dispose()
         {
@@ -454,6 +739,7 @@ public sealed class ProcessRunnerTests
     {
         private readonly TaskCompletionSource _exitSignal =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _waitCallCount;
 
         public List<CancellationToken> WaitTokens { get; } = [];
 
@@ -469,7 +755,17 @@ public sealed class ProcessRunnerTests
 
         public bool KilledEntireProcessTree { get; private set; }
 
+        public Exception? KillException { get; init; }
+
+        public bool KeepAliveAfterKill { get; init; }
+
+        public Exception? NonCancelableWaitException { get; init; }
+
+        public Exception? InitialWaitException { get; init; }
+
         public Action? OnStart { get; init; }
+
+        public bool StartResult { get; init; } = true;
 
         public bool WaitForExplicitExit { get; init; }
 
@@ -481,7 +777,7 @@ public sealed class ProcessRunnerTests
         {
             StartCallCount++;
             OnStart?.Invoke();
-            return true;
+            return StartResult;
         }
 
         public Task<string> ReadStandardOutputAsync(CancellationToken cancellationToken) =>
@@ -499,6 +795,12 @@ public sealed class ProcessRunnerTests
         public async Task WaitForExitAsync(CancellationToken cancellationToken)
         {
             WaitTokens.Add(cancellationToken);
+            _waitCallCount++;
+            if (_waitCallCount == 1 && InitialWaitException is not null)
+            {
+                throw InitialWaitException;
+            }
+
             if (cancellationToken.IsCancellationRequested)
             {
                 if (ExitsBeforeCancellationIsObserved)
@@ -507,6 +809,11 @@ public sealed class ProcessRunnerTests
                 }
 
                 await Task.FromCanceled(cancellationToken);
+            }
+
+            if (!cancellationToken.CanBeCanceled && NonCancelableWaitException is not null)
+            {
+                throw NonCancelableWaitException;
             }
 
             if (WaitForExplicitExit && !HasExited)
@@ -521,8 +828,20 @@ public sealed class ProcessRunnerTests
         {
             KillCalled = true;
             KilledEntireProcessTree = entireProcessTree;
-            HasExited = true;
-            _exitSignal.TrySetResult();
+            if (KillException is not null)
+            {
+                throw KillException;
+            }
+
+            HasExited = !KeepAliveAfterKill;
+            if (NonCancelableWaitException is not null)
+            {
+                _exitSignal.TrySetException(NonCancelableWaitException);
+            }
+            else
+            {
+                _exitSignal.TrySetResult();
+            }
         }
 
         public void AllowExit() => _exitSignal.TrySetResult();

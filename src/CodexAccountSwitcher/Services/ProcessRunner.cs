@@ -31,6 +31,12 @@ public delegate ValueTask ProcessOutputHandler(
     ProcessOutputLine output,
     CancellationToken cancellationToken);
 
+internal sealed class HelperProcessExitUnverifiedException()
+    : Exception("Helper process exit could not be verified.");
+
+internal sealed class HelperProcessStartException()
+    : Exception("The process did not start.");
+
 public interface IProcessRunner
 {
     Task<CommandResult> RunCapturedAsync(ProcessRequest request, CancellationToken cancellationToken);
@@ -122,7 +128,7 @@ public sealed class ProcessRunner : IProcessRunner
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
-            throw new InvalidOperationException("The process did not start.");
+            throw new HelperProcessStartException();
         }
 
         var outputTask = process.ReadStandardOutputAsync(cancellationToken);
@@ -153,7 +159,7 @@ public sealed class ProcessRunner : IProcessRunner
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
-            throw new InvalidOperationException("The process did not start.");
+            throw new HelperProcessStartException();
         }
 
         using var pumpCancellationSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -191,7 +197,7 @@ public sealed class ProcessRunner : IProcessRunner
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())
         {
-            throw new InvalidOperationException("The process did not start.");
+            throw new HelperProcessStartException();
         }
 
         await WaitForExitAfterStartAsync(process, cancellationToken);
@@ -204,7 +210,7 @@ public sealed class ProcessRunner : IProcessRunner
         {
             await process.WaitForExitAsync(cancellationToken);
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        catch
         {
             await TerminateAndWaitForExitAsync(process);
             throw;
@@ -246,8 +252,12 @@ public sealed class ProcessRunner : IProcessRunner
                 await completedTask;
             }
         }
-        catch
+        catch (Exception initiatingException)
         {
+            var callerCancellationInitiatedCleanup =
+                initiatingException is OperationCanceledException &&
+                cancellationToken.IsCancellationRequested;
+            HelperProcessExitUnverifiedException? exitException = null;
             try
             {
                 pumpCancellationSource.Cancel();
@@ -260,18 +270,28 @@ public sealed class ProcessRunner : IProcessRunner
             {
                 await TerminateAndWaitForExitAsync(process);
             }
-            catch
+            catch (HelperProcessExitUnverifiedException exception)
             {
+                exitException = exception;
             }
 
-            if (waitTask is not null)
+            if (waitTask is not null && (exitException is null || waitTask.IsCompleted))
             {
                 await ObserveTaskAsync(waitTask);
             }
 
             await ObserveTaskAsync(outputTask);
             await ObserveTaskAsync(errorTask);
-            cancellationToken.ThrowIfCancellationRequested();
+            if (exitException is not null)
+            {
+                throw exitException;
+            }
+
+            if (callerCancellationInitiatedCleanup)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+
             throw;
         }
     }
@@ -289,18 +309,51 @@ public sealed class ProcessRunner : IProcessRunner
 
     private static async Task TerminateAndWaitForExitAsync(IStartedProcess process)
     {
-        if (!process.HasExited)
+        if (!HasExited(process))
         {
             try
             {
                 process.Kill(entireProcessTree: true);
             }
-            catch (InvalidOperationException) when (process.HasExited)
+            catch
             {
+                if (!HasExited(process))
+                {
+                    throw new HelperProcessExitUnverifiedException();
+                }
             }
         }
 
-        await process.WaitForExitAsync(CancellationToken.None);
+        try
+        {
+            await process.WaitForExitAsync(CancellationToken.None);
+        }
+        catch
+        {
+            if (!HasExited(process))
+            {
+                throw new HelperProcessExitUnverifiedException();
+            }
+
+            return;
+        }
+
+        if (!HasExited(process))
+        {
+            throw new HelperProcessExitUnverifiedException();
+        }
+
+        static bool HasExited(IStartedProcess process)
+        {
+            try
+            {
+                return process.HasExited;
+            }
+            catch
+            {
+                return false;
+            }
+        }
     }
 
     private static ProcessStartInfo CreateStartInfo(ProcessRequest request, bool useShellExecute)

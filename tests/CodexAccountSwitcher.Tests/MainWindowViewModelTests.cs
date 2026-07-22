@@ -435,6 +435,106 @@ public sealed class MainWindowViewModelTests
         Assert.Contains(expectedPath, viewModel.StatusText, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("add")]
+    [InlineData("remove")]
+    [InlineData("refresh")]
+    [InlineData("switch")]
+    public async Task Helper_dependent_commands_recheck_availability_before_any_side_effect(
+        string command)
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        await fixture.ViewModel.LoadAsync();
+        var switchTarget = fixture.Row(fixture.Second);
+        typeof(MainWindowViewModel).GetProperty(nameof(MainWindowViewModel.CanRetryLaunch))!
+            .SetValue(fixture.ViewModel, true);
+        fixture.Availability = fixture.MissingAvailability;
+
+        await fixture.ExecuteAsync(command, switchTarget);
+
+        Assert.Equal(0, fixture.Dialog.ConfirmAddCallCount);
+        Assert.Equal(0, fixture.Dialog.SelectRemovalTargetCallCount);
+        Assert.Equal(0, fixture.Dialog.ConfirmSwitchCallCount);
+        Assert.Equal(0, fixture.Dialog.RunLoginCallCount);
+        Assert.Equal(0, fixture.LoginCallCount);
+        Assert.Equal(0, fixture.RemoveCallCount);
+        Assert.Equal(0, fixture.QuotaRefreshCallCount);
+        Assert.Equal(0, fixture.SwitchCallCount);
+        Assert.Equal(1, fixture.LoadCallCount);
+        Assert.False(fixture.ViewModel.IsHelperAvailable);
+        Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.HelperAvailabilityError);
+        Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.RemoveCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.RefreshCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.SwitchCommand.CanExecute(switchTarget));
+        Assert.True(fixture.ViewModel.RetryLaunchCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task Load_reenables_helper_dependent_commands_after_helper_is_restored()
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        await fixture.ViewModel.LoadAsync();
+        var switchTarget = fixture.Row(fixture.Second);
+        fixture.Availability = fixture.MissingAvailability;
+        await fixture.ViewModel.RefreshCommand.ExecuteAsync();
+
+        fixture.Availability = fixture.AvailableAvailability;
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.True(fixture.ViewModel.IsHelperAvailable);
+        Assert.Equal(string.Empty, fixture.ViewModel.HelperAvailabilityError);
+        Assert.True(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.True(fixture.ViewModel.RemoveCommand.CanExecute(null));
+        Assert.True(fixture.ViewModel.RefreshCommand.CanExecute(null));
+        Assert.True(fixture.ViewModel.SwitchCommand.CanExecute(switchTarget));
+    }
+
+    [Theory]
+    [InlineData("login", "returned failure")]
+    [InlineData("login", "operational start failure")]
+    [InlineData("remove", "returned failure")]
+    [InlineData("remove", "operational start failure")]
+    [InlineData("switch", "returned failure")]
+    [InlineData("switch", "operational start failure")]
+    public async Task Structured_missing_helper_result_disables_commands_after_dialog(
+        string operation,
+        string resultMessage)
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        await fixture.ViewModel.LoadAsync();
+        var switchTarget = fixture.Row(fixture.Second);
+        typeof(MainWindowViewModel).GetProperty(nameof(MainWindowViewModel.CanRetryLaunch))!
+            .SetValue(fixture.ViewModel, true);
+        fixture.Dialog.AfterDialog = () => fixture.Availability = fixture.MissingAvailability;
+        fixture.LoginResult = WithHelperAvailability(
+            new LoginResult(false, resultMessage, true),
+            fixture.MissingAvailability);
+        fixture.RemovalResult = WithHelperAvailability(
+            new RemovalResult(false, resultMessage),
+            fixture.MissingAvailability);
+        fixture.SwitchResult = WithHelperAvailability(
+            new SwitchResult(false, resultMessage, true),
+            fixture.MissingAvailability);
+
+        await fixture.ExecuteAsync(operation, switchTarget);
+
+        Assert.Equal(1, fixture.Dialog.TotalConfirmationOrSelectionCalls);
+        Assert.Equal(operation == "login" ? 1 : 0, fixture.LoginCallCount);
+        Assert.Equal(operation == "remove" ? 1 : 0, fixture.RemoveCallCount);
+        Assert.Equal(operation == "switch" ? 1 : 0, fixture.SwitchCallCount);
+        Assert.Equal(1, fixture.LoadCallCount);
+        Assert.False(fixture.ViewModel.IsHelperAvailable);
+        Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.HelperAvailabilityError);
+        Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.RemoveCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.RefreshCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.SwitchCommand.CanExecute(switchTarget));
+        Assert.True(fixture.ViewModel.RetryLaunchCommand.CanExecute(null));
+    }
+
     [Fact]
     public async Task Confirmed_successful_switch_reloads_before_updating_active_row()
     {
@@ -942,6 +1042,15 @@ public sealed class MainWindowViewModelTests
 
     private static CommandResult Succeeded() => new(0, string.Empty, string.Empty);
 
+    private static T WithHelperAvailability<T>(T result, HelperAvailability availability)
+        where T : notnull
+    {
+        var property = typeof(T).GetProperty("HelperAvailability");
+        Assert.NotNull(property);
+        property.SetValue(result, availability);
+        return result;
+    }
+
     private static T RequiredProperty<T>(object instance, string propertyName)
     {
         var property = instance.GetType().GetProperty(propertyName);
@@ -1104,6 +1213,179 @@ public sealed class MainWindowViewModelTests
             BeforeSwitchReturn?.Invoke();
             return Task.FromResult(SwitchResult);
         }
+    }
+
+    private sealed class DynamicAvailabilityFixture
+    {
+        public DynamicAvailabilityFixture()
+        {
+            First = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+            Second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
+            Registry = new AccountRegistry(3, First.AccountKey, [First, Second]);
+            Dialog = new RecordingDialogService();
+            ViewModel = new MainWindowViewModel(
+                LoadRegistryAsync,
+                RefreshQuotaAsync,
+                LoginAsync,
+                RemoveAsync,
+                SwitchAsync,
+                _ => Task.FromResult(true),
+                () => Availability,
+                Dialog,
+                new ImmediateDispatcher(),
+                new ActiveOperationTracker());
+        }
+
+        public HelperAvailability AvailableAvailability { get; } =
+            new(true, @"C:\expected\tools\codex-auth.exe", string.Empty);
+
+        public HelperAvailability MissingAvailability { get; } = new(
+            false,
+            @"C:\expected\tools\codex-auth.exe",
+            @"The codex-auth helper is unavailable at the expected path: C:\expected\tools\codex-auth.exe");
+
+        public HelperAvailability Availability { get; set; } =
+            new(true, @"C:\expected\tools\codex-auth.exe", string.Empty);
+
+        public AccountRecord First { get; }
+
+        public AccountRecord Second { get; }
+
+        public AccountRegistry Registry { get; }
+
+        public LoginResult LoginResult { get; set; } = new(true, "login completed", true);
+
+        public RemovalResult RemovalResult { get; set; } = new(true, "removal completed");
+
+        public SwitchResult SwitchResult { get; set; } = new(false, "switch failed", true);
+
+        public int LoadCallCount { get; private set; }
+
+        public int QuotaRefreshCallCount { get; private set; }
+
+        public int LoginCallCount { get; private set; }
+
+        public int RemoveCallCount { get; private set; }
+
+        public int SwitchCallCount { get; private set; }
+
+        public RecordingDialogService Dialog { get; }
+
+        public MainWindowViewModel ViewModel { get; }
+
+        public AccountRowViewModel Row(AccountRecord account) =>
+            Assert.Single(ViewModel.Accounts, row => row.Account.AccountKey == account.AccountKey);
+
+        public Task ExecuteAsync(string operation, AccountRowViewModel switchTarget) => operation switch
+        {
+            "add" or "login" => ViewModel.AddCommand.ExecuteAsync(),
+            "remove" => ViewModel.RemoveCommand.ExecuteAsync(),
+            "refresh" => ViewModel.RefreshCommand.ExecuteAsync(),
+            "switch" => ViewModel.SwitchCommand.ExecuteAsync(switchTarget),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+
+        private Task<AccountRegistry> LoadRegistryAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LoadCallCount++;
+            return Task.FromResult(Registry);
+        }
+
+        private Task RefreshQuotaAsync(
+            IReadOnlyList<AccountRecord> accounts,
+            IProgress<QuotaUpdate> progress,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            QuotaRefreshCallCount++;
+            return Task.CompletedTask;
+        }
+
+        private Task<LoginResult> LoginAsync(
+            ProcessOutputHandler outputHandler,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            LoginCallCount++;
+            return Task.FromResult(LoginResult);
+        }
+
+        private Task<RemovalResult> RemoveAsync(
+            AccountRecord target,
+            AccountRegistry before,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RemoveCallCount++;
+            return Task.FromResult(RemovalResult);
+        }
+
+        private Task<SwitchResult> SwitchAsync(
+            AccountRecord target,
+            AccountRegistry before,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SwitchCallCount++;
+            return Task.FromResult(SwitchResult);
+        }
+    }
+
+    private sealed class RecordingDialogService : IAccountDialogService
+    {
+        public Action? AfterDialog { get; set; }
+
+        public int ConfirmAddCallCount { get; private set; }
+
+        public int SelectRemovalTargetCallCount { get; private set; }
+
+        public int ConfirmSwitchCallCount { get; private set; }
+
+        public int RunLoginCallCount { get; private set; }
+
+        public int TotalConfirmationOrSelectionCalls =>
+            ConfirmAddCallCount + SelectRemovalTargetCallCount + ConfirmSwitchCallCount;
+
+        public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ConfirmAddCallCount++;
+            AfterDialog?.Invoke();
+            return Task.FromResult(true);
+        }
+
+        public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
+            IReadOnlyList<AccountRowViewModel> accounts,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            SelectRemovalTargetCallCount++;
+            AfterDialog?.Invoke();
+            return Task.FromResult(accounts.FirstOrDefault(account => !account.IsActive));
+        }
+
+        public Task<bool> ConfirmSwitchAsync(
+            AccountRowViewModel target,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ConfirmSwitchCallCount++;
+            AfterDialog?.Invoke();
+            return Task.FromResult(true);
+        }
+
+        public Task<CommandResult> RunLoginAsync(
+            Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> operation,
+            CancellationToken cancellationToken)
+        {
+            RunLoginCallCount++;
+            return operation(static (_, _) => ValueTask.CompletedTask, cancellationToken);
+        }
+
+        public Task<CommandResult> RunRemoveAsync(
+            Func<CancellationToken, Task<CommandResult>> operation,
+            CancellationToken cancellationToken) => operation(cancellationToken);
     }
 
     private sealed class FakeDialogService : IAccountDialogService

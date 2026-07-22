@@ -128,6 +128,12 @@ internal sealed class RemovalStateTransaction : IRemovalStateCheckpoint
         return TryMatchesAsync(_authPath, _authExisted, _authBytes, cancellationToken);
     }
 
+    public Task<bool> VerifyTargetSnapshotAbsentAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        return TryMatchesAsync(_snapshotPath, existed: false, expected: null, cancellationToken);
+    }
+
     public void Dispose()
     {
         if (_disposed)

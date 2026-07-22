@@ -228,6 +228,57 @@ public sealed class CodexProcessControllerTests
     }
 
     [Fact]
+    public async Task Close_fails_stable_zero_when_late_independent_package_root_appears()
+    {
+        var initial = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var lateRoot = Process(200, 1, 200, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([initial]);
+        accessor.OnWait = identity =>
+        {
+            if (identity.Id == initial.Identity.Id)
+            {
+                accessor.SetProcesses([lateRoot]);
+            }
+        };
+        var controller = Controller(accessor);
+
+        var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        Assert.False(result.AllExited);
+        Assert.Equal([lateRoot.Identity.Id], result.RemainingProcessIds);
+        Assert.Equal([initial.Identity.Id], accessor.ClosedProcessIds);
+    }
+
+    [Fact]
+    public async Task Close_requires_two_consecutive_package_wide_zero_observations()
+    {
+        var accessor = new FakeCodexProcessAccessor([]);
+        var controller = Controller(accessor);
+
+        var result = await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        Assert.True(result.AllExited);
+        Assert.True(accessor.EnumerationCount >= 2);
+    }
+
+    [Fact]
+    public async Task Close_fails_closed_for_unresolved_raw_chatgpt_candidate()
+    {
+        var accessor = new FakeCodexProcessAccessor([])
+        {
+            UnresolvedChatGptProcessIds = [777],
+        };
+        var controller = Controller(accessor);
+
+        var exception = await Assert.ThrowsAsync<CodexProcessDiscoveryException>(() =>
+            controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default));
+
+        Assert.Equal("Codex process state could not be verified.", exception.Message);
+        Assert.Empty(accessor.ClosedProcessIds);
+        Assert.Empty(accessor.WaitedProcessIds);
+    }
+
+    [Fact]
     public async Task Close_rejects_child_when_reused_parent_is_newer_than_child()
     {
         var accessor = new FakeCodexProcessAccessor(
@@ -453,7 +504,25 @@ public sealed class CodexProcessControllerTests
         await controller.ForceTerminateAsync([100], default);
 
         Assert.Equal([100, 101], accessor.KilledProcessIds);
-        Assert.Equal(3, accessor.EnumerationCount);
+        Assert.True(accessor.EnumerationCount >= 5);
+    }
+
+    [Fact]
+    public async Task Force_terminate_includes_late_independent_package_root_in_stable_zero_barrier()
+    {
+        var initial = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var lateRoot = Process(200, 1, 200, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([initial]);
+        accessor.ExitResults[initial.Identity.Id] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnKill = identity => accessor.SetProcesses(
+            identity.Id == initial.Identity.Id ? [lateRoot] : []);
+
+        await controller.ForceTerminateAsync([initial.Identity.Id], default);
+
+        Assert.Equal([initial.Identity.Id, lateRoot.Identity.Id], accessor.KilledProcessIds);
+        Assert.Contains(lateRoot.Identity.Id, accessor.WaitedProcessIds);
     }
 
     [Fact]
@@ -469,7 +538,7 @@ public sealed class CodexProcessControllerTests
         await controller.ForceTerminateAsync([100], default);
 
         Assert.Equal([100, 100], accessor.WaitedProcessIds);
-        Assert.Equal(3, accessor.EnumerationCount);
+        Assert.True(accessor.EnumerationCount >= 5);
     }
 
     [Fact]
@@ -487,7 +556,7 @@ public sealed class CodexProcessControllerTests
 
         Assert.Equal([100, 101], accessor.KilledProcessIds);
         Assert.Equal([100, 100, 101], accessor.WaitedProcessIds);
-        Assert.Equal(4, accessor.EnumerationCount);
+        Assert.True(accessor.EnumerationCount >= 6);
     }
 
     [Fact]
@@ -551,7 +620,7 @@ public sealed class CodexProcessControllerTests
     }
 
     [Fact]
-    public async Task Force_terminate_revalidates_identity_and_consumes_reused_target()
+    public async Task Force_terminate_fails_closed_when_reused_package_pid_remains_after_second_snapshot()
     {
         var original = Process(100, 1, 100, "app", "ChatGPT.exe");
         var accessor = new FakeCodexProcessAccessor([original]);
@@ -566,11 +635,70 @@ public sealed class CodexProcessControllerTests
             Process(101, 100, 201, "app", "resources", "reused-root-child.exe"),
         ]);
 
-        await controller.ForceTerminateAsync([100], default);
+        var enumerationCountBeforeForce = accessor.EnumerationCount;
 
+        var exception = await Assert.ThrowsAsync<CodexProcessDiscoveryException>(() =>
+            controller.ForceTerminateAsync([100], default));
+
+        Assert.Equal("Codex process state could not be verified.", exception.Message);
         Assert.Empty(accessor.KilledProcessIds);
+        Assert.True(accessor.EnumerationCount >= enumerationCountBeforeForce + 1);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             controller.ForceTerminateAsync([100], default));
+    }
+
+    [Fact]
+    public async Task Force_terminate_fails_closed_when_package_descendant_pid_is_reused()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var descendant = Process(101, 100, 101, "app", "resources", "codex.exe");
+        var accessor = new FakeCodexProcessAccessor([root, descendant]);
+        accessor.ExitResults[100] = false;
+        accessor.ExitResults[101] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.SetProcesses(
+        [
+            root,
+            Process(101, 100, 202, "app", "resources", "replacement.exe"),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<CodexProcessDiscoveryException>(() =>
+            controller.ForceTerminateAsync([100, 101], default));
+
+        Assert.Equal("Codex process state could not be verified.", exception.Message);
+        Assert.Empty(accessor.KilledProcessIds);
+    }
+
+    [Fact]
+    public async Task Force_terminate_does_not_count_blocked_first_snapshot_as_stable_zero()
+    {
+        var original = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([original]);
+        accessor.ExitResults[100] = false;
+        var controller = new CodexProcessController(
+            accessor,
+            new FakeAppsFolderLauncher(),
+            (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                accessor.SetProcesses([]);
+                return Task.CompletedTask;
+            });
+        accessor.SetProcesses([original]);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.SetProcesses(
+        [
+            new CodexProcessEntry(
+                original.Identity with { CreationTimeUtcTicks = 200 },
+                original.ParentProcessId),
+        ]);
+
+        var exception = await Assert.ThrowsAsync<CodexProcessDiscoveryException>(() =>
+            controller.ForceTerminateAsync([100], default));
+
+        Assert.Equal("Codex process state could not be verified.", exception.Message);
+        Assert.Empty(accessor.KilledProcessIds);
     }
 
     [Fact]
@@ -737,6 +865,12 @@ public sealed class CodexProcessControllerTests
             OnGetProcesses?.Invoke();
             return _processes;
         }
+
+        public IReadOnlyList<int> UnresolvedChatGptProcessIds { get; init; } = [];
+
+        public CodexProcessSnapshot GetProcessSnapshot() => new(
+            GetProcesses(),
+            UnresolvedChatGptProcessIds);
 
         public void SetProcesses(IReadOnlyList<CodexProcessEntry> processes)
         {
@@ -922,13 +1056,59 @@ public sealed class SystemCodexProcessAccessorTests
         Assert.True(nativeApi.OpenedHandle!.IsClosed);
     }
 
+    [Fact]
+    public void Discovery_uses_query_only_handle_when_termination_open_would_fail()
+    {
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity)
+        {
+            TerminationOpenResult = false,
+        };
+        var accessor = new SystemCodexProcessAccessor(
+            nativeApi,
+            () => [new RawProcessEntry(ExpectedIdentity.Id, 1, "ChatGPT.exe")]);
+
+        var snapshot = accessor.GetProcessSnapshot();
+
+        Assert.Equal(ExpectedIdentity, Assert.Single(snapshot.Processes).Identity);
+        Assert.Empty(snapshot.UnresolvedChatGptProcessIds);
+        Assert.Equal(1, nativeApi.QueryOpenCount);
+        Assert.Equal(0, nativeApi.TerminationOpenCount);
+    }
+
+    [Fact]
+    public void Discovery_reports_unopenable_raw_chatgpt_as_unresolved()
+    {
+        var nativeApi = new FakeWindowsProcessApi(ExpectedIdentity)
+        {
+            QueryOpenResult = false,
+        };
+        var accessor = new SystemCodexProcessAccessor(
+            nativeApi,
+            () => [new RawProcessEntry(ExpectedIdentity.Id, 1, "ChatGPT.exe")]);
+
+        var snapshot = accessor.GetProcessSnapshot();
+
+        Assert.Empty(snapshot.Processes);
+        Assert.Equal([ExpectedIdentity.Id], snapshot.UnresolvedChatGptProcessIds);
+        Assert.Equal(1, nativeApi.QueryOpenCount);
+        Assert.Equal(0, nativeApi.TerminationOpenCount);
+    }
+
     private sealed class FakeWindowsProcessApi(CodexProcessIdentity identity) : IWindowsProcessApi
     {
         public bool CloseResult { get; init; } = true;
 
         public List<string> Events { get; } = [];
 
-        public int OpenCount { get; private set; }
+        public int OpenCount => QueryOpenCount + TerminationOpenCount;
+
+        public int QueryOpenCount { get; private set; }
+
+        public bool QueryOpenResult { get; init; } = true;
+
+        public int TerminationOpenCount { get; private set; }
+
+        public bool TerminationOpenResult { get; init; } = true;
 
         public SafeProcessHandle? OpenedHandle { get; private set; }
 
@@ -936,11 +1116,30 @@ public sealed class SystemCodexProcessAccessorTests
 
         public bool WaitResult { get; init; }
 
-        public SafeProcessHandle? TryOpenProcess(int processId)
+        public SafeProcessHandle? TryOpenProcessForQuery(int processId)
         {
             Assert.Equal(ExpectedIdentity.Id, processId);
-            OpenCount++;
+            QueryOpenCount++;
             Events.Add("open");
+            if (!QueryOpenResult)
+            {
+                return null;
+            }
+
+            OpenedHandle = new SafeProcessHandle(new IntPtr(1234), ownsHandle: false);
+            return OpenedHandle;
+        }
+
+        public SafeProcessHandle? TryOpenProcessForTermination(int processId)
+        {
+            Assert.Equal(ExpectedIdentity.Id, processId);
+            TerminationOpenCount++;
+            Events.Add("open");
+            if (!TerminationOpenResult)
+            {
+                return null;
+            }
+
             OpenedHandle = new SafeProcessHandle(new IntPtr(1234), ownsHandle: false);
             return OpenedHandle;
         }

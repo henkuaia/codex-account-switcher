@@ -8,6 +8,8 @@ namespace CodexAccountSwitcher.Services;
 public sealed record LoginResult(bool Succeeded, string Message, bool LaunchSucceeded)
 {
     public bool CanRetryLaunch { get; init; }
+
+    public HelperAvailability? HelperAvailability { get; init; }
 }
 
 public sealed class SafeLoginCoordinator
@@ -21,6 +23,8 @@ public sealed class SafeLoginCoordinator
         "Account login was canceled before authentication changed. Codex was restarted.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
+    private const string UnknownHelperExitMessage =
+        "Codex remains closed because helper process exit could not be verified.";
     private const string SuccessfulLaunchFailureMessage =
         "Account login was verified, but Codex launch failed.";
     private const string FailedLaunchFailureMessage =
@@ -96,7 +100,10 @@ public sealed class SafeLoginCoordinator
         var helperAvailability = _checkHelperAvailability();
         if (!helperAvailability.IsAvailable)
         {
-            return new LoginResult(false, helperAvailability.Error, true);
+            return new LoginResult(false, helperAvailability.Error, true)
+            {
+                HelperAvailability = helperAvailability,
+            };
         }
 
         IAuthStateCheckpoint? checkpoint = null;
@@ -108,6 +115,7 @@ public sealed class SafeLoginCoordinator
         var priorStateRestored = false;
         var closeSideEffectsStarted = false;
         var forceRecoveryCommitted = false;
+        HelperAvailability? resultHelperAvailability = null;
         ExceptionDispatchInfo? pendingException = null;
 
         try
@@ -136,6 +144,7 @@ public sealed class SafeLoginCoordinator
             var commandResult = await _loginAsync(outputHandler, cancellationToken);
             if (!commandResult.Succeeded)
             {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
                 restoreRequired = true;
                 result = new LoginResult(false, LoginFailedMessage, false);
             }
@@ -192,6 +201,12 @@ public sealed class SafeLoginCoordinator
                 pendingException = ExceptionDispatchInfo.Capture(exception);
             }
         }
+        catch (HelperProcessExitUnverifiedException)
+        {
+            restoreRequired = false;
+            launchAllowed = false;
+            result = new LoginResult(false, UnknownHelperExitMessage, false);
+        }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
             if (stage == LoginStage.Close ||
@@ -214,6 +229,11 @@ public sealed class SafeLoginCoordinator
         }
         catch (Exception exception) when (IsOperationalFailure(stage, exception))
         {
+            if (stage == LoginStage.Login)
+            {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
+            }
+
             restoreRequired = checkpoint is not null;
             launchAllowed = checkpoint is null && recoveryResponsible;
             result = new LoginResult(
@@ -306,7 +326,18 @@ public sealed class SafeLoginCoordinator
         }
 
         pendingException?.Throw();
+        if (resultHelperAvailability is not null)
+        {
+            result = result with { HelperAvailability = resultHelperAvailability };
+        }
+
         return result;
+    }
+
+    private HelperAvailability? GetUnavailableHelperAvailability()
+    {
+        var availability = _checkHelperAvailability();
+        return availability.IsAvailable ? null : availability;
     }
 
     private static bool IsOperationalFailure(LoginStage stage, Exception exception) => stage switch
@@ -316,7 +347,7 @@ public sealed class SafeLoginCoordinator
         LoginStage.Capture =>
             exception is AuthStateCheckpointException or IOException or UnauthorizedAccessException,
         LoginStage.Login =>
-            exception is Win32Exception or IOException or UnauthorizedAccessException,
+            exception is HelperProcessStartException or Win32Exception or IOException or UnauthorizedAccessException,
         LoginStage.Verify =>
             exception is InvalidDataException or IOException or UnauthorizedAccessException,
         _ => false,

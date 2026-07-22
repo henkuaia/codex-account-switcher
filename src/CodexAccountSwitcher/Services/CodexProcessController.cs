@@ -52,6 +52,9 @@ public sealed class CodexForceTerminateCanceledException : OperationCanceledExce
 public sealed class CodexLaunchException()
     : InvalidOperationException("Codex launch failed.");
 
+public sealed class CodexProcessDiscoveryException()
+    : IOException("Codex process state could not be verified.");
+
 public interface ICodexProcessController
 {
     Task<CloseResult> CloseAsync(
@@ -71,9 +74,17 @@ internal sealed record CodexProcessIdentity(
 
 internal sealed record CodexProcessEntry(CodexProcessIdentity Identity, int ParentProcessId);
 
+internal sealed record CodexProcessSnapshot(
+    IReadOnlyList<CodexProcessEntry> Processes,
+    IReadOnlyList<int> UnresolvedChatGptProcessIds);
+
+internal sealed record RawProcessEntry(int Id, int ParentProcessId, string ExecutableFile);
+
 internal interface ICodexProcessAccessor
 {
     IReadOnlyList<CodexProcessEntry> GetProcesses();
+
+    CodexProcessSnapshot GetProcessSnapshot() => new(GetProcesses(), []);
 
     bool CloseMainWindow(CodexProcessIdentity expectedIdentity);
 
@@ -97,7 +108,9 @@ internal interface IAppsFolderLauncher
 
 internal interface IWindowsProcessApi
 {
-    SafeProcessHandle? TryOpenProcess(int processId);
+    SafeProcessHandle? TryOpenProcessForQuery(int processId);
+
+    SafeProcessHandle? TryOpenProcessForTermination(int processId);
 
     bool TryGetIdentity(
         SafeProcessHandle processHandle,
@@ -117,6 +130,7 @@ internal interface IWindowsProcessApi
 public sealed class CodexProcessController : ICodexProcessController
 {
     private const int MaximumForceTerminationWaves = 16;
+    private static readonly TimeSpan StableZeroObservationInterval = TimeSpan.FromMilliseconds(25);
     private const string ForceTerminationTimeoutMessage =
         "Codex processes did not exit after force termination.";
     private const string UntrustedForceTargetMessage =
@@ -124,22 +138,25 @@ public sealed class CodexProcessController : ICodexProcessController
     private static readonly TimeSpan MaximumCloseTimeout = TimeSpan.FromSeconds(8);
     private static readonly TimeSpan MaximumForceTerminationTimeout = TimeSpan.FromSeconds(8);
     private readonly IAppsFolderLauncher _appsFolderLauncher;
+    private readonly Func<TimeSpan, CancellationToken, Task> _delayAsync;
     private readonly Dictionary<int, CodexProcessIdentity> _issuedRemainingTargets = [];
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly ICodexProcessAccessor _processAccessor;
     private string? _issuedInstallLocation;
 
     public CodexProcessController()
-        : this(new SystemCodexProcessAccessor(), new SystemAppsFolderLauncher())
+        : this(new SystemCodexProcessAccessor(), new SystemAppsFolderLauncher(), Task.Delay)
     {
     }
 
     internal CodexProcessController(
         ICodexProcessAccessor processAccessor,
-        IAppsFolderLauncher appsFolderLauncher)
+        IAppsFolderLauncher appsFolderLauncher,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
     {
         _processAccessor = processAccessor ?? throw new ArgumentNullException(nameof(processAccessor));
         _appsFolderLauncher = appsFolderLauncher ?? throw new ArgumentNullException(nameof(appsFolderLauncher));
+        _delayAsync = delayAsync ?? Task.Delay;
     }
 
     public async Task<CloseResult> CloseAsync(
@@ -162,7 +179,7 @@ public sealed class CodexProcessController : ICodexProcessController
             gateEntered = true;
             _issuedRemainingTargets.Clear();
             _issuedInstallLocation = null;
-            var targets = SelectTargetProcesses(package, _processAccessor.GetProcesses());
+            var targets = SelectTargetProcesses(package, GetVerifiedProcesses());
             foreach (var process in targets)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -177,10 +194,23 @@ public sealed class CodexProcessController : ICodexProcessController
                     cancellationToken))
                 .ToArray();
             var exitResults = await Task.WhenAll(exitTasks);
-            var remainingTargets = targets
-                .Where((_, index) => !exitResults[index])
+            var currentProcesses = GetVerifiedProcesses();
+            cancellationToken.ThrowIfCancellationRequested();
+            var remainingTargets = SelectTargetProcesses(package, currentProcesses)
+                .Where(process => !WasObservedExited(process.Identity, targets, exitResults))
                 .Select(process => process.Identity)
                 .ToArray();
+
+            if (remainingTargets.Length == 0)
+            {
+                await _delayAsync(StableZeroObservationInterval, cancellationToken);
+                currentProcesses = GetVerifiedProcesses();
+                cancellationToken.ThrowIfCancellationRequested();
+                remainingTargets = SelectTargetProcesses(package, currentProcesses)
+                    .Where(process => !WasObservedExited(process.Identity, targets, exitResults))
+                    .Select(process => process.Identity)
+                    .ToArray();
+            }
 
             foreach (var identity in remainingTargets)
             {
@@ -248,7 +278,7 @@ public sealed class CodexProcessController : ICodexProcessController
 
             cancellationToken.ThrowIfCancellationRequested();
             var installLocation = _issuedInstallLocation!;
-            var currentProcesses = _processAccessor.GetProcesses();
+            var currentProcesses = GetVerifiedProcesses();
             cancellationToken.ThrowIfCancellationRequested();
 
             foreach (var identity in requestedTargets)
@@ -265,7 +295,11 @@ public sealed class CodexProcessController : ICodexProcessController
             for (var wave = 0; wave < MaximumForceTerminationWaves; wave++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var terminationTargets = SelectForceTerminationTargets(
+                ThrowIfBlockedPackageCandidatesRemain(
+                    authorizedTargets.Values.ToArray(),
+                    currentProcesses,
+                    installLocation);
+                var terminationTargets = SelectPackageWideTerminationTargets(
                     authorizedTargets.Values.ToArray(),
                     currentProcesses,
                     installLocation);
@@ -276,7 +310,21 @@ public sealed class CodexProcessController : ICodexProcessController
 
                 if (terminationTargets.Count == 0)
                 {
-                    return;
+                    await _delayAsync(StableZeroObservationInterval, cancellationToken);
+                    currentProcesses = GetVerifiedProcesses();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ThrowIfBlockedPackageCandidatesRemain(
+                        authorizedTargets.Values.ToArray(),
+                        currentProcesses,
+                        installLocation);
+                    terminationTargets = SelectPackageWideTerminationTargets(
+                        authorizedTargets.Values.ToArray(),
+                        currentProcesses,
+                        installLocation);
+                    if (terminationTargets.Count == 0)
+                    {
+                        return;
+                    }
                 }
 
                 foreach (var identity in terminationTargets)
@@ -292,9 +340,13 @@ public sealed class CodexProcessController : ICodexProcessController
                         cancellationToken)));
                 cancellationToken.ThrowIfCancellationRequested();
 
-                currentProcesses = _processAccessor.GetProcesses();
+                currentProcesses = GetVerifiedProcesses();
                 cancellationToken.ThrowIfCancellationRequested();
-                var remainingTargets = SelectForceTerminationTargets(
+                ThrowIfBlockedPackageCandidatesRemain(
+                    authorizedTargets.Values.ToArray(),
+                    currentProcesses,
+                    installLocation);
+                var remainingTargets = SelectPackageWideTerminationTargets(
                     authorizedTargets.Values.ToArray(),
                     currentProcesses,
                     installLocation);
@@ -305,7 +357,26 @@ public sealed class CodexProcessController : ICodexProcessController
 
                 if (remainingTargets.Count == 0)
                 {
-                    return;
+                    await _delayAsync(StableZeroObservationInterval, cancellationToken);
+                    currentProcesses = GetVerifiedProcesses();
+                    cancellationToken.ThrowIfCancellationRequested();
+                    ThrowIfBlockedPackageCandidatesRemain(
+                        authorizedTargets.Values.ToArray(),
+                        currentProcesses,
+                        installLocation);
+                    remainingTargets = SelectPackageWideTerminationTargets(
+                        authorizedTargets.Values.ToArray(),
+                        currentProcesses,
+                        installLocation);
+                    foreach (var identity in remainingTargets)
+                    {
+                        authorizedTargets[identity.Id] = identity;
+                    }
+
+                    if (remainingTargets.Count == 0)
+                    {
+                        return;
+                    }
                 }
 
                 var timedOutIdentities = terminationTargets
@@ -355,6 +426,17 @@ public sealed class CodexProcessController : ICodexProcessController
         return Task.CompletedTask;
     }
 
+    private IReadOnlyList<CodexProcessEntry> GetVerifiedProcesses()
+    {
+        var snapshot = _processAccessor.GetProcessSnapshot();
+        if (snapshot.UnresolvedChatGptProcessIds.Count > 0)
+        {
+            throw new CodexProcessDiscoveryException();
+        }
+
+        return snapshot.Processes;
+    }
+
     private static IReadOnlyList<CodexProcessEntry> SelectTargetProcesses(
         CodexPackageInfo package,
         IReadOnlyList<CodexProcessEntry> processes)
@@ -364,10 +446,22 @@ public sealed class CodexProcessController : ICodexProcessController
             throw new ArgumentException("The install location must be fully qualified.", nameof(package));
         }
 
+        return SelectTargetProcesses(package.InstallLocation, processes);
+    }
+
+    private static IReadOnlyList<CodexProcessEntry> SelectTargetProcesses(
+        string installLocation,
+        IReadOnlyList<CodexProcessEntry> processes)
+    {
+        if (!Path.IsPathFullyQualified(installLocation))
+        {
+            throw new ArgumentException("The install location must be fully qualified.", nameof(installLocation));
+        }
+
         var selectedIdentities = new Dictionary<int, CodexProcessIdentity>();
         foreach (var process in processes)
         {
-            if (IsInsideInstallLocation(process.Identity.ExecutablePath, package.InstallLocation) &&
+            if (IsInsideInstallLocation(process.Identity.ExecutablePath, installLocation) &&
                 string.Equals(
                     Path.GetFileName(process.Identity.ExecutablePath),
                     "ChatGPT.exe",
@@ -386,7 +480,7 @@ public sealed class CodexProcessController : ICodexProcessController
                 if (selectedIdentities.ContainsKey(process.Identity.Id) ||
                     !selectedIdentities.TryGetValue(process.ParentProcessId, out var parentIdentity) ||
                     parentIdentity.CreationTimeUtcTicks > process.Identity.CreationTimeUtcTicks ||
-                    !IsInsideInstallLocation(process.Identity.ExecutablePath, package.InstallLocation))
+                    !IsInsideInstallLocation(process.Identity.ExecutablePath, installLocation))
                 {
                     continue;
                 }
@@ -508,6 +602,113 @@ public sealed class CodexProcessController : ICodexProcessController
             .ToArray();
     }
 
+    private static IReadOnlyList<CodexProcessIdentity> SelectPackageWideTerminationTargets(
+        IReadOnlyList<CodexProcessIdentity> trustedRoots,
+        IReadOnlyList<CodexProcessEntry> processes,
+        string installLocation)
+    {
+        var targets = new Dictionary<int, CodexProcessIdentity>();
+        foreach (var identity in SelectForceTerminationTargets(trustedRoots, processes, installLocation))
+        {
+            targets.TryAdd(identity.Id, identity);
+        }
+
+        var entriesById = processes
+            .GroupBy(process => process.Identity.Id)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single());
+        var blockedRootIds = GetBlockedPackageProcessIds(
+            trustedRoots,
+            processes,
+            installLocation);
+
+        foreach (var process in SelectTargetProcesses(installLocation, processes))
+        {
+            if (!HasBlockedAncestor(process, entriesById, blockedRootIds))
+            {
+                targets.TryAdd(process.Identity.Id, process.Identity);
+            }
+        }
+
+        return targets.Values.ToArray();
+    }
+
+    private static void ThrowIfBlockedPackageCandidatesRemain(
+        IReadOnlyList<CodexProcessIdentity> trustedRoots,
+        IReadOnlyList<CodexProcessEntry> processes,
+        string installLocation)
+    {
+        var blockedRootIds = GetBlockedPackageProcessIds(
+            trustedRoots,
+            processes,
+            installLocation);
+        if (blockedRootIds.Count == 0)
+        {
+            return;
+        }
+
+        throw new CodexProcessDiscoveryException();
+    }
+
+    private static HashSet<int> GetBlockedPackageProcessIds(
+        IReadOnlyList<CodexProcessIdentity> trustedRoots,
+        IReadOnlyList<CodexProcessEntry> processes,
+        string installLocation)
+    {
+        var unambiguousEntries = processes
+            .GroupBy(process => process.Identity.Id)
+            .Where(group => group.Count() == 1)
+            .ToDictionary(group => group.Key, group => group.Single());
+        return SelectTargetProcesses(installLocation, processes)
+            .Where(process =>
+                unambiguousEntries.TryGetValue(process.Identity.Id, out var entry) &&
+                entry == process &&
+                trustedRoots.Any(trusted =>
+                    trusted.Id == process.Identity.Id &&
+                    !IdentitiesMatch(trusted, process.Identity)))
+            .Select(process => process.Identity.Id)
+            .ToHashSet();
+    }
+
+    private static bool WasObservedExited(
+        CodexProcessIdentity identity,
+        IReadOnlyList<CodexProcessEntry> initialTargets,
+        IReadOnlyList<bool> exitResults)
+    {
+        for (var index = 0; index < initialTargets.Count; index++)
+        {
+            if (exitResults[index] && IdentitiesMatch(identity, initialTargets[index].Identity))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasBlockedAncestor(
+        CodexProcessEntry process,
+        IReadOnlyDictionary<int, CodexProcessEntry> entriesById,
+        IReadOnlySet<int> blockedRootIds)
+    {
+        var current = process;
+        var visited = new HashSet<int>();
+        while (visited.Add(current.Identity.Id))
+        {
+            if (blockedRootIds.Contains(current.Identity.Id))
+            {
+                return true;
+            }
+
+            if (!entriesById.TryGetValue(current.ParentProcessId, out current!))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static bool IdentitiesMatch(
         CodexProcessIdentity currentIdentity,
         CodexProcessIdentity expectedIdentity) =>
@@ -586,10 +787,16 @@ internal sealed class WindowsProcessApi : IWindowsProcessApi
     private const int ErrorInvalidWindowHandle = 1400;
     private const int MaximumPathCharacters = 32768;
 
-    public SafeProcessHandle? TryOpenProcess(int processId)
+    public SafeProcessHandle? TryOpenProcessForQuery(int processId) =>
+        TryOpenProcess(processId, QueryLimitedInformation | Synchronize);
+
+    public SafeProcessHandle? TryOpenProcessForTermination(int processId) =>
+        TryOpenProcess(processId, ProcessTerminate | QueryLimitedInformation | Synchronize);
+
+    private static SafeProcessHandle? TryOpenProcess(int processId, uint desiredAccess)
     {
         var processHandle = OpenProcess(
-            ProcessTerminate | QueryLimitedInformation | Synchronize,
+            desiredAccess,
             inheritHandle: false,
             processId);
         if (!processHandle.IsInvalid)
@@ -908,11 +1115,24 @@ internal sealed class SystemProcessHandle : IDisposable
         _nativeApi = nativeApi;
     }
 
-    public static SystemProcessHandle? TryOpen(
+    public static SystemProcessHandle? TryOpenForQuery(
         int processId,
-        IWindowsProcessApi nativeApi)
+        IWindowsProcessApi nativeApi) =>
+        TryOpen(processId, nativeApi, requireTermination: false);
+
+    public static SystemProcessHandle? TryOpenForTermination(
+        int processId,
+        IWindowsProcessApi nativeApi) =>
+        TryOpen(processId, nativeApi, requireTermination: true);
+
+    private static SystemProcessHandle? TryOpen(
+        int processId,
+        IWindowsProcessApi nativeApi,
+        bool requireTermination)
     {
-        var safeHandle = nativeApi.TryOpenProcess(processId);
+        var safeHandle = requireTermination
+            ? nativeApi.TryOpenProcessForTermination(processId)
+            : nativeApi.TryOpenProcessForQuery(processId);
         return safeHandle is null
             ? null
             : new SystemProcessHandle(processId, safeHandle, nativeApi);
@@ -944,16 +1164,65 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 {
     private const uint SnapshotProcesses = 0x00000002;
     private const int ErrorNoMoreFiles = 18;
+    private readonly Func<IReadOnlyList<RawProcessEntry>> _enumerateRawProcesses;
     private readonly IWindowsProcessApi _nativeApi;
 
-    public SystemCodexProcessAccessor() : this(new WindowsProcessApi())
+    public SystemCodexProcessAccessor()
+        : this(new WindowsProcessApi(), EnumerateRawProcesses)
     {
     }
 
-    internal SystemCodexProcessAccessor(IWindowsProcessApi nativeApi) =>
-        _nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
+    internal SystemCodexProcessAccessor(IWindowsProcessApi nativeApi)
+        : this(nativeApi, EnumerateRawProcesses)
+    {
+    }
 
-    public IReadOnlyList<CodexProcessEntry> GetProcesses()
+    internal SystemCodexProcessAccessor(
+        IWindowsProcessApi nativeApi,
+        Func<IReadOnlyList<RawProcessEntry>> enumerateRawProcesses)
+    {
+        _nativeApi = nativeApi ?? throw new ArgumentNullException(nameof(nativeApi));
+        _enumerateRawProcesses = enumerateRawProcesses
+            ?? throw new ArgumentNullException(nameof(enumerateRawProcesses));
+    }
+
+    public IReadOnlyList<CodexProcessEntry> GetProcesses() => GetProcessSnapshot().Processes;
+
+    public CodexProcessSnapshot GetProcessSnapshot()
+    {
+        var processes = new List<CodexProcessEntry>();
+        var unresolvedChatGptProcessIds = new List<int>();
+        foreach (var rawProcess in _enumerateRawProcesses())
+        {
+            var isRawChatGpt = string.Equals(
+                Path.GetFileName(rawProcess.ExecutableFile),
+                "ChatGPT.exe",
+                StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                using var processHandle = SystemProcessHandle.TryOpenForQuery(
+                    rawProcess.Id,
+                    _nativeApi);
+                if (processHandle is not null &&
+                    processHandle.TryGetIdentity(out var identity))
+                {
+                    processes.Add(new CodexProcessEntry(identity, rawProcess.ParentProcessId));
+                }
+                else if (isRawChatGpt)
+                {
+                    unresolvedChatGptProcessIds.Add(rawProcess.Id);
+                }
+            }
+            catch (Win32Exception) when (isRawChatGpt)
+            {
+                unresolvedChatGptProcessIds.Add(rawProcess.Id);
+            }
+        }
+
+        return new CodexProcessSnapshot(processes, unresolvedChatGptProcessIds);
+    }
+
+    private static IReadOnlyList<RawProcessEntry> EnumerateRawProcesses()
     {
         using var snapshot = CreateToolhelp32Snapshot(SnapshotProcesses, 0);
         if (snapshot.IsInvalid)
@@ -973,18 +1242,13 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
             throw new Win32Exception(error);
         }
 
-        var processes = new List<CodexProcessEntry>();
+        var processes = new List<RawProcessEntry>();
         do
         {
-            var processId = unchecked((int)nativeEntry.ProcessId);
-            using var processHandle = SystemProcessHandle.TryOpen(processId, _nativeApi);
-            if (processHandle is not null &&
-                processHandle.TryGetIdentity(out var identity))
-            {
-                processes.Add(new CodexProcessEntry(
-                    identity,
-                    unchecked((int)nativeEntry.ParentProcessId)));
-            }
+            processes.Add(new RawProcessEntry(
+                unchecked((int)nativeEntry.ProcessId),
+                unchecked((int)nativeEntry.ParentProcessId),
+                nativeEntry.ExecutableFile));
 
             nativeEntry = NewNativeEntry();
         }
@@ -1001,7 +1265,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 
     public bool CloseMainWindow(CodexProcessIdentity expectedIdentity)
     {
-        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
+        using var processHandle = SystemProcessHandle.TryOpenForQuery(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))
@@ -1017,7 +1281,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
+        using var processHandle = SystemProcessHandle.TryOpenForQuery(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))
@@ -1037,7 +1301,7 @@ internal sealed class SystemCodexProcessAccessor : ICodexProcessAccessor
 
     public bool Kill(CodexProcessIdentity expectedIdentity, bool entireProcessTree)
     {
-        using var processHandle = SystemProcessHandle.TryOpen(expectedIdentity.Id, _nativeApi);
+        using var processHandle = SystemProcessHandle.TryOpenForTermination(expectedIdentity.Id, _nativeApi);
         if (processHandle is null ||
             !processHandle.TryGetIdentity(out var currentIdentity) ||
             !IdentityMatches(currentIdentity, expectedIdentity))

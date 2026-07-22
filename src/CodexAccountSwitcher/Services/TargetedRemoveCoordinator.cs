@@ -5,13 +5,18 @@ using System.Runtime.ExceptionServices;
 
 namespace CodexAccountSwitcher.Services;
 
-public sealed record RemovalResult(bool Succeeded, string Message);
+public sealed record RemovalResult(bool Succeeded, string Message)
+{
+    public HelperAvailability? HelperAvailability { get; init; }
+}
 
 internal interface IRemovalStateCheckpoint : IDisposable
 {
     Task<bool> RestoreAndVerifyAsync(CancellationToken cancellationToken);
 
     Task<bool> VerifyAuthUnchangedAsync(CancellationToken cancellationToken);
+
+    Task<bool> VerifyTargetSnapshotAbsentAsync(CancellationToken cancellationToken);
 }
 
 public sealed class TargetedRemoveCoordinator
@@ -26,6 +31,8 @@ public sealed class TargetedRemoveCoordinator
         "Account removal was canceled. The prior account state was restored.";
     private const string RecoveryFailureMessage = "Account removal recovery could not be verified.";
     private const string PreMutationFailureMessage = "Account removal failed before account state changed.";
+    private const string UnknownHelperExitMessage =
+        "Account removal state was not restored because helper process exit could not be verified.";
 
     private readonly string _codexHome;
     private readonly Func<string, CancellationToken, Task<CommandResult>> _removeAsync;
@@ -90,7 +97,10 @@ public sealed class TargetedRemoveCoordinator
         var helperAvailability = _checkHelperAvailability();
         if (!helperAvailability.IsAvailable)
         {
-            return new RemovalResult(false, helperAvailability.Error);
+            return new RemovalResult(false, helperAvailability.Error)
+            {
+                HelperAvailability = helperAvailability,
+            };
         }
 
         var beforeActiveAccounts = before.Accounts.Where(account => string.Equals(
@@ -106,6 +116,7 @@ public sealed class TargetedRemoveCoordinator
         var result = new RemovalResult(false, RemovalFailedMessage);
         var stage = RemovalStage.Capture;
         var restoreRequired = false;
+        HelperAvailability? resultHelperAvailability = null;
         ExceptionDispatchInfo? pendingException = null;
 
         try
@@ -117,6 +128,7 @@ public sealed class TargetedRemoveCoordinator
             var commandResult = await _removeAsync(selector.Value!, cancellationToken);
             if (!commandResult.Succeeded)
             {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
                 restoreRequired = true;
             }
             else
@@ -126,6 +138,8 @@ public sealed class TargetedRemoveCoordinator
                 var registry = await _loadRegistryAsync(_codexHome, cancellationToken);
                 var authAccountId = await _readAuthAccountIdAsync(_codexHome, cancellationToken);
                 var authUnchanged = await checkpoint.VerifyAuthUnchangedAsync(cancellationToken);
+                var targetSnapshotAbsent =
+                    await checkpoint.VerifyTargetSnapshotAbsentAsync(cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var afterActiveAccounts = registry.Accounts.Where(account => string.Equals(
@@ -150,7 +164,7 @@ public sealed class TargetedRemoveCoordinator
                         beforeActiveAccounts[0].ChatGptAccountId,
                         StringComparison.Ordinal);
 
-                if (!targetRemoved || !activePreserved || !authUnchanged)
+                if (!targetRemoved || !activePreserved || !authUnchanged || !targetSnapshotAbsent)
                 {
                     restoreRequired = true;
                 }
@@ -159,6 +173,11 @@ public sealed class TargetedRemoveCoordinator
                     result = new RemovalResult(true, RemovalSucceededMessage);
                 }
             }
+        }
+        catch (HelperProcessExitUnverifiedException)
+        {
+            restoreRequired = false;
+            result = new RemovalResult(false, UnknownHelperExitMessage);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -172,6 +191,11 @@ public sealed class TargetedRemoveCoordinator
         }
         catch (Exception exception) when (IsOperationalFailure(stage, exception))
         {
+            if (stage == RemovalStage.Remove)
+            {
+                resultHelperAvailability = GetUnavailableHelperAvailability();
+            }
+
             restoreRequired = checkpoint is not null;
             result = new RemovalResult(
                 false,
@@ -218,14 +242,26 @@ public sealed class TargetedRemoveCoordinator
         }
 
         pendingException?.Throw();
+        if (resultHelperAvailability is not null)
+        {
+            result = result with { HelperAvailability = resultHelperAvailability };
+        }
+
         return result;
+    }
+
+    private HelperAvailability? GetUnavailableHelperAvailability()
+    {
+        var availability = _checkHelperAvailability();
+        return availability.IsAvailable ? null : availability;
     }
 
     private static bool IsOperationalFailure(RemovalStage stage, Exception exception) => stage switch
     {
         RemovalStage.Capture =>
             exception is RemovalStateCheckpointException or IOException or UnauthorizedAccessException,
-        RemovalStage.Remove => exception is Win32Exception or IOException or UnauthorizedAccessException,
+        RemovalStage.Remove =>
+            exception is HelperProcessStartException or Win32Exception or IOException or UnauthorizedAccessException,
         RemovalStage.Verify => exception is InvalidDataException or IOException or UnauthorizedAccessException,
         _ => false,
     };

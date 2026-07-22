@@ -46,8 +46,7 @@ public partial class App : System.Windows.Application
             var activityTracker = new ActiveOperationTracker();
             var dialogService = new AccountDialogService(
                 () => _mainWindow,
-                uiDispatcher,
-                activityTracker);
+                uiDispatcher);
             var viewModel = new MainWindowViewModel(
                 codexHome,
                 registryService,
@@ -55,7 +54,8 @@ public partial class App : System.Windows.Application
                 authService,
                 switchCoordinator,
                 dialogService,
-                uiDispatcher);
+                uiDispatcher,
+                activityTracker);
 
             _mainWindow = new MainWindow(viewModel);
             MainWindow = _mainWindow;
@@ -166,13 +166,13 @@ internal static class ApplicationPathResolver
 }
 
 internal sealed class ApplicationExitCoordinator(
-    ActiveOperationTracker activityTracker,
+    IOperationActivityTracker activityTracker,
     Action rejected,
     Action disposeTray,
     Action closeWindow,
     Action shutdown)
 {
-    private readonly ActiveOperationTracker _activityTracker = activityTracker
+    private readonly IOperationActivityTracker _activityTracker = activityTracker
         ?? throw new ArgumentNullException(nameof(activityTracker));
     private readonly Action _rejected = rejected ?? throw new ArgumentNullException(nameof(rejected));
     private readonly Action _disposeTray = disposeTray ?? throw new ArgumentNullException(nameof(disposeTray));
@@ -208,15 +208,12 @@ internal sealed class WpfUiDispatcher(Dispatcher dispatcher) : IUiDispatcher
 
 internal sealed class AccountDialogService(
     Func<Window?> ownerProvider,
-    IUiDispatcher dispatcher,
-    ActiveOperationTracker activityTracker) : IAccountDialogService
+    IUiDispatcher dispatcher) : IAccountDialogService
 {
     private readonly Func<Window?> _ownerProvider = ownerProvider
         ?? throw new ArgumentNullException(nameof(ownerProvider));
     private readonly IUiDispatcher _dispatcher = dispatcher
         ?? throw new ArgumentNullException(nameof(dispatcher));
-    private readonly ActiveOperationTracker _activityTracker = activityTracker
-        ?? throw new ArgumentNullException(nameof(activityTracker));
 
     public async Task<bool> ConfirmSwitchAsync(
         AccountRowViewModel target,
@@ -244,7 +241,6 @@ internal sealed class AccountDialogService(
         ArgumentNullException.ThrowIfNull(operation);
         OperationWindow? window = null;
         return DialogOperationRunner.RunLoginAsync(
-            activityTracker: _activityTracker,
             showAsync: async () =>
             {
                 Task firstRender = Task.CompletedTask;
@@ -277,7 +273,6 @@ internal sealed class AccountDialogService(
         ArgumentNullException.ThrowIfNull(operation);
         OperationWindow? window = null;
         return DialogOperationRunner.RunRemoveAsync(
-            activityTracker: _activityTracker,
             showAsync: async () =>
             {
                 Task firstRender = Task.CompletedTask;

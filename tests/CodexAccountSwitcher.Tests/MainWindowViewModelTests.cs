@@ -2,6 +2,7 @@ using System.Windows.Input;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
 using CodexAccountSwitcher.ViewModels;
+using CodexAccountSwitcher.Views;
 
 namespace CodexAccountSwitcher.Tests;
 
@@ -107,6 +108,135 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal(1, loadCallsBeforeRelease);
         Assert.Equal(0, removeCallsBeforeRelease);
+    }
+
+    [Fact]
+    public async Task Exit_is_rejected_through_switch_and_noncancelable_busy_clear()
+    {
+        var dispatcher = new ControllableDispatcher();
+        var tracker = new ActiveOperationTracker();
+        var fixture = new Fixture(dispatcher, tracker);
+        await fixture.ViewModel.LoadAsync();
+        fixture.Dialog.ConfirmResult = true;
+        fixture.Registries.Enqueue(fixture.Registry with
+        {
+            ActiveAccountKey = fixture.Second.AccountKey,
+        });
+        var switchStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var switchResult = new TaskCompletionSource<SwitchResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.SwitchOperation = (_, _, _) =>
+        {
+            switchStarted.TrySetResult();
+            return switchResult.Task;
+        };
+        var events = new List<string>();
+        var exit = CreateExitCoordinator(tracker, events);
+
+        var running = fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
+        await switchStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(exit.TryExit());
+        var busyClear = dispatcher.DelayInvocation(2);
+        switchResult.SetResult(new SwitchResult(true, "Account switch verified.", true));
+        await busyClear.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(exit.TryExit());
+
+        busyClear.Release();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(exit.TryExit());
+        Assert.Equal(
+            ["rejected", "rejected", "disposed", "closed", "shutdown"],
+            events);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Exit_is_rejected_through_dialog_registry_reload_and_busy_clear(bool login)
+    {
+        var dispatcher = new ControllableDispatcher();
+        var tracker = new ActiveOperationTracker();
+        var fixture = new Fixture(dispatcher, tracker);
+        await fixture.ViewModel.LoadAsync();
+        var reloadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseReload = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.LoadRegistryOperation = async cancellationToken =>
+        {
+            reloadStarted.TrySetResult();
+            await releaseReload.Task.WaitAsync(cancellationToken);
+            return fixture.Registry;
+        };
+        var events = new List<string>();
+        var exit = CreateExitCoordinator(tracker, events);
+
+        var running = login
+            ? fixture.ViewModel.AddCommand.ExecuteAsync()
+            : fixture.ViewModel.RemoveCommand.ExecuteAsync();
+        await reloadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(exit.TryExit());
+        var busyClear = dispatcher.DelayInvocation(2);
+        releaseReload.SetResult();
+        await busyClear.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(exit.TryExit());
+
+        busyClear.Release();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(exit.TryExit());
+        Assert.Equal(
+            ["rejected", "rejected", "disposed", "closed", "shutdown"],
+            events);
+    }
+
+    [Fact]
+    public async Task Initial_load_owns_shared_activity_until_completion()
+    {
+        var tracker = new ActiveOperationTracker();
+        var fixture = new Fixture(activityTracker: tracker);
+        var loadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseLoad = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.LoadRegistryOperation = async cancellationToken =>
+        {
+            loadStarted.TrySetResult();
+            await releaseLoad.Task.WaitAsync(cancellationToken);
+            return fixture.Registry;
+        };
+
+        var running = fixture.ViewModel.LoadAsync();
+        await loadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(tracker.IsActive);
+
+        releaseLoad.SetResult();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(tracker.IsActive);
+    }
+
+    [Fact]
+    public async Task Quota_refresh_owns_shared_activity_until_completion()
+    {
+        var tracker = new ActiveOperationTracker();
+        var fixture = new Fixture(activityTracker: tracker);
+        await fixture.ViewModel.LoadAsync();
+        var refreshStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.QuotaRefreshOperation = async (_, _, cancellationToken) =>
+        {
+            refreshStarted.TrySetResult();
+            await releaseRefresh.Task.WaitAsync(cancellationToken);
+        };
+
+        var running = fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(tracker.IsActive);
+
+        releaseRefresh.SetResult();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(tracker.IsActive);
     }
 
     [Fact]
@@ -361,9 +491,20 @@ public sealed class MainWindowViewModelTests
 
     private static CommandResult Succeeded() => new(0, string.Empty, string.Empty);
 
+    private static ApplicationExitCoordinator CreateExitCoordinator(
+        ActiveOperationTracker tracker,
+        ICollection<string> events) => new(
+            tracker,
+            rejected: () => events.Add("rejected"),
+            disposeTray: () => events.Add("disposed"),
+            closeWindow: () => events.Add("closed"),
+            shutdown: () => events.Add("shutdown"));
+
     private sealed class Fixture
     {
-        public Fixture(IUiDispatcher? dispatcher = null)
+        public Fixture(
+            IUiDispatcher? dispatcher = null,
+            ActiveOperationTracker? activityTracker = null)
         {
             First = Accounts.Record("first-key", "first@example.com", "First", "first-account");
             Second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
@@ -379,7 +520,8 @@ public sealed class MainWindowViewModelTests
                 RemoveAsync,
                 SwitchAsync,
                 Dialog,
-                Dispatcher);
+                Dispatcher,
+                activityTracker ?? new ActiveOperationTracker());
         }
 
         public AccountRecord First { get; }
@@ -399,6 +541,20 @@ public sealed class MainWindowViewModelTests
 
         public Func<CancellationToken, Task<CommandResult>> RemoveOperation { get; set; } =
             _ => Task.FromResult(Succeeded());
+
+        public Func<CancellationToken, Task<AccountRegistry>>? LoadRegistryOperation { get; set; }
+
+        public Func<
+            IReadOnlyList<AccountRecord>,
+            IProgress<QuotaUpdate>,
+            CancellationToken,
+            Task>? QuotaRefreshOperation { get; set; }
+
+        public Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<SwitchResult>>? SwitchOperation { get; set; }
 
         public SwitchResult SwitchResult { get; set; } = new(false, "switch failed", true);
 
@@ -427,6 +583,11 @@ public sealed class MainWindowViewModelTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             LoadCallCount++;
+            if (LoadRegistryOperation is not null)
+            {
+                return LoadRegistryOperation(cancellationToken);
+            }
+
             if (Registries.Count > 0)
             {
                 Registry = Registries.Dequeue();
@@ -442,6 +603,11 @@ public sealed class MainWindowViewModelTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             QuotaRefreshCallCount++;
+            if (QuotaRefreshOperation is not null)
+            {
+                return QuotaRefreshOperation(accounts, progress, cancellationToken);
+            }
+
             foreach (var update in QuotaUpdates)
             {
                 progress.Report(update);
@@ -471,6 +637,11 @@ public sealed class MainWindowViewModelTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             SwitchCallCount++;
+            if (SwitchOperation is not null)
+            {
+                return SwitchOperation(target, before, cancellationToken);
+            }
+
             BeforeSwitchReturn?.Invoke();
             return Task.FromResult(SwitchResult);
         }

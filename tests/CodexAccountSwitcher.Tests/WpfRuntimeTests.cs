@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -13,6 +14,24 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class WpfRuntimeTests
 {
     [Fact]
+    public async Task Sta_timeout_shuts_down_and_joins_dispatcher_thread()
+    {
+        Thread? staThread = null;
+        var neverCompletes = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var stopwatch = Stopwatch.StartNew();
+
+        await Assert.ThrowsAsync<TimeoutException>(() => RunOnStaThreadAsync(
+            () => neverCompletes.Task,
+            TimeSpan.FromMilliseconds(250),
+            thread => staThread = thread));
+
+        Assert.NotNull(staThread);
+        Assert.False(staThread.IsAlive);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
     public Task Concrete_windows_render_bind_and_enforce_accessible_close_contracts() =>
         RunOnStaThreadAsync(async () =>
         {
@@ -20,6 +39,7 @@ public sealed class WpfRuntimeTests
             app.InitializeComponent();
             MainWindow? mainWindow = null;
             OperationWindow? operationWindow = null;
+            OperationWindow? preflightWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
             try
             {
@@ -125,20 +145,37 @@ public sealed class WpfRuntimeTests
                 operationWindow.Close();
                 Assert.True(operationWindow.IsVisible);
 
+                operationWindow.AppendLine(new ProcessOutputLine(
+                    ProcessOutputStream.StandardError,
+                    "login failed"));
                 operationWindow.Complete(new CommandResult(
                     1,
                     string.Empty,
-                    "Authorization: Bearer secret-value"));
-                var output = Assert.IsType<TextBox>(operationWindow.FindName("OutputTextBox")).Text;
-                Assert.Contains("[REDACTED]", output, StringComparison.Ordinal);
-                Assert.DoesNotContain("secret-value", output, StringComparison.Ordinal);
+                    "login failed"));
+                var streamedOutput = Assert.IsType<TextBox>(
+                    operationWindow.FindName("OutputTextBox")).Text;
+                Assert.Equal(1, CountOccurrences(streamedOutput, "login failed"));
                 Assert.Equal(Visibility.Visible, operationClose.Visibility);
                 operationWindow.Close();
                 Assert.False(operationWindow.IsVisible);
+
+                preflightWindow = new OperationWindow("Add account", "Preparing login");
+                preflightWindow.Complete(new CommandResult(
+                    1,
+                    string.Empty,
+                    "Authorization: Bearer secret-value"));
+                var output = Assert.IsType<TextBox>(preflightWindow.FindName("OutputTextBox")).Text;
+                Assert.Contains("[REDACTED]", output, StringComparison.Ordinal);
+                Assert.DoesNotContain("secret-value", output, StringComparison.Ordinal);
             }
             finally
             {
                 confirmationWindow?.Close();
+                if (preflightWindow?.IsVisible == true)
+                {
+                    preflightWindow.Close();
+                }
+
                 if (operationWindow?.IsVisible == true)
                 {
                     operationWindow.Complete(new CommandResult(1, string.Empty, string.Empty));
@@ -153,6 +190,19 @@ public sealed class WpfRuntimeTests
             }
         });
 
+    private static int CountOccurrences(string text, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = text.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+
+        return count;
+    }
+
     private static MainWindowViewModel CreateViewModel(AccountRegistry registry) => new(
         _ => Task.FromResult(registry),
         (_, _, _) => Task.CompletedTask,
@@ -160,7 +210,8 @@ public sealed class WpfRuntimeTests
         _ => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         (_, _, _) => Task.FromResult(new SwitchResult(true, "switched", true)),
         new NoOpDialogService(),
-        new InlineDispatcher());
+        new InlineDispatcher(),
+        new ActiveOperationTracker());
 
     private static IEnumerable<T> FindVisualChildren<T>(DependencyObject root)
         where T : DependencyObject
@@ -180,13 +231,31 @@ public sealed class WpfRuntimeTests
         }
     }
 
-    private static Task RunOnStaThreadAsync(Func<Task> action)
+    private static Task RunOnStaThreadAsync(Func<Task> action) => RunOnStaThreadAsync(
+        action,
+        TimeSpan.FromSeconds(15),
+        threadStarted: null);
+
+    private static async Task RunOnStaThreadAsync(
+        Func<Task> action,
+        TimeSpan timeout,
+        Action<Thread>? threadStarted)
     {
+        ArgumentNullException.ThrowIfNull(action);
+        if (timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var dispatcherReady = new TaskCompletionSource<Dispatcher>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Dispatcher? dispatcher = null;
         var thread = new Thread(() =>
         {
-            var dispatcher = Dispatcher.CurrentDispatcher;
+            dispatcher = Dispatcher.CurrentDispatcher;
             SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(dispatcher));
+            dispatcherReady.TrySetResult(dispatcher);
             dispatcher.BeginInvoke(new Action(async () =>
             {
                 try
@@ -200,14 +269,36 @@ public sealed class WpfRuntimeTests
                 }
                 finally
                 {
-                    dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                    if (!dispatcher.HasShutdownStarted)
+                    {
+                        dispatcher.BeginInvokeShutdown(DispatcherPriority.Background);
+                    }
                 }
             }));
             Dispatcher.Run();
         });
+        thread.IsBackground = true;
         thread.SetApartmentState(ApartmentState.STA);
+        threadStarted?.Invoke(thread);
         thread.Start();
-        return completion.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        try
+        {
+            await dispatcherReady.Task.WaitAsync(timeout);
+            await completion.Task.WaitAsync(timeout);
+        }
+        finally
+        {
+            if (dispatcher is not null && !dispatcher.HasShutdownStarted)
+            {
+                dispatcher.BeginInvokeShutdown(DispatcherPriority.Send);
+            }
+
+            if (!thread.Join(TimeSpan.FromSeconds(5)))
+            {
+                throw new TimeoutException("STA dispatcher thread did not terminate after shutdown.");
+            }
+        }
     }
 
     private sealed class NoOpDialogService : IAccountDialogService

@@ -9,6 +9,13 @@ public interface IUiDispatcher
     Task InvokeAsync(Action action, CancellationToken cancellationToken);
 }
 
+public interface IOperationActivityTracker
+{
+    bool IsActive { get; }
+
+    IDisposable Begin();
+}
+
 public interface IAccountDialogService
 {
     Task<bool> ConfirmSwitchAsync(
@@ -43,6 +50,7 @@ public sealed class MainWindowViewModel : ObservableObject
         Task<SwitchResult>> _switchAsync;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
+    private readonly IOperationActivityTracker _activityTracker;
     private AccountRegistry _registry = AccountRegistry.Empty;
     private int _operationGate;
     private bool _isBusy;
@@ -55,7 +63,8 @@ public sealed class MainWindowViewModel : ObservableObject
         CodexAuthService codexAuthService,
         SafeSwitchCoordinator safeSwitchCoordinator,
         IAccountDialogService dialogService,
-        IUiDispatcher dispatcher)
+        IUiDispatcher dispatcher,
+        IOperationActivityTracker activityTracker)
         : this(
             CreateLoadRegistryDelegate(codexHome, accountRegistryService),
             CreateRefreshQuotaDelegate(codexHome, quotaService),
@@ -63,7 +72,8 @@ public sealed class MainWindowViewModel : ObservableObject
             CreateRemoveDelegate(codexAuthService),
             CreateSwitchDelegate(safeSwitchCoordinator),
             dialogService,
-            dispatcher)
+            dispatcher,
+            activityTracker)
     {
     }
 
@@ -82,7 +92,8 @@ public sealed class MainWindowViewModel : ObservableObject
             CancellationToken,
             Task<SwitchResult>> switchAsync,
         IAccountDialogService dialogService,
-        IUiDispatcher dispatcher)
+        IUiDispatcher dispatcher,
+        IOperationActivityTracker activityTracker)
     {
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _refreshQuotaAsync = refreshQuotaAsync ?? throw new ArgumentNullException(nameof(refreshQuotaAsync));
@@ -91,6 +102,7 @@ public sealed class MainWindowViewModel : ObservableObject
         _switchAsync = switchAsync ?? throw new ArgumentNullException(nameof(switchAsync));
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
+        _activityTracker = activityTracker ?? throw new ArgumentNullException(nameof(activityTracker));
 
         RefreshCommand = new AsyncCommand(
             _dispatcher,
@@ -239,6 +251,7 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
+        using var activity = _activityTracker.Begin();
         try
         {
             await _dispatcher.InvokeAsync(() => SetBusy(true), cancellationToken);

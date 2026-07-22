@@ -3,12 +3,14 @@ using System.Windows;
 using System.Windows.Input;
 using CodexAccountSwitcher.Security;
 using CodexAccountSwitcher.Services;
+using CodexAccountSwitcher.ViewModels;
 
 namespace CodexAccountSwitcher.Views;
 
 public partial class OperationWindow : Window
 {
     private bool _canClose;
+    private bool _hasStreamedOutput;
     private readonly TaskCompletionSource _firstRender =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -38,6 +40,7 @@ public partial class OperationWindow : Window
         OutputTextBox.AppendText(line.Text);
         OutputTextBox.AppendText(Environment.NewLine);
         OutputTextBox.ScrollToEnd();
+        _hasStreamedOutput = true;
     }
 
     public void Complete(CommandResult result)
@@ -46,7 +49,7 @@ public partial class OperationWindow : Window
         PhaseText.Text = result.Succeeded
             ? "Completed"
             : $"Failed (exit code {result.ExitCode})";
-        if (!result.Succeeded)
+        if (!result.Succeeded && !_hasStreamedOutput)
         {
             AppendSanitizedFailure(result);
         }
@@ -111,7 +114,6 @@ public partial class OperationWindow : Window
 internal static class DialogOperationRunner
 {
     public static async Task<CommandResult> RunLoginAsync(
-        ActiveOperationTracker activityTracker,
         Func<Task> showAsync,
         ProcessOutputHandler appendAsync,
         Func<CommandResult, Task> completeAsync,
@@ -119,14 +121,12 @@ internal static class DialogOperationRunner
         Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> operation,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(activityTracker);
         ArgumentNullException.ThrowIfNull(showAsync);
         ArgumentNullException.ThrowIfNull(appendAsync);
         ArgumentNullException.ThrowIfNull(completeAsync);
         ArgumentNullException.ThrowIfNull(failAsync);
         ArgumentNullException.ThrowIfNull(operation);
 
-        using var activity = activityTracker.Begin();
         try
         {
             await showAsync();
@@ -142,20 +142,17 @@ internal static class DialogOperationRunner
     }
 
     public static async Task<CommandResult> RunRemoveAsync(
-        ActiveOperationTracker activityTracker,
         Func<Task> showAsync,
         Func<CommandResult, Task> completeAsync,
         Func<Exception, Task> failAsync,
         Func<CancellationToken, Task<CommandResult>> operation,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(activityTracker);
         ArgumentNullException.ThrowIfNull(showAsync);
         ArgumentNullException.ThrowIfNull(completeAsync);
         ArgumentNullException.ThrowIfNull(failAsync);
         ArgumentNullException.ThrowIfNull(operation);
 
-        using var activity = activityTracker.Begin();
         try
         {
             await showAsync();
@@ -171,7 +168,7 @@ internal static class DialogOperationRunner
     }
 }
 
-internal sealed class ActiveOperationTracker
+internal sealed class ActiveOperationTracker : IOperationActivityTracker
 {
     private int _activeCount;
 

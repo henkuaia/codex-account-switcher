@@ -11,6 +11,9 @@ namespace CodexAccountSwitcher;
 
 public partial class App : System.Windows.Application
 {
+    internal const string ActiveOperationExitMessage =
+        "An account operation is still running. Wait for it to finish before exiting.";
+
     private HttpClient? _httpClient;
     private ApplicationExitCoordinator? _exitCoordinator;
     private MainWindow? _mainWindow;
@@ -125,7 +128,7 @@ public partial class App : System.Windows.Application
     {
         System.Windows.MessageBox.Show(
             _mainWindow,
-            "Account login or removal is still running. Wait for it to finish before exiting.",
+            ActiveOperationExitMessage,
             "Operation in progress",
             MessageBoxButton.OK,
             MessageBoxImage.Information);

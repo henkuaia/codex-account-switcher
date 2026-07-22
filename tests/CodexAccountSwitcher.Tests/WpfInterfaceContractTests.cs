@@ -2,6 +2,14 @@ namespace CodexAccountSwitcher.Tests;
 
 public sealed class WpfInterfaceContractTests
 {
+    [Fact]
+    public void Active_operation_exit_message_covers_every_account_operation()
+    {
+        Assert.Equal(
+            "An account operation is still running. Wait for it to finish before exiting.",
+            App.ActiveOperationExitMessage);
+    }
+
     [Theory]
     [InlineData("5H")]
     [InlineData("five-hour")]

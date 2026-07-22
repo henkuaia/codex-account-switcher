@@ -22,6 +22,13 @@ Focused tests initially ran with 3 failures and 1 pass:
 - Release solution: 351 passed, 0 failed.
 - `git diff --check`: passed.
 
+## Follow-up: fault and cancellation handoff
+
+- RED: queued reload was not consumed when the active operation faulted or was canceled; both new tests observed `LoadCallCount` 1 instead of 2.
+- GREEN: `RunBusyAsync` records the original exception/cancellation, consumes or hands off the pending reload after release, and then rethrows the original completion state.
+- Focused follow-up regressions: 3 passed, 0 failed.
+- Updated `MainWindowViewModelTests`: 66 passed, 0 failed.
+
 ## Unverified
 
 No live `.codex` data was accessed. The physical tray/window interaction was not manually exercised; the behavior is covered through `MainWindowViewModel` tests.

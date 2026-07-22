@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Runtime.ExceptionServices;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
 
@@ -495,6 +496,7 @@ public sealed class MainWindowViewModel : ObservableObject
         CancellationToken cancellationToken,
         bool queueRegistryReloadWhenBusy = false)
     {
+        ExceptionDispatchInfo? operationFailure = null;
         while (true)
         {
             if (Interlocked.CompareExchange(ref _operationGate, 1, 0) != 0)
@@ -504,12 +506,22 @@ public sealed class MainWindowViewModel : ObservableObject
                     Interlocked.Exchange(ref _registryReloadPending, 1);
                 }
 
+                operationFailure?.Throw();
                 return;
             }
 
-            await RunAcquiredBusyOperationAsync(operation, cancellationToken);
+            try
+            {
+                await RunAcquiredBusyOperationAsync(operation, cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                operationFailure ??= ExceptionDispatchInfo.Capture(exception);
+            }
+
             if (Interlocked.Exchange(ref _registryReloadPending, 0) == 0)
             {
+                operationFailure?.Throw();
                 return;
             }
 

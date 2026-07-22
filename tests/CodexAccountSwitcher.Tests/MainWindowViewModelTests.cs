@@ -207,6 +207,127 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Faulted_busy_operation_runs_queued_reload_after_releasing_gate_and_tracker()
+    {
+        var activityTracker = new RecordingOperationTracker();
+        var fixture = new Fixture(activityTracker: activityTracker);
+        var firstLoadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstLoad = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loadAttempt = 0;
+        var deferredReloadObserved = false;
+        fixture.LoadRegistryOperation = async cancellationToken =>
+        {
+            if (Interlocked.Increment(ref loadAttempt) == 1)
+            {
+                firstLoadStarted.TrySetResult();
+                await releaseFirstLoad.Task.WaitAsync(cancellationToken);
+                throw new InvalidOperationException("expected load failure");
+            }
+
+            deferredReloadObserved = activityTracker.CompletedOperationCount == 1;
+            return fixture.Registry;
+        };
+
+        var faultedLoad = fixture.ViewModel.LoadAsync();
+        await firstLoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync());
+
+        releaseFirstLoad.SetResult();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => faultedLoad);
+
+        Assert.Equal("expected load failure", exception.Message);
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.True(deferredReloadObserved);
+    }
+
+    [Fact]
+    public async Task Canceled_busy_operation_runs_queued_reload_after_releasing_gate_and_tracker()
+    {
+        var activityTracker = new RecordingOperationTracker();
+        var fixture = new Fixture(activityTracker: activityTracker);
+        var firstLoadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loadAttempt = 0;
+        var deferredReloadObserved = false;
+        fixture.LoadRegistryOperation = async cancellationToken =>
+        {
+            if (Interlocked.Increment(ref loadAttempt) == 1)
+            {
+                firstLoadStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            }
+
+            deferredReloadObserved = activityTracker.CompletedOperationCount == 1;
+            return fixture.Registry;
+        };
+        using var cancellationSource = new CancellationTokenSource();
+
+        var canceledLoad = fixture.ViewModel.LoadAsync(cancellationSource.Token);
+        await firstLoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Task.WhenAll(
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync());
+
+        cancellationSource.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => canceledLoad);
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.True(deferredReloadObserved);
+    }
+
+    [Fact]
+    public async Task Faulted_busy_operation_preserves_its_exception_when_a_new_owner_inherits_the_queued_reload()
+    {
+        var activityTracker = new BlockingFirstCompletionTracker();
+        var fixture = new Fixture(activityTracker: activityTracker);
+        var firstLoadStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstLoad = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var refreshStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loadAttempt = 0;
+        fixture.LoadRegistryOperation = async cancellationToken =>
+        {
+            if (Interlocked.Increment(ref loadAttempt) == 1)
+            {
+                firstLoadStarted.TrySetResult();
+                await releaseFirstLoad.Task.WaitAsync(cancellationToken);
+                throw new InvalidOperationException("expected load failure");
+            }
+
+            return fixture.Registry;
+        };
+        fixture.QuotaRefreshOperation = async (_, _, cancellationToken) =>
+        {
+            refreshStarted.TrySetResult();
+            await releaseRefresh.Task.WaitAsync(cancellationToken);
+        };
+
+        var faultedLoad = fixture.ViewModel.LoadAsync();
+        await firstLoadStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await fixture.ViewModel.LoadAsync();
+        releaseFirstLoad.SetResult();
+        await activityTracker.FirstCompletionEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var refresh = fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        activityTracker.ReleaseFirstCompletion.SetResult();
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => faultedLoad);
+
+        Assert.Equal("expected load failure", exception.Message);
+        Assert.Equal(1, fixture.LoadCallCount);
+
+        releaseRefresh.SetResult();
+        await refresh.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, fixture.LoadCallCount);
+    }
+
+    [Fact]
     public async Task Exit_is_rejected_through_switch_and_noncancelable_busy_clear()
     {
         var dispatcher = new ControllableDispatcher();
@@ -1626,6 +1747,38 @@ public sealed class MainWindowViewModelTests
                     Interlocked.Decrement(ref owner._activeCount);
                     Interlocked.Increment(ref owner._completedOperationCount);
                 }
+            }
+        }
+    }
+
+    private sealed class BlockingFirstCompletionTracker : IOperationActivityTracker
+    {
+        private int _completionCount;
+
+        public TaskCompletionSource FirstCompletionEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource ReleaseFirstCompletion { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool IsActive => false;
+
+        public IDisposable Begin() => new Activity(this);
+
+        private sealed class Activity(BlockingFirstCompletionTracker owner) : IDisposable
+        {
+            private BlockingFirstCompletionTracker? _owner = owner;
+
+            public void Dispose()
+            {
+                var owner = Interlocked.Exchange(ref _owner, null);
+                if (owner is null || Interlocked.Increment(ref owner._completionCount) != 1)
+                {
+                    return;
+                }
+
+                owner.FirstCompletionEntered.TrySetResult();
+                owner.ReleaseFirstCompletion.Task.GetAwaiter().GetResult();
             }
         }
     }

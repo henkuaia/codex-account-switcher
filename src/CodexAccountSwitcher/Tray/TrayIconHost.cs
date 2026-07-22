@@ -70,7 +70,6 @@ public sealed class TrayIconHost : IDisposable
 
     private void Exit()
     {
-        Dispose();
         _exitAction();
     }
 

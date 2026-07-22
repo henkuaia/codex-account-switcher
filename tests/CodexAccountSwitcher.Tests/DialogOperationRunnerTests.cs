@@ -13,6 +13,7 @@ public sealed class DialogOperationRunnerTests
         var allowLineAcceptance = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
         var runTask = DialogOperationRunner.RunLoginAsync(
+            activityTracker: new ActiveOperationTracker(),
             showAsync: () =>
             {
                 events.Add("shown");
@@ -63,6 +64,7 @@ public sealed class DialogOperationRunnerTests
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             DialogOperationRunner.RunLoginAsync(
+                activityTracker: new ActiveOperationTracker(),
                 showAsync: () => Task.CompletedTask,
                 appendAsync: (_, _) => ValueTask.FromException(failure),
                 completeAsync: _ => Task.CompletedTask,
@@ -90,6 +92,7 @@ public sealed class DialogOperationRunnerTests
         var events = new List<string>();
 
         var result = await DialogOperationRunner.RunRemoveAsync(
+            activityTracker: new ActiveOperationTracker(),
             showAsync: () =>
             {
                 events.Add("shown");
@@ -110,5 +113,71 @@ public sealed class DialogOperationRunnerTests
 
         Assert.Equal(7, result.ExitCode);
         Assert.Equal(["shown", "picker", "complete:7"], events);
+    }
+
+    [Fact]
+    public async Task Operation_waits_for_first_render_barrier_before_starting_child()
+    {
+        var rendered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var operationStarted = false;
+
+        var runTask = DialogOperationRunner.RunRemoveAsync(
+            activityTracker: new ActiveOperationTracker(),
+            showAsync: () => rendered.Task,
+            completeAsync: _ => Task.CompletedTask,
+            failAsync: _ => Task.CompletedTask,
+            operation: _ =>
+            {
+                operationStarted = true;
+                return Task.FromResult(new CommandResult(0, string.Empty, string.Empty));
+            },
+            cancellationToken: CancellationToken.None);
+
+        Assert.False(operationStarted);
+        Assert.False(runTask.IsCompleted);
+
+        rendered.SetResult();
+        await runTask;
+
+        Assert.True(operationStarted);
+    }
+
+    [Fact]
+    public async Task Exit_is_rejected_without_disposal_while_dialog_operation_owns_activity()
+    {
+        var operationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseOperation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tracker = new ActiveOperationTracker();
+        var events = new List<string>();
+        var exit = new ApplicationExitCoordinator(
+            tracker,
+            rejected: () => events.Add("rejected"),
+            disposeTray: () => events.Add("disposed"),
+            closeWindow: () => events.Add("closed"),
+            shutdown: () => events.Add("shutdown"));
+
+        var runTask = DialogOperationRunner.RunRemoveAsync(
+            activityTracker: tracker,
+            showAsync: () => Task.CompletedTask,
+            completeAsync: _ => Task.CompletedTask,
+            failAsync: _ => Task.CompletedTask,
+            operation: async _ =>
+            {
+                operationStarted.SetResult();
+                await releaseOperation.Task;
+                return new CommandResult(0, string.Empty, string.Empty);
+            },
+            cancellationToken: CancellationToken.None);
+
+        await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(exit.TryExit());
+        Assert.Equal(["rejected"], events);
+
+        releaseOperation.SetResult();
+        await runTask;
+
+        Assert.True(exit.TryExit());
+        Assert.Equal(["rejected", "disposed", "closed", "shutdown"], events);
     }
 }

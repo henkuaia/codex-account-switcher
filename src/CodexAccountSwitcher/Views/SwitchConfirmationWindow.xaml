@@ -37,7 +37,8 @@
                         Width="36"
                         Click="Cancel_Click"
                         Style="{StaticResource ActionButtonStyle}"
-                        ToolTip="Close">
+                        ToolTip="Close"
+                        AutomationProperties.Name="Close">
                     <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
                 </Button>
             </Grid>

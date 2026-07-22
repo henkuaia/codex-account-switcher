@@ -46,31 +46,39 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                    <Button Width="36"
+                    <Button x:Name="RefreshButton"
+                            Width="36"
                             Margin="0,0,6,0"
                             Command="{Binding RefreshCommand}"
                             Style="{StaticResource ActionButtonStyle}"
-                            ToolTip="Refresh quota">
+                            ToolTip="Refresh quota"
+                            AutomationProperties.Name="Refresh quota">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE72C;" />
                     </Button>
-                    <Button Width="36"
+                    <Button x:Name="AddButton"
+                            Width="36"
                             Margin="0,0,6,0"
                             Command="{Binding AddCommand}"
                             Style="{StaticResource ActionButtonStyle}"
-                            ToolTip="Add account">
+                            ToolTip="Add account"
+                            AutomationProperties.Name="Add account">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE710;" />
                     </Button>
-                    <Button Width="36"
+                    <Button x:Name="RemoveButton"
+                            Width="36"
                             Margin="0,0,6,0"
                             Command="{Binding RemoveCommand}"
                             Style="{StaticResource ActionButtonStyle}"
-                            ToolTip="Remove account">
+                            ToolTip="Remove account"
+                            AutomationProperties.Name="Remove account">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE74D;" />
                     </Button>
-                    <Button Width="36"
+                    <Button x:Name="WindowCloseButton"
+                            Width="36"
                             Click="CloseButton_Click"
                             Style="{StaticResource ActionButtonStyle}"
-                            ToolTip="Close">
+                            ToolTip="Close"
+                            AutomationProperties.Name="Close">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
                     </Button>
                 </StackPanel>
@@ -87,7 +95,8 @@
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
                                     <Grid>
-                                        <Border VerticalAlignment="Bottom"
+                                        <Border x:Name="RowSeparator"
+                                                VerticalAlignment="Bottom"
                                                 Margin="12,0"
                                                 BorderBrush="{StaticResource BorderBrush}"
                                                 BorderThickness="0,0,0,1" />
@@ -129,7 +138,8 @@
                                                             Content="Switch"
                                                             IsEnabled="{Binding CanSwitch}"
                                                             Style="{StaticResource ActionButtonStyle}"
-                                                            ToolTip="{Binding SwitchUnavailableReason}" />
+                                                            ToolTip="{Binding SwitchUnavailableReason}"
+                                                            ToolTipService.ShowOnDisabled="True" />
                                                     <Border x:Name="ActiveBadge"
                                                             Width="64"
                                                             Height="28"
@@ -187,6 +197,7 @@
                                         <DataTrigger Binding="{Binding IsActive}" Value="True">
                                             <Setter TargetName="RowBorder" Property="Background" Value="{StaticResource ActiveBackgroundBrush}" />
                                             <Setter TargetName="RowBorder" Property="BorderBrush" Value="{StaticResource ActiveBorderBrush}" />
+                                            <Setter TargetName="RowSeparator" Property="Visibility" Value="Collapsed" />
                                             <Setter TargetName="SwitchButton" Property="Visibility" Value="Collapsed" />
                                             <Setter TargetName="ActiveBadge" Property="Visibility" Value="Visible" />
                                         </DataTrigger>
@@ -215,15 +226,18 @@
             </Border>
 
             <Border Grid.Row="2"
-                    MinHeight="40"
+                    Height="40"
                     Padding="20,10"
                     Background="{StaticResource WindowBackgroundBrush}"
                     BorderBrush="{StaticResource BorderBrush}"
                     BorderThickness="0,1,0,0">
-                <TextBlock VerticalAlignment="Center"
+                <TextBlock x:Name="StatusTextBlock"
+                           VerticalAlignment="Center"
                            Foreground="{StaticResource TextSecondaryBrush}"
                            Text="{Binding StatusText}"
-                           TextWrapping="Wrap" />
+                           TextWrapping="NoWrap"
+                           TextTrimming="CharacterEllipsis"
+                           ToolTip="{Binding StatusText}" />
             </Border>
         </Grid>
     </Border>

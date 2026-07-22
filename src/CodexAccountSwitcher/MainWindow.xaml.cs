@@ -1,23 +1,58 @@
-﻿using System.Text;
+using System.ComponentModel;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
 using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Navigation;
-using System.Windows.Shapes;
+using CodexAccountSwitcher.ViewModels;
 
 namespace CodexAccountSwitcher;
 
-/// <summary>
-/// Interaction logic for MainWindow.xaml
-/// </summary>
 public partial class MainWindow : Window
 {
-    public MainWindow()
+    private readonly MainWindowViewModel _viewModel;
+    private bool _allowClose;
+
+    public MainWindow(MainWindowViewModel viewModel)
     {
+        _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         InitializeComponent();
+        DataContext = _viewModel;
+    }
+
+    public async Task ShowAndReloadAsync(CancellationToken cancellationToken = default)
+    {
+        if (!IsVisible)
+        {
+            Show();
+        }
+
+        if (WindowState == WindowState.Minimized)
+        {
+            WindowState = WindowState.Normal;
+        }
+
+        Activate();
+        await _viewModel.LoadAsync(cancellationToken);
+    }
+
+    public void AllowClose() => _allowClose = true;
+
+    private void Window_Closing(object? sender, CancelEventArgs e)
+    {
+        if (_allowClose)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        Hide();
+    }
+
+    private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ButtonState == MouseButtonState.Pressed)
+        {
+            DragMove();
+        }
     }
 }

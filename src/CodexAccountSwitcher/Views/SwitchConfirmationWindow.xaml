@@ -1,0 +1,94 @@
+<Window x:Class="CodexAccountSwitcher.Views.SwitchConfirmationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Confirm account switch"
+        Width="400"
+        Height="326"
+        WindowStartupLocation="CenterOwner"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        ShowInTaskbar="False">
+    <Border Background="{StaticResource SurfaceBrush}"
+            BorderBrush="{StaticResource BorderBrush}"
+            BorderThickness="1"
+            CornerRadius="8">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="56" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="64" />
+            </Grid.RowDefinitions>
+
+            <Grid Grid.Row="0"
+                  Margin="20,0,12,0"
+                  Background="Transparent"
+                  MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock VerticalAlignment="Center"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Text="Switch account" />
+                <Button Grid.Column="1"
+                        Width="36"
+                        Click="Cancel_Click"
+                        Style="{StaticResource ActionButtonStyle}"
+                        ToolTip="Close">
+                    <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
+                </Button>
+            </Grid>
+
+            <StackPanel Grid.Row="1" Margin="20,8,20,12">
+                <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="Target account" />
+                <TextBlock x:Name="TargetIdentityText"
+                           Margin="0,4,0,0"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           TextTrimming="CharacterEllipsis" />
+                <TextBlock x:Name="TargetEmailText"
+                           Margin="0,2,0,0"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           TextTrimming="CharacterEllipsis" />
+
+                <TextBlock Margin="0,18,0,0"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           Text="Current quota" />
+                <TextBlock x:Name="QuotaText" Margin="0,4,0,0" FontWeight="SemiBold" />
+
+                <Border Margin="0,18,0,0"
+                        Padding="12,10"
+                        Background="#FFF8E9"
+                        BorderBrush="{StaticResource WarningBrush}"
+                        BorderThickness="3,0,0,0"
+                        CornerRadius="6">
+                    <TextBlock Text="Running Codex work will be interrupted while the app closes and restarts."
+                               TextWrapping="Wrap" />
+                </Border>
+            </StackPanel>
+
+            <Border Grid.Row="2"
+                    Padding="20,14"
+                    Background="{StaticResource WindowBackgroundBrush}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="0,1,0,0">
+                <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
+                    <Button Width="82"
+                            Margin="0,0,8,0"
+                            Click="Cancel_Click"
+                            Content="Cancel"
+                            IsCancel="True"
+                            Style="{StaticResource ActionButtonStyle}" />
+                    <Button Width="124"
+                            Click="Confirm_Click"
+                            Content="Close and switch"
+                            IsDefault="True"
+                            Style="{StaticResource PrimaryButtonStyle}" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Border>
+</Window>

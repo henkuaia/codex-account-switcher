@@ -1,12 +1,230 @@
-﻿<Window x:Class="CodexAccountSwitcher.MainWindow"
+<Window x:Class="CodexAccountSwitcher.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-        xmlns:local="clr-namespace:CodexAccountSwitcher"
         mc:Ignorable="d"
-        Title="MainWindow" Height="450" Width="800">
-    <Grid>
+        Title="Codex accounts"
+        Width="440"
+        MinWidth="440"
+        MaxWidth="440"
+        Height="600"
+        MinHeight="480"
+        MaxHeight="720"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        ResizeMode="NoResize"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        Closing="Window_Closing">
+    <Border Background="{StaticResource SurfaceBrush}"
+            BorderBrush="{StaticResource BorderBrush}"
+            BorderThickness="1"
+            CornerRadius="8">
+        <Grid ClipToBounds="True">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="64" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
 
-    </Grid>
+            <Grid Grid.Row="0"
+                  Margin="20,0,14,0"
+                  Background="Transparent"
+                  MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock FontSize="17" FontWeight="SemiBold" Text="Codex accounts" />
+                    <TextBlock Margin="0,2,0,0"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               Text="{Binding Accounts.Count, StringFormat={}{0} accounts}" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button Width="36"
+                            Margin="0,0,6,0"
+                            Command="{Binding RefreshCommand}"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="Refresh quota">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE72C;" />
+                    </Button>
+                    <Button Width="36"
+                            Margin="0,0,6,0"
+                            Command="{Binding AddCommand}"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="Add account">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE710;" />
+                    </Button>
+                    <Button Width="36"
+                            Margin="0,0,6,0"
+                            Command="{Binding RemoveCommand}"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="Remove account">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE74D;" />
+                    </Button>
+                    <Button Width="36"
+                            Click="CloseButton_Click"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="Close">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
+                    </Button>
+                </StackPanel>
+            </Grid>
+
+            <Border Grid.Row="1"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="0,1,0,0">
+                <Grid>
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  Padding="14,8,14,10">
+                        <ItemsControl x:Name="AccountItems" ItemsSource="{Binding Accounts}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Border VerticalAlignment="Bottom"
+                                                Margin="12,0"
+                                                BorderBrush="{StaticResource BorderBrush}"
+                                                BorderThickness="0,0,0,1" />
+                                        <Border x:Name="RowBorder"
+                                                Margin="0,2"
+                                                Padding="14,12"
+                                                Style="{StaticResource AccountRowBorderStyle}">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="84" />
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                </Grid.RowDefinitions>
+
+                                                <StackPanel Grid.Row="0" Grid.Column="0">
+                                                    <TextBlock FontSize="14"
+                                                               FontWeight="SemiBold"
+                                                               Text="{Binding DisplayIdentity}"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               ToolTip="{Binding Account.Email}" />
+                                                    <TextBlock Margin="0,2,0,0"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Text="{Binding Account.Plan, TargetNullValue=Account}"
+                                                               TextTrimming="CharacterEllipsis" />
+                                                </StackPanel>
+
+                                                <Grid Grid.Row="0" Grid.Column="1" Grid.RowSpan="2">
+                                                    <Button x:Name="SwitchButton"
+                                                            Width="72"
+                                                            Height="32"
+                                                            HorizontalAlignment="Right"
+                                                            VerticalAlignment="Center"
+                                                            Command="{Binding DataContext.SwitchCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                            CommandParameter="{Binding}"
+                                                            Content="Switch"
+                                                            IsEnabled="{Binding CanSwitch}"
+                                                            Style="{StaticResource ActionButtonStyle}"
+                                                            ToolTip="{Binding SwitchUnavailableReason}" />
+                                                    <Border x:Name="ActiveBadge"
+                                                            Width="64"
+                                                            Height="28"
+                                                            HorizontalAlignment="Right"
+                                                            VerticalAlignment="Center"
+                                                            Background="{StaticResource ActiveBackgroundBrush}"
+                                                            CornerRadius="6"
+                                                            Visibility="Collapsed">
+                                                        <TextBlock HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center"
+                                                                   FontWeight="SemiBold"
+                                                                   Foreground="{StaticResource ActiveTextBrush}"
+                                                                   Text="Active" />
+                                                    </Border>
+                                                </Grid>
+
+                                                <Grid Grid.Row="2" Grid.ColumnSpan="2" Margin="0,11,0,0">
+                                                    <Grid.RowDefinitions>
+                                                        <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
+                                                    </Grid.RowDefinitions>
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock FontSize="12"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Text="{Binding QuotaLabel}" />
+                                                    <TextBlock Grid.Column="1"
+                                                               FontSize="12"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Text="{Binding QuotaDisplay.RemainingPercent, StringFormat={}{0}%}">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding QuotaDisplay}" Value="{x:Null}">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                    <ProgressBar Grid.Row="1"
+                                                                 Grid.ColumnSpan="2"
+                                                                 Margin="0,5,0,0"
+                                                                 Maximum="100"
+                                                                 Value="{Binding QuotaDisplay.RemainingPercent, TargetNullValue=0}"
+                                                                 Style="{StaticResource QuietProgressBarStyle}"
+                                                                 ToolTip="{Binding QuotaDisplay.Tooltip}" />
+                                                </Grid>
+                                            </Grid>
+                                        </Border>
+                                    </Grid>
+                                    <DataTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding IsActive}" Value="True">
+                                            <Setter TargetName="RowBorder" Property="Background" Value="{StaticResource ActiveBackgroundBrush}" />
+                                            <Setter TargetName="RowBorder" Property="BorderBrush" Value="{StaticResource ActiveBorderBrush}" />
+                                            <Setter TargetName="SwitchButton" Property="Visibility" Value="Collapsed" />
+                                            <Setter TargetName="ActiveBadge" Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <TextBlock HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               Text="No accounts">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasItems, ElementName=AccountItems}" Value="False">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </Border>
+
+            <Border Grid.Row="2"
+                    MinHeight="40"
+                    Padding="20,10"
+                    Background="{StaticResource WindowBackgroundBrush}"
+                    BorderBrush="{StaticResource BorderBrush}"
+                    BorderThickness="0,1,0,0">
+                <TextBlock VerticalAlignment="Center"
+                           Foreground="{StaticResource TextSecondaryBrush}"
+                           Text="{Binding StatusText}"
+                           TextWrapping="Wrap" />
+            </Border>
+        </Grid>
+    </Border>
 </Window>

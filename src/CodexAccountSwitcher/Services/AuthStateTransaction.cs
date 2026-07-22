@@ -10,6 +10,8 @@ internal interface IAuthStateCheckpoint : IDisposable
 
 internal interface IAuthStateFileSystem
 {
+    IReadOnlyList<string> EnumerateAccountSnapshotPaths(string accountsPath);
+
     Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken);
 
     Task WriteAtomicallyAsync(
@@ -27,9 +29,11 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 {
     private readonly string _authPath;
     private readonly string _registryPath;
+    private readonly string _accountsPath;
     private readonly IAuthStateFileSystem _fileSystem;
     private byte[]? _authBytes;
     private byte[]? _registryBytes;
+    private readonly Dictionary<string, byte[]> _accountSnapshots;
     private readonly bool _authExisted;
     private readonly bool _registryExisted;
     private bool _disposed;
@@ -39,12 +43,16 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
         byte[]? authBytes,
         string registryPath,
         byte[]? registryBytes,
+        string accountsPath,
+        Dictionary<string, byte[]> accountSnapshots,
         IAuthStateFileSystem fileSystem)
     {
         _authPath = authPath;
         _authBytes = authBytes;
         _registryPath = registryPath;
         _registryBytes = registryBytes;
+        _accountsPath = accountsPath;
+        _accountSnapshots = accountSnapshots;
         _fileSystem = fileSystem;
         _authExisted = authBytes is not null;
         _registryExisted = registryBytes is not null;
@@ -65,18 +73,33 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 
         byte[]? authBytes = null;
         byte[]? registryBytes = null;
+        var accountSnapshots = new Dictionary<string, byte[]>(StringComparer.OrdinalIgnoreCase);
         var ownershipTransferred = false;
         try
         {
             var authPath = Path.Combine(codexHome, "auth.json");
-            var registryPath = Path.Combine(codexHome, "accounts", "registry.json");
+            var accountsPath = Path.Combine(codexHome, "accounts");
+            var registryPath = Path.Combine(accountsPath, "registry.json");
             authBytes = await fileSystem.ReadAsync(authPath, cancellationToken);
             registryBytes = await fileSystem.ReadAsync(registryPath, cancellationToken);
+            foreach (var snapshotPath in fileSystem.EnumerateAccountSnapshotPaths(accountsPath))
+            {
+                var snapshotBytes = await fileSystem.ReadAsync(snapshotPath, cancellationToken);
+                if (snapshotBytes is null)
+                {
+                    throw new IOException("An account snapshot changed during checkpoint capture.");
+                }
+
+                accountSnapshots.Add(snapshotPath, snapshotBytes);
+            }
+
             var transaction = new AuthStateTransaction(
                 authPath,
                 authBytes,
                 registryPath,
                 registryBytes,
+                accountsPath,
+                accountSnapshots,
                 fileSystem);
             ownershipTransferred = true;
             return transaction;
@@ -95,6 +118,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             {
                 Clear(authBytes);
                 Clear(registryBytes);
+                Clear(accountSnapshots.Values);
             }
         }
     }
@@ -113,6 +137,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             _registryExisted,
             _registryBytes,
             cancellationToken);
+        var snapshotsRestored = await TryRestoreAccountSnapshotsAsync(cancellationToken);
 
         byte[]? currentAuth = null;
         byte[]? currentRegistry = null;
@@ -122,13 +147,16 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             currentAuth = authRead.Bytes;
             var registryRead = await TryReadAsync(_registryPath, cancellationToken);
             currentRegistry = registryRead.Bytes;
+            var snapshotsMatch = await TryAccountSnapshotsMatchAsync(cancellationToken);
 
             return authRestored &&
                 registryRestored &&
+                snapshotsRestored &&
                 authRead.Succeeded &&
                 registryRead.Succeeded &&
                 Matches(_authExisted, _authBytes, currentAuth) &&
-                Matches(_registryExisted, _registryBytes, currentRegistry);
+                Matches(_registryExisted, _registryBytes, currentRegistry) &&
+                snapshotsMatch;
         }
         finally
         {
@@ -146,6 +174,8 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
 
         Clear(_authBytes);
         Clear(_registryBytes);
+        Clear(_accountSnapshots.Values);
+        _accountSnapshots.Clear();
         _authBytes = null;
         _registryBytes = null;
         _disposed = true;
@@ -201,6 +231,82 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
         }
     }
 
+    private async Task<bool> TryRestoreAccountSnapshotsAsync(CancellationToken cancellationToken)
+    {
+        var restored = true;
+        foreach (var snapshot in _accountSnapshots)
+        {
+            restored = await TryRestoreAsync(
+                snapshot.Key,
+                existed: true,
+                snapshot.Value,
+                cancellationToken) && restored;
+        }
+
+        IReadOnlyList<string> currentSnapshotPaths;
+        try
+        {
+            currentSnapshotPaths = _fileSystem.EnumerateAccountSnapshotPaths(_accountsPath);
+        }
+        catch (Exception exception) when (IsFileFailure(exception))
+        {
+            return false;
+        }
+
+        foreach (var snapshotPath in currentSnapshotPaths)
+        {
+            if (!_accountSnapshots.ContainsKey(snapshotPath))
+            {
+                restored = await TryRestoreAsync(
+                    snapshotPath,
+                    existed: false,
+                    bytes: null,
+                    cancellationToken) && restored;
+            }
+        }
+
+        return restored;
+    }
+
+    private async Task<bool> TryAccountSnapshotsMatchAsync(CancellationToken cancellationToken)
+    {
+        IReadOnlyList<string> currentSnapshotPaths;
+        try
+        {
+            currentSnapshotPaths = _fileSystem.EnumerateAccountSnapshotPaths(_accountsPath);
+        }
+        catch (Exception exception) when (IsFileFailure(exception))
+        {
+            return false;
+        }
+
+        if (currentSnapshotPaths.Count != _accountSnapshots.Count ||
+            currentSnapshotPaths.Any(path => !_accountSnapshots.ContainsKey(path)))
+        {
+            return false;
+        }
+
+        foreach (var snapshot in _accountSnapshots)
+        {
+            byte[]? current = null;
+            try
+            {
+                var read = await TryReadAsync(snapshot.Key, cancellationToken);
+                current = read.Bytes;
+                if (!read.Succeeded || !Matches(existed: true, snapshot.Value, current))
+                {
+                    return false;
+                }
+            }
+            finally
+            {
+                Clear(current);
+            }
+        }
+
+        return true;
+    }
+
     private static bool Matches(bool existed, byte[]? expected, byte[]? actual) =>
         existed
             ? actual is not null && CryptographicOperations.FixedTimeEquals(expected!, actual)
@@ -216,6 +322,14 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             CryptographicOperations.ZeroMemory(bytes);
         }
     }
+
+    private static void Clear(IEnumerable<byte[]> buffers)
+    {
+        foreach (var buffer in buffers)
+        {
+            Clear(buffer);
+        }
+    }
 }
 
 internal sealed class AuthStateFileSystem : IAuthStateFileSystem
@@ -229,6 +343,20 @@ internal sealed class AuthStateFileSystem : IAuthStateFileSystem
 
     internal AuthStateFileSystem(Action<string, string> replaceFile) =>
         _replaceFile = replaceFile ?? throw new ArgumentNullException(nameof(replaceFile));
+
+    public IReadOnlyList<string> EnumerateAccountSnapshotPaths(string accountsPath)
+    {
+        try
+        {
+            return Directory
+                .EnumerateFiles(accountsPath, "*.auth.json", SearchOption.TopDirectoryOnly)
+                .ToArray();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+    }
 
     public async Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken)
     {

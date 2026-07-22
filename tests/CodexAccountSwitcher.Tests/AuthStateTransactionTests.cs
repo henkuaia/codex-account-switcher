@@ -26,6 +26,55 @@ public sealed class AuthStateTransactionTests
     }
 
     [Fact]
+    public async Task Failed_login_rollback_removes_account_snapshot_created_after_checkpoint()
+    {
+        using var home = new TemporaryDirectory();
+        WriteBytes(home.Path, "accounts/notes.json", [7, 8, 9]);
+        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        WriteBytes(home.Path, "accounts/new-account.auth.json", [1, 2, 3]);
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.True(restored);
+        Assert.False(File.Exists(Path.Combine(home.Path, "accounts", "new-account.auth.json")));
+        Assert.Equal([7, 8, 9], File.ReadAllBytes(Path.Combine(home.Path, "accounts", "notes.json")));
+    }
+
+    [Fact]
+    public async Task Failed_login_rollback_restores_overwritten_account_snapshot_bytes()
+    {
+        using var home = new TemporaryDirectory();
+        var originalSnapshot = new byte[] { 0, 17, 34, 255 };
+        WriteBytes(home.Path, "accounts/existing.auth.json", originalSnapshot);
+        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        WriteBytes(home.Path, "accounts/existing.auth.json", [9, 8, 7]);
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.True(restored);
+        Assert.Equal(
+            originalSnapshot,
+            File.ReadAllBytes(Path.Combine(home.Path, "accounts", "existing.auth.json")));
+    }
+
+    [Fact]
+    public async Task Failed_login_rollback_restores_deleted_account_snapshot_bytes()
+    {
+        using var home = new TemporaryDirectory();
+        var originalSnapshot = new byte[] { 255, 34, 17, 0 };
+        WriteBytes(home.Path, "accounts/existing.auth.json", originalSnapshot);
+        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        File.Delete(Path.Combine(home.Path, "accounts", "existing.auth.json"));
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.True(restored);
+        Assert.Equal(
+            originalSnapshot,
+            File.ReadAllBytes(Path.Combine(home.Path, "accounts", "existing.auth.json")));
+    }
+
+    [Fact]
     public async Task Restore_deletes_files_that_were_absent_in_checkpoint()
     {
         using var home = new TemporaryDirectory();
@@ -61,6 +110,28 @@ public sealed class AuthStateTransactionTests
         Assert.False(restored);
         Assert.Equal(
             ["write:home/auth.json", "write:home/accounts/registry.json"],
+            fileSystem.RestoreOperations);
+    }
+
+    [Fact]
+    public async Task Restore_returns_false_when_account_snapshot_verification_fails()
+    {
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            Files =
+            {
+                ["home/accounts/existing.auth.json"] = [1, 2, 3],
+            },
+        };
+        using var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
+        fileSystem.Files["home/accounts/existing.auth.json"] = [9];
+        fileSystem.CorruptAfterRestorePath = "home/accounts/existing.auth.json";
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.False(restored);
+        Assert.Contains(
+            "write:home/accounts/existing.auth.json",
             fileSystem.RestoreOperations);
     }
 
@@ -140,6 +211,7 @@ public sealed class AuthStateTransactionTests
             {
                 ["home/auth.json"] = System.Text.Encoding.UTF8.GetBytes(secret),
                 ["home/accounts/registry.json"] = [5, 6, 7],
+                ["home/accounts/existing.auth.json"] = [8, 9, 10],
             },
         };
         var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
@@ -148,11 +220,19 @@ public sealed class AuthStateTransactionTests
             .Where(field => field.FieldType == typeof(byte[]))
             .Select(field => Assert.IsType<byte[]>(field.GetValue(transaction)))
             .ToArray();
+        var snapshotBuffers = Assert.IsType<Dictionary<string, byte[]>>(
+                typeof(AuthStateTransaction)
+                    .GetField("_accountSnapshots", BindingFlags.Instance | BindingFlags.NonPublic)!
+                    .GetValue(transaction))
+            .Values
+            .ToArray();
 
         Assert.DoesNotContain(secret, transaction.ToString(), StringComparison.Ordinal);
         transaction.Dispose();
 
-        Assert.All(buffers, buffer => Assert.All(buffer, value => Assert.Equal((byte)0, value)));
+        Assert.All(
+            buffers.Concat(snapshotBuffers),
+            buffer => Assert.All(buffer, value => Assert.Equal((byte)0, value)));
         await Assert.ThrowsAsync<ObjectDisposedException>(
             () => transaction.RestoreAndVerifyAsync(default));
     }
@@ -180,6 +260,16 @@ public sealed class AuthStateTransactionTests
         public byte[]? FirstReturnedBuffer { get; private set; }
 
         public string? CorruptAfterRestorePath { get; set; }
+
+        public IReadOnlyList<string> EnumerateAccountSnapshotPaths(string accountsPath)
+        {
+            var normalizedAccountsPath = Normalize(accountsPath).TrimEnd('/') + "/";
+            return Files.Keys
+                .Where(path => path.StartsWith(normalizedAccountsPath, StringComparison.Ordinal) &&
+                    !path[normalizedAccountsPath.Length..].Contains('/') &&
+                    path.EndsWith(".auth.json", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+        }
 
         public Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken)
         {

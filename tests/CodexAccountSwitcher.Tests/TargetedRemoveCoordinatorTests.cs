@@ -611,6 +611,9 @@ public sealed class TargetedRemoveCoordinatorTests
 
         public string? ReadFailurePath { get; set; }
 
+        public IReadOnlyList<string> EnumerateAccountSnapshotPaths(string accountsPath) =>
+            throw new InvalidOperationException("Removal transactions do not enumerate account snapshots.");
+
         public Task<byte[]?> ReadAsync(string path, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();

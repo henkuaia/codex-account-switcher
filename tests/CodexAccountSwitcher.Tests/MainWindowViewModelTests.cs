@@ -61,6 +61,21 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Invalid_registry_load_keeps_empty_state_and_helper_commands_available()
+    {
+        var fixture = new Fixture();
+        fixture.LoadRegistryOperation = _ => Task.FromException<AccountRegistry>(
+            new System.IO.InvalidDataException("registry is invalid"));
+
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.Empty(fixture.ViewModel.Accounts);
+        Assert.True(fixture.ViewModel.IsHelperAvailable);
+        Assert.Equal(string.Empty, fixture.ViewModel.HelperAvailabilityError);
+        Assert.True(fixture.ViewModel.AddCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task Refresh_is_manual_and_calls_quota_service_once()
     {
         var fixture = new Fixture();
@@ -524,7 +539,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(operation == "login" ? 1 : 0, fixture.LoginCallCount);
         Assert.Equal(operation == "remove" ? 1 : 0, fixture.RemoveCallCount);
         Assert.Equal(operation == "switch" ? 1 : 0, fixture.SwitchCallCount);
-        Assert.Equal(1, fixture.LoadCallCount);
+        Assert.Equal(operation is "login" or "remove" ? 2 : 1, fixture.LoadCallCount);
         Assert.False(fixture.ViewModel.IsHelperAvailable);
         Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.HelperAvailabilityError);
         Assert.Equal(fixture.MissingAvailability.Error, fixture.ViewModel.StatusText);
@@ -533,6 +548,28 @@ public sealed class MainWindowViewModelTests
         Assert.False(fixture.ViewModel.RefreshCommand.CanExecute(null));
         Assert.False(fixture.ViewModel.SwitchCommand.CanExecute(switchTarget));
         Assert.True(fixture.ViewModel.RetryLaunchCommand.CanExecute(null));
+    }
+
+    [Theory]
+    [InlineData("login")]
+    [InlineData("remove")]
+    public async Task Login_and_removal_reload_registry_when_helper_becomes_unavailable_after_operation(
+        string operation)
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        await fixture.ViewModel.LoadAsync();
+        var switchTarget = fixture.Row(fixture.Second);
+        fixture.Dialog.AfterDialog = () => fixture.Availability = fixture.MissingAvailability;
+        fixture.LoginResult = WithHelperAvailability(
+            new LoginResult(false, "login failed", true),
+            fixture.MissingAvailability);
+        fixture.RemovalResult = WithHelperAvailability(
+            new RemovalResult(false, "remove failed"),
+            fixture.MissingAvailability);
+
+        await fixture.ExecuteAsync(operation, switchTarget);
+
+        Assert.Equal(2, fixture.LoadCallCount);
     }
 
     [Fact]

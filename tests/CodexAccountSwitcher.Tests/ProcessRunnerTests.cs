@@ -372,6 +372,38 @@ public sealed class ProcessRunnerTests
             lines);
     }
 
+    [Fact]
+    public async Task Default_streaming_overload_sanitizes_legacy_output_before_delivery()
+    {
+        const string bearerSecret = "legacy-bearer-secret";
+        const string tokenSecret = "legacy-token-secret";
+        var legacyRunner = new LegacyProcessRunner();
+        IProcessRunner runner = legacyRunner;
+        var lines = new List<ProcessOutputLine>();
+        ProcessOutputHandler outputHandler = (line, _) =>
+        {
+            lines.Add(line);
+            return ValueTask.CompletedTask;
+        };
+        var expected = new CommandResult(
+            1,
+            $"Authorization: Bearer {bearerSecret}{Environment.NewLine}",
+            $"{{\"access_token\":\"{tokenSecret}\"}}{Environment.NewLine}");
+
+        var runTask = runner.RunCapturedAsync(
+            new ProcessRequest("fake.exe", ["login"]),
+            outputHandler,
+            CancellationToken.None);
+        legacyRunner.Complete(expected);
+        var result = await runTask;
+
+        Assert.Same(expected, result);
+        Assert.Equal(2, lines.Count);
+        Assert.All(lines, line => Assert.Contains("[REDACTED]", line.Text, StringComparison.Ordinal));
+        Assert.DoesNotContain(bearerSecret, lines[0].Text, StringComparison.Ordinal);
+        Assert.DoesNotContain(tokenSecret, lines[1].Text, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

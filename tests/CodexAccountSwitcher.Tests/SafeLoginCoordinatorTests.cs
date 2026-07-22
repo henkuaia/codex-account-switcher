@@ -68,9 +68,10 @@ public sealed class SafeLoginCoordinatorTests
         var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
+        Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account login failed before authentication changed.", result.Message);
-        Assert.Equal(["availability", "close", "launch"], fixture.Operations);
+        Assert.Equal(["availability", "close"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -97,9 +98,10 @@ public sealed class SafeLoginCoordinatorTests
         var result = await fixture.Coordinator.LoginAsync(fixture.OutputHandler, default);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
+        Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account login failed before authentication changed.", result.Message);
-        Assert.Equal(["availability", "close", "force:41", "launch"], fixture.Operations);
+        Assert.Equal(["availability", "close", "force:41"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -187,6 +189,57 @@ public sealed class SafeLoginCoordinatorTests
         Assert.Equal(
             ["availability", "close", "capture", "login", "output", "restore", "launch"],
             fixture.Operations);
+    }
+
+    [Fact]
+    public async Task Close_cancellation_after_side_effect_suppresses_launch_without_checkpoint()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseCallback = cancellationSource.Cancel;
+        fixture.ProcessController.CloseException =
+            new CodexCloseCanceledException(sideEffectsStarted: true, cancellationSource.Token);
+
+        var result = await fixture.Coordinator.LoginAsync(
+            fixture.OutputHandler,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Account login was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["availability", "close"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_after_side_effect_suppresses_launch_without_checkpoint()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41, 73]);
+        fixture.ProcessController.ForceCallback = cancellationSource.Cancel;
+        fixture.ProcessController.ForceException =
+            new CodexForceTerminateCanceledException(
+                sideEffectsStarted: true,
+                cancellationSource.Token);
+
+        var result = await fixture.Coordinator.LoginAsync(
+            fixture.OutputHandler,
+            cancellationSource.Token);
+
+        Assert.False(result.Succeeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Account login was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["availability", "close", "force:41,73"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Theory]
@@ -524,6 +577,10 @@ public sealed class SafeLoginCoordinatorTests
 
         public Exception? ForceException { get; set; }
 
+        public Action? CloseCallback { get; set; }
+
+        public Action? ForceCallback { get; set; }
+
         public Task<CloseResult> CloseAsync(
             CodexPackageInfo package,
             TimeSpan timeout,
@@ -531,6 +588,7 @@ public sealed class SafeLoginCoordinatorTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             operations.Add("close");
+            CloseCallback?.Invoke();
             if (CloseException is not null)
             {
                 throw CloseException;
@@ -546,6 +604,7 @@ public sealed class SafeLoginCoordinatorTests
             cancellationToken.ThrowIfCancellationRequested();
             ForcedProcessIds = processIds.ToArray();
             operations.Add($"force:{string.Join(',', processIds)}");
+            ForceCallback?.Invoke();
             if (ForceException is not null)
             {
                 throw ForceException;

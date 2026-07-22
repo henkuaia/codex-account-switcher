@@ -70,7 +70,8 @@ public interface IProcessRunner
             using var reader = new StringReader(text);
             while (reader.ReadLine() is { } line)
             {
-                await outputHandler(new ProcessOutputLine(stream, line), cancellationToken);
+                var sanitizedLine = SensitiveTextRedactor.Redact(line, Array.Empty<string>());
+                await outputHandler(new ProcessOutputLine(stream, sanitizedLine), cancellationToken);
             }
         }
     }

@@ -191,6 +191,73 @@ public sealed class AccountRegistryServiceTests
     }
 
     [Fact]
+    public async Task Current_v3_duplicate_account_key_throws_invalid_data()
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", """
+            {
+              "schema_version": 3,
+              "accounts": [
+                {"account_key": "duplicate::acct", "email": "first@example.com"},
+                {"account_key": "duplicate::acct", "email": "second@example.com"}
+              ]
+            }
+            """);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
+    }
+
+    [Fact]
+    public async Task Current_v3_unknown_active_account_key_throws_invalid_data()
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", """
+            {
+              "schema_version": 3,
+              "active_account_key": "missing::acct",
+              "accounts": [
+                {"account_key": "present::acct", "email": "first@example.com"}
+              ]
+            }
+            """);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
+    }
+
+    [Fact]
+    public async Task Legacy_v2_duplicate_email_throws_invalid_data_without_exposing_email()
+    {
+        using var home = new TemporaryDirectory();
+        const string email = "duplicate-legacy-secret@example.com";
+        const string accountId = "acct-legacy";
+        const string userId = "user-legacy";
+        home.Write("accounts/registry.json", $$"""
+            {
+              "version": 2,
+              "accounts": [
+                {"email": "{{email}}", "alias": "first"},
+                {"email": "{{email}}", "alias": "second"}
+              ]
+            }
+            """);
+        home.Write($"accounts/{Base64UrlEncode(email)}.auth.json", $$"""
+            {
+              "tokens": {
+                "account_id": "{{accountId}}",
+                "id_token": "{{LegacyIdToken(email, accountId, "plus", userId)}}"
+              }
+            }
+            """);
+
+        var exception = await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
+
+        Assert.DoesNotContain(email, exception.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Future_schema_version_throws_invalid_data()
     {
         using var home = new TemporaryDirectory();

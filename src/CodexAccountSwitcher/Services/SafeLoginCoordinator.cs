@@ -21,6 +21,9 @@ public sealed class SafeLoginCoordinator
         "Account login was canceled after Codex closed. The prior authentication state was restored.";
     private const string PreMutationCancellationMessage =
         "Account login was canceled before authentication changed. Codex was restarted.";
+    private const string UnverifiedExitCancellationMessage =
+        "Account login was canceled before authentication changed. " +
+        "Codex was not launched because process exit could not be verified.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
     private const string UnknownHelperExitMessage =
@@ -180,8 +183,8 @@ public sealed class SafeLoginCoordinator
         {
             if (exception.SideEffectsStarted)
             {
-                launchAllowed = true;
-                result = new LoginResult(false, PreMutationCancellationMessage, false);
+                launchAllowed = false;
+                result = new LoginResult(false, UnverifiedExitCancellationMessage, false);
             }
             else
             {
@@ -193,8 +196,8 @@ public sealed class SafeLoginCoordinator
         {
             if (closeSideEffectsStarted || exception.SideEffectsStarted)
             {
-                launchAllowed = true;
-                result = new LoginResult(false, PreMutationCancellationMessage, false);
+                launchAllowed = false;
+                result = new LoginResult(false, UnverifiedExitCancellationMessage, false);
             }
             else
             {
@@ -206,6 +209,12 @@ public sealed class SafeLoginCoordinator
             restoreRequired = false;
             launchAllowed = false;
             result = new LoginResult(false, UnknownHelperExitMessage, false);
+        }
+        catch (CodexProcessDiscoveryException) when (stage is LoginStage.Close or LoginStage.Force)
+        {
+            restoreRequired = false;
+            launchAllowed = false;
+            result = new LoginResult(false, PreMutationFailureMessage, false);
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {

@@ -262,7 +262,16 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task LoadRegistryAsync(CancellationToken cancellationToken)
     {
         var availability = _checkHelperAvailability();
-        var registry = await _loadRegistryAsync(cancellationToken);
+        AccountRegistry registry;
+        try
+        {
+            registry = await _loadRegistryAsync(cancellationToken);
+        }
+        catch (System.IO.InvalidDataException)
+        {
+            registry = AccountRegistry.Empty;
+        }
+
         await _dispatcher.InvokeAsync(
             () =>
             {
@@ -325,22 +334,26 @@ public sealed class MainWindowViewModel : ObservableObject
             cancellationToken);
         var result = loginResult
             ?? throw new InvalidOperationException("The account login did not return a result.");
-        if (await ApplyResultHelperAvailabilityAsync(
-                result.HelperAvailability,
-                CancellationToken.None))
-        {
-            return;
-        }
+        var helperUnavailable = await ApplyResultHelperAvailabilityAsync(
+            result.HelperAvailability,
+            CancellationToken.None);
 
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
-                StatusText = result.Message;
-                CanRetryLaunch = result.CanRetryLaunch;
+                if (!helperUnavailable)
+                {
+                    StatusText = result.Message;
+                    CanRetryLaunch = result.CanRetryLaunch;
+                }
             },
             CancellationToken.None);
+        if (helperUnavailable)
+        {
+            return;
+        }
     }
 
     private async Task RemoveAsync(CancellationToken cancellationToken)
@@ -359,21 +372,25 @@ public sealed class MainWindowViewModel : ObservableObject
         }
 
         var result = await _removeAsync(target.Account, _registry, cancellationToken);
-        if (await ApplyResultHelperAvailabilityAsync(
-                result.HelperAvailability,
-                CancellationToken.None))
-        {
-            return;
-        }
+        var helperUnavailable = await ApplyResultHelperAvailabilityAsync(
+            result.HelperAvailability,
+            CancellationToken.None);
 
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
-                StatusText = result.Message;
+                if (!helperUnavailable)
+                {
+                    StatusText = result.Message;
+                }
             },
             CancellationToken.None);
+        if (helperUnavailable)
+        {
+            return;
+        }
     }
 
     private Task SwitchAccountAsync(object? parameter, CancellationToken cancellationToken)

@@ -50,6 +50,7 @@ public sealed class AccountRegistryService
         var activeAccountKey = schemaVersion == 2
             ? ResolveLegacyActiveAccountKey(registry.ActiveEmail, accounts)
             : registry.ActiveAccountKey;
+        ValidateStructure(accounts, activeAccountKey);
 
         return new AccountRegistry(
             schemaVersion,
@@ -87,9 +88,15 @@ public sealed class AccountRegistryService
         CancellationToken cancellationToken)
     {
         var accounts = new List<AccountRecord>();
+        var emails = new HashSet<string>(StringComparer.Ordinal);
         foreach (var account in registryAccounts)
         {
             if (string.IsNullOrWhiteSpace(account.Email))
+            {
+                throw new InvalidDataException("The account registry contains an invalid account.");
+            }
+
+            if (!emails.Add(NormalizeEmail(account.Email)))
             {
                 throw new InvalidDataException("The account registry contains an invalid account.");
             }
@@ -147,6 +154,27 @@ public sealed class AccountRegistryService
         }
 
         return accounts;
+    }
+
+    private static void ValidateStructure(
+        IReadOnlyList<AccountRecord> accounts,
+        string? activeAccountKey)
+    {
+        if (accounts
+            .GroupBy(account => account.AccountKey, StringComparer.Ordinal)
+            .Any(group => group.Count() != 1))
+        {
+            throw new InvalidDataException("The account registry contains an invalid account.");
+        }
+
+        if (activeAccountKey is not null &&
+            accounts.Count(account => string.Equals(
+                account.AccountKey,
+                activeAccountKey,
+                StringComparison.Ordinal)) != 1)
+        {
+            throw new InvalidDataException("The account registry contains an invalid active account.");
+        }
     }
 
     private static string? ResolveLegacyActiveAccountKey(string? activeEmail, IReadOnlyList<AccountRecord> accounts)

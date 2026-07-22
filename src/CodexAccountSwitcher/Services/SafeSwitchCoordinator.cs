@@ -23,6 +23,9 @@ public sealed class SafeSwitchCoordinator
         "Account switch was canceled after Codex closed. The prior authentication state was restored.";
     private const string PreMutationCancellationMessage =
         "Account switch was canceled before authentication changed. Codex was restarted.";
+    private const string UnverifiedExitCancellationMessage =
+        "Account switch was canceled before authentication changed. " +
+        "Codex was not launched because process exit could not be verified.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
     private const string UnknownHelperExitMessage =
@@ -231,8 +234,8 @@ public sealed class SafeSwitchCoordinator
         {
             if (exception.SideEffectsStarted)
             {
-                launchAllowed = true;
-                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+                launchAllowed = false;
+                result = new SwitchResult(false, UnverifiedExitCancellationMessage, false);
             }
             else
             {
@@ -244,8 +247,8 @@ public sealed class SafeSwitchCoordinator
         {
             if (closeSideEffectsStarted || exception.SideEffectsStarted)
             {
-                launchAllowed = true;
-                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+                launchAllowed = false;
+                result = new SwitchResult(false, UnverifiedExitCancellationMessage, false);
             }
             else
             {
@@ -257,6 +260,12 @@ public sealed class SafeSwitchCoordinator
             restoreRequired = false;
             launchAllowed = false;
             result = new SwitchResult(false, UnknownHelperExitMessage, false);
+        }
+        catch (CodexProcessDiscoveryException) when (stage is SwitchStage.Close or SwitchStage.Force)
+        {
+            restoreRequired = false;
+            launchAllowed = false;
+            result = new SwitchResult(false, PreMutationFailureMessage, false);
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {

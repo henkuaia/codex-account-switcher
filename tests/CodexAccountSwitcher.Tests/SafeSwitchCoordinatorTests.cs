@@ -272,9 +272,10 @@ public sealed class SafeSwitchCoordinatorTests
         var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
+        Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account switch failed before authentication changed.", result.Message);
-        Assert.Equal(["close", "launch"], fixture.Operations);
+        Assert.Equal(["close"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -287,9 +288,10 @@ public sealed class SafeSwitchCoordinatorTests
         var result = await fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
+        Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account switch failed before authentication changed.", result.Message);
-        Assert.Equal(["close", "force:41", "launch"], fixture.Operations);
+        Assert.Equal(["close", "force:41"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -306,7 +308,7 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
-    public async Task Cancellation_thrown_after_close_side_effect_relaunches_without_checkpoint()
+    public async Task Close_cancellation_after_side_effect_suppresses_launch_without_checkpoint()
     {
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
@@ -320,12 +322,14 @@ public sealed class SafeSwitchCoordinatorTests
             cancellationSource.Token);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
         Assert.Equal(
-            "Account switch was canceled before authentication changed. Codex was restarted.",
+            "Account switch was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
             result.Message);
-        Assert.Equal(["close", "launch"], fixture.Operations);
-        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
+        Assert.Equal(["close"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -344,11 +348,13 @@ public sealed class SafeSwitchCoordinatorTests
                 cancellationSource.Token));
 
         Assert.False(exception.SideEffectsStarted);
+        Assert.Equal("Codex close was canceled.", exception.Message);
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
         Assert.Equal(["close"], fixture.Operations);
     }
 
     [Fact]
-    public async Task Pre_mutation_cancellation_restart_failure_uses_fixed_message()
+    public async Task Close_cancellation_suppresses_launch_even_when_launch_would_fail()
     {
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
@@ -364,10 +370,13 @@ public sealed class SafeSwitchCoordinatorTests
 
         Assert.False(result.Succeeded);
         Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
         Assert.Equal(
-            "Account switch was canceled before authentication changed. Codex restart failed.",
+            "Account switch was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
             result.Message);
-        Assert.Equal(["close", "launch"], fixture.Operations);
+        Assert.Equal(["close"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
@@ -387,11 +396,13 @@ public sealed class SafeSwitchCoordinatorTests
                 cancellationSource.Token));
 
         Assert.False(exception.SideEffectsStarted);
+        Assert.Equal("Codex force termination was canceled.", exception.Message);
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
         Assert.Equal(["close", "force:41,73"], fixture.Operations);
     }
 
     [Fact]
-    public async Task Force_cancellation_with_close_side_effect_relaunches_even_before_first_kill()
+    public async Task Force_cancellation_with_close_side_effect_suppresses_launch()
     {
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
@@ -409,12 +420,18 @@ public sealed class SafeSwitchCoordinatorTests
             cancellationSource.Token);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
-        Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["close", "force:41,73"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]
-    public async Task Force_cancellation_after_kill_relaunches_without_close_side_effect()
+    public async Task Force_cancellation_after_kill_suppresses_launch_without_checkpoint()
     {
         using var cancellationSource = new CancellationTokenSource();
         var fixture = new Fixture();
@@ -429,8 +446,14 @@ public sealed class SafeSwitchCoordinatorTests
             cancellationSource.Token);
 
         Assert.False(result.Succeeded);
-        Assert.True(result.LaunchSucceeded);
-        Assert.Equal(["close", "force:41,73", "launch"], fixture.Operations);
+        Assert.False(result.LaunchSucceeded);
+        Assert.False(result.CanRetryLaunch);
+        Assert.Equal(
+            "Account switch was canceled before authentication changed. " +
+            "Codex was not launched because process exit could not be verified.",
+            result.Message);
+        Assert.Equal(["close", "force:41,73"], fixture.Operations);
+        Assert.Equal("prior", fixture.AuthStateMarker);
     }
 
     [Fact]

@@ -5,7 +5,7 @@ Windows 上的 Codex 账号切换工具。发布目录中的 `CodexAccountSwitch
 ## 使用
 
 1. 运行 `CodexAccountSwitcher.exe`，选择 **Add account**，在浏览器完成 device login。
-2. 选择 **Refresh** 时才会手动查询额度。界面只展示 weekly 和 monthly 额度，不展示五小时额度。该查询使用 unofficial endpoint，可能随服务变化而不可用；`401`、`403` 或不可用结果不应阻止账号切换。
+2. 选择 **Refresh** 时才会手动查询额度。界面将已识别的长周期显示为 Weekly 或 Monthly，未知长周期使用中性的 Quota 标签，并显示返回的重置时间；不展示五小时额度。该查询使用 unofficial endpoint，可能随服务变化而不可用；`401`、`403` 或不可用结果不应阻止账号切换。
 3. 先停止所有正在进行的 Codex 工作，再选择目标账号并确认。工具会安全关闭 Codex、切换账号并重新启动 Codex。
 
 不提供 automatic 切换或 hot switch。切换期间不要编辑 Codex 的认证文件，也不要同时运行其他账号工具。切换完成后，不要在 CCSwitch 中启用 **OpenAI Official** provider，否则它可能覆盖当前 Codex 认证状态。

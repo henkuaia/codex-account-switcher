@@ -9,6 +9,8 @@ public sealed class AccountSnapshotPathResolverTests
     [InlineData("user-1::acct-1", "dXNlci0xOjphY2N0LTE.auth.json")]
     [InlineData("user_name.1", "user_name.1.auth.json")]
     [InlineData("é", "w6k.auth.json")]
+    [InlineData(".", "Lg.auth.json")]
+    [InlineData("..", "Li4.auth.json")]
     public void Resolves_v0210_snapshot_filename(string key, string expectedName)
     {
         var path = AccountSnapshotPathResolver.Resolve("C:/codex", key);

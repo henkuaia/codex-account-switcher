@@ -48,12 +48,14 @@ public sealed class MainWindowViewModel : ObservableObject
         AccountRegistry,
         CancellationToken,
         Task<SwitchResult>> _switchAsync;
+    private readonly Func<CancellationToken, Task<bool>> _retryLaunchAsync;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
     private readonly IOperationActivityTracker _activityTracker;
     private AccountRegistry _registry = AccountRegistry.Empty;
     private int _operationGate;
     private bool _isBusy;
+    private bool _canRetryLaunch;
     private string _statusText = string.Empty;
 
     public MainWindowViewModel(
@@ -71,6 +73,7 @@ public sealed class MainWindowViewModel : ObservableObject
             CreateLoginDelegate(codexAuthService),
             CreateRemoveDelegate(codexAuthService),
             CreateSwitchDelegate(safeSwitchCoordinator),
+            safeSwitchCoordinator.RetryLaunchAsync,
             dialogService,
             dispatcher,
             activityTracker)
@@ -91,6 +94,7 @@ public sealed class MainWindowViewModel : ObservableObject
             AccountRegistry,
             CancellationToken,
             Task<SwitchResult>> switchAsync,
+        Func<CancellationToken, Task<bool>> retryLaunchAsync,
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
         IOperationActivityTracker activityTracker)
@@ -100,6 +104,7 @@ public sealed class MainWindowViewModel : ObservableObject
         _loginAsync = loginAsync ?? throw new ArgumentNullException(nameof(loginAsync));
         _removeAsync = removeAsync ?? throw new ArgumentNullException(nameof(removeAsync));
         _switchAsync = switchAsync ?? throw new ArgumentNullException(nameof(switchAsync));
+        _retryLaunchAsync = retryLaunchAsync ?? throw new ArgumentNullException(nameof(retryLaunchAsync));
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _activityTracker = activityTracker ?? throw new ArgumentNullException(nameof(activityTracker));
@@ -124,6 +129,11 @@ public sealed class MainWindowViewModel : ObservableObject
             SwitchAccountAsync,
             parameter => !IsBusy && parameter is AccountRowViewModel { CanSwitch: true },
             HandleCommandErrorAsync);
+        RetryLaunchCommand = new AsyncCommand(
+            _dispatcher,
+            (_, cancellationToken) => RunBusyAsync(RetryLaunchAsync, cancellationToken),
+            _ => !IsBusy && CanRetryLaunch,
+            HandleRetryLaunchErrorAsync);
     }
 
     public ObservableCollection<AccountRowViewModel> Accounts { get; } = [];
@@ -135,6 +145,20 @@ public sealed class MainWindowViewModel : ObservableObject
     public AsyncCommand RemoveCommand { get; }
 
     public AsyncCommand SwitchCommand { get; }
+
+    public AsyncCommand RetryLaunchCommand { get; }
+
+    public bool CanRetryLaunch
+    {
+        get => _canRetryLaunch;
+        private set
+        {
+            if (SetProperty(ref _canRetryLaunch, value))
+            {
+                RetryLaunchCommand.NotifyCanExecuteChanged();
+            }
+        }
+    }
 
     public bool IsBusy
     {
@@ -234,12 +258,31 @@ public sealed class MainWindowViewModel : ObservableObject
                 {
                     ApplyRegistry(registry);
                     StatusText = result.Message;
+                    CanRetryLaunch = result.CanRetryLaunch;
                 },
                 CancellationToken.None);
             return;
         }
 
-        await _dispatcher.InvokeAsync(() => StatusText = result.Message, cancellationToken);
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                StatusText = result.Message;
+                CanRetryLaunch = result.CanRetryLaunch;
+            },
+            CancellationToken.None);
+    }
+
+    private async Task RetryLaunchAsync(CancellationToken cancellationToken)
+    {
+        var succeeded = await _retryLaunchAsync(cancellationToken);
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                StatusText = succeeded ? "Codex launched." : "Codex launch retry failed.";
+                CanRetryLaunch = !succeeded;
+            },
+            CancellationToken.None);
     }
 
     private async Task RunBusyAsync(
@@ -273,8 +316,20 @@ public sealed class MainWindowViewModel : ObservableObject
     private Task HandleCommandErrorAsync(Exception exception) =>
         _dispatcher.InvokeAsync(() => StatusText = exception.Message, CancellationToken.None);
 
+    private Task HandleRetryLaunchErrorAsync(Exception exception) =>
+        _dispatcher.InvokeAsync(
+            () =>
+            {
+                StatusText = "Codex launch retry failed.";
+                CanRetryLaunch = true;
+            },
+            CancellationToken.None);
+
     private void ApplyRegistry(AccountRegistry registry)
     {
+        var priorRows = Accounts.ToDictionary(
+            row => row.Account.AccountKey,
+            StringComparer.Ordinal);
         _registry = registry;
         Accounts.Clear();
         foreach (var account in registry.Accounts)
@@ -284,11 +339,21 @@ public sealed class MainWindowViewModel : ObservableObject
                 registry.ActiveAccountKey,
                 StringComparison.Ordinal);
             var selector = AccountSelectorResolver.Resolve(account, registry.Accounts);
-            Accounts.Add(new AccountRowViewModel(
-                account,
-                isActive,
-                !isActive && selector.IsAvailable,
-                isActive ? AlreadyActiveReason : selector.Error));
+            var canSwitch = !isActive && selector.IsAvailable;
+            var unavailableReason = isActive ? AlreadyActiveReason : selector.Error;
+            if (priorRows.TryGetValue(account.AccountKey, out var priorRow))
+            {
+                priorRow.ApplyAccountState(account, isActive, canSwitch, unavailableReason);
+                Accounts.Add(priorRow);
+            }
+            else
+            {
+                Accounts.Add(new AccountRowViewModel(
+                    account,
+                    isActive,
+                    canSwitch,
+                    unavailableReason));
+            }
         }
 
         RaiseCommandCanExecuteChanged();
@@ -306,6 +371,7 @@ public sealed class MainWindowViewModel : ObservableObject
         AddCommand.NotifyCanExecuteChanged();
         RemoveCommand.NotifyCanExecuteChanged();
         SwitchCommand.NotifyCanExecuteChanged();
+        RetryLaunchCommand.NotifyCanExecuteChanged();
     }
 
     private static Func<CancellationToken, Task<AccountRegistry>> CreateLoadRegistryDelegate(

@@ -78,7 +78,7 @@ public sealed class AccountSelectorResolverTests
     }
 
     [Fact]
-    public void Matching_uses_case_insensitive_full_string_equality()
+    public void Alias_substring_collision_falls_back_to_safe_exact_email()
     {
         var target = Accounts.Record("key-1", "first@example.com", "main");
         var other = Accounts.Record("key-2", "second@example.com", "MAIN-ARCHIVE");
@@ -86,6 +86,48 @@ public sealed class AccountSelectorResolverTests
         var result = AccountSelectorResolver.Resolve(target, [target, other]);
 
         Assert.True(result.IsAvailable);
-        Assert.Equal("main", result.Value);
+        Assert.Equal("first@example.com", result.Value);
+    }
+
+    [Fact]
+    public void Alias_substring_collision_in_another_accounts_email_falls_back_to_safe_email()
+    {
+        var target = Accounts.Record("key-1", "first@example.com", "main");
+        var other = Accounts.Record("key-2", "main-archive@example.com", "archive");
+
+        var result = AccountSelectorResolver.Resolve(target, [target, other]);
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal("first@example.com", result.Value);
+    }
+
+    [Fact]
+    public void Alias_substring_collision_in_another_accounts_name_falls_back_to_safe_email()
+    {
+        var target = Accounts.Record("key-1", "first@example.com", "main");
+        var other = Accounts.Record("key-2", "second@example.com", "archive") with
+        {
+            AccountName = "MAIN-ARCHIVE",
+        };
+
+        var result = AccountSelectorResolver.Resolve(target, [target, other]);
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal("first@example.com", result.Value);
+    }
+
+    [Fact]
+    public void Exact_email_is_rejected_when_helper_substring_query_matches_another_field()
+    {
+        var target = Accounts.Record("key-1", "first@example.com");
+        var other = Accounts.Record("key-2", "second@example.com", "archive") with
+        {
+            AccountName = "backup first@example.com account",
+        };
+
+        var result = AccountSelectorResolver.Resolve(target, [target, other]);
+
+        Assert.False(result.IsAvailable);
+        Assert.Null(result.Value);
     }
 }

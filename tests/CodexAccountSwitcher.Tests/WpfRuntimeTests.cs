@@ -87,8 +87,16 @@ public sealed class WpfRuntimeTests
                     var button = Assert.IsType<Button>(mainWindow.FindName(name));
                     Assert.False(string.IsNullOrWhiteSpace(AutomationProperties.GetName(button)));
                 }
+                var refreshButton = Assert.IsType<Button>(mainWindow.FindName("RefreshButton"));
+                Assert.Contains("unofficial endpoint", refreshButton.ToolTip as string, StringComparison.OrdinalIgnoreCase);
+                Assert.Contains(
+                    "unofficial endpoint",
+                    AutomationProperties.GetHelpText(refreshButton),
+                    StringComparison.OrdinalIgnoreCase);
+                var retryLaunchButton = Assert.IsType<Button>(mainWindow.FindName("RetryLaunchButton"));
+                Assert.Equal(Visibility.Collapsed, retryLaunchButton.Visibility);
                 var refreshChrome = FindVisualChildren<Border>(
-                        Assert.IsType<Button>(mainWindow.FindName("RefreshButton")))
+                        refreshButton)
                     .Single(border => border.Name == "Chrome");
                 Assert.Equal(6, refreshChrome.CornerRadius.TopLeft);
 
@@ -109,6 +117,22 @@ public sealed class WpfRuntimeTests
                         border.Name == "RowBorder" &&
                         border.DataContext is AccountRowViewModel { IsActive: true });
                 Assert.Equal(7, activeRow.CornerRadius.TopLeft);
+
+                var quotaStatus = FindVisualChildren<TextBlock>(mainWindow)
+                    .Single(textBlock =>
+                        textBlock.Name == "QuotaStatusTextBlock" &&
+                        textBlock.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == second.AccountKey);
+                Assert.Equal(Visibility.Collapsed, quotaStatus.Visibility);
+                var quotaError = "quota failed (HTTP 403).";
+                viewModel.Accounts.Single(row => row.Account.AccountKey == second.AccountKey)
+                    .ApplyQuota(new QuotaUpdate(second.AccountKey, null, quotaError));
+                await mainWindow.Dispatcher.InvokeAsync(
+                    static () => { },
+                    DispatcherPriority.ApplicationIdle);
+                Assert.Equal(Visibility.Visible, quotaStatus.Visibility);
+                Assert.Equal(quotaError, quotaStatus.Text);
+                Assert.Equal(quotaError, quotaStatus.ToolTip);
 
                 var status = Assert.IsType<TextBlock>(mainWindow.FindName("StatusTextBlock"));
                 Assert.Equal(TextWrapping.NoWrap, status.TextWrapping);
@@ -209,6 +233,7 @@ public sealed class WpfRuntimeTests
         (_, _) => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         _ => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         (_, _, _) => Task.FromResult(new SwitchResult(true, "switched", true)),
+        _ => Task.FromResult(true),
         new NoOpDialogService(),
         new InlineDispatcher(),
         new ActiveOperationTracker());

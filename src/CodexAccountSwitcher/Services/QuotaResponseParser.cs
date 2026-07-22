@@ -61,7 +61,7 @@ public static class QuotaResponseParser
     {
         if (!rateLimit.TryGetProperty(propertyName, out var window) ||
             window.ValueKind != JsonValueKind.Object ||
-            !TryReadInteger(window, "used_percent", out var usedPercent) ||
+            !TryReadFiniteDouble(window, "used_percent", out var usedPercent) ||
             !TryReadInteger(window, "limit_window_seconds", out var windowSeconds) ||
             windowSeconds < MinimumLongWindowSeconds)
         {
@@ -84,12 +84,29 @@ public static class QuotaResponseParser
             property.TryGetInt64(out value);
     }
 
-    private static int RemainingPercent(long usedPercent) => usedPercent switch
+    private static bool TryReadFiniteDouble(JsonElement element, string propertyName, out double value)
     {
-        <= 0 => 100,
-        >= 100 => 0,
-        _ => 100 - (int)usedPercent,
-    };
+        value = default;
+        if (!element.TryGetProperty(propertyName, out var property) ||
+            property.ValueKind != JsonValueKind.Number)
+        {
+            return false;
+        }
+
+        if (!property.TryGetDouble(out value) || !double.IsFinite(value))
+        {
+            throw new JsonException();
+        }
+
+        return true;
+    }
+
+    private static int RemainingPercent(double usedPercent)
+    {
+        // Clamp before subtraction, then round remaining halves away from zero.
+        var remaining = 100d - Math.Clamp(usedPercent, 0d, 100d);
+        return (int)Math.Round(remaining, MidpointRounding.AwayFromZero);
+    }
 
     private static QuotaPeriod ResolvePeriod(long windowSeconds) => windowSeconds switch
     {
@@ -117,5 +134,13 @@ public static class QuotaResponseParser
 
     private static string BuildTooltip(IEnumerable<QuotaDisplay> candidates) =>
         string.Join("; ", candidates.Select(candidate =>
-            $"{candidate.Period}: {candidate.RemainingPercent}% remaining"));
+        {
+            var period = candidate.Period == QuotaPeriod.Unknown
+                ? $"Unknown ({candidate.WindowDuration.TotalDays:0.##} days)"
+                : candidate.Period.ToString();
+            var reset = candidate.ResetsAt is { } resetsAt
+                ? $", resets {resetsAt.UtcDateTime:yyyy-MM-dd HH:mm 'UTC'}"
+                : string.Empty;
+            return $"{period}: {candidate.RemainingPercent}% remaining{reset}";
+        }));
 }

@@ -37,5 +37,17 @@ public static class AccountSelectorResolver
         accounts.Count(account => string.Equals(selector(account), value, StringComparison.OrdinalIgnoreCase)) == 1 &&
         accounts.Any(account =>
             string.Equals(selector(account), value, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(account.AccountKey, target.AccountKey, StringComparison.Ordinal)) &&
+        accounts.Count(account => MatchesHelperQuery(account, value)) == 1 &&
+        accounts.Any(account =>
+            MatchesHelperQuery(account, value) &&
             string.Equals(account.AccountKey, target.AccountKey, StringComparison.Ordinal));
+
+    private static bool MatchesHelperQuery(AccountRecord account, string query) =>
+        Contains(account.Email, query) ||
+        Contains(account.Alias, query) ||
+        Contains(account.AccountName, query);
+
+    private static bool Contains(string? value, string query) =>
+        value?.Contains(query, StringComparison.OrdinalIgnoreCase) == true;
 }

@@ -60,8 +60,10 @@ public sealed class PublishContractTests
 
         Assert.Contains(".NET 9 Desktop Runtime", readme, StringComparison.Ordinal);
         Assert.Contains("device login", readme, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("weekly", readme, StringComparison.Ordinal);
-        Assert.Contains("monthly", readme, StringComparison.Ordinal);
+        Assert.Contains("Weekly", readme, StringComparison.Ordinal);
+        Assert.Contains("Monthly", readme, StringComparison.Ordinal);
+        Assert.Contains("Quota", readme, StringComparison.Ordinal);
+        Assert.Contains("未知长周期", readme, StringComparison.Ordinal);
         Assert.Contains("不展示五小时额度", readme, StringComparison.Ordinal);
         Assert.Contains("unofficial endpoint", readme, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("停止所有正在进行的 Codex 工作", readme, StringComparison.Ordinal);

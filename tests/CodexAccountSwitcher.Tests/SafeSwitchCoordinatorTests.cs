@@ -329,6 +329,32 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
+    public async Task Force_exit_barrier_completes_before_auth_checkpoint_or_switch()
+    {
+        var forceEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseForce = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var fixture = new Fixture();
+        fixture.ProcessController.CloseResult = new CloseResult(false, [41]);
+        fixture.ProcessController.ForceOperation = async cancellationToken =>
+        {
+            forceEntered.TrySetResult();
+            await releaseForce.Task.WaitAsync(cancellationToken);
+        };
+
+        var running = fixture.Coordinator.SwitchAsync(fixture.Target, fixture.Registry, default);
+        await forceEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(["close", "force:41"], fixture.Operations);
+
+        releaseForce.TrySetResult();
+        var result = await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(result.Succeeded);
+        Assert.True(fixture.Operations.IndexOf("force:41") < fixture.Operations.IndexOf("capture"));
+        Assert.True(fixture.Operations.IndexOf("capture") < fixture.Operations.IndexOf("switch:target"));
+    }
+
+    [Fact]
     public async Task Cancellation_after_close_restores_and_launches_with_recovery_tokens()
     {
         using var cancellationSource = new CancellationTokenSource();
@@ -390,6 +416,7 @@ public sealed class SafeSwitchCoordinatorTests
             "Authentication state recovery could not be verified. Codex was not launched.",
             result.Message);
         Assert.Equal(["close", "capture", "switch:target", "restore"], fixture.Operations);
+        Assert.False(RequiredBooleanProperty(result, "CanRetryLaunch"));
     }
 
     [Fact]
@@ -404,6 +431,30 @@ public sealed class SafeSwitchCoordinatorTests
         Assert.False(result.LaunchSucceeded);
         Assert.Equal("Account switch was verified, but Codex launch failed.", result.Message);
         Assert.Equal("launch", fixture.Operations[^1]);
+        Assert.True(RequiredBooleanProperty(result, "CanRetryLaunch"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Retry_launch_uses_existing_package_launch_only_and_returns_sanitized_outcome(
+        bool launchSucceeds)
+    {
+        var fixture = new Fixture();
+        if (!launchSucceeds)
+        {
+            fixture.ProcessController.LaunchException = new CodexLaunchException();
+        }
+        var method = typeof(SafeSwitchCoordinator).GetMethod("RetryLaunchAsync");
+        Assert.NotNull(method);
+
+        var invocation = method.Invoke(fixture.Coordinator, [CancellationToken.None]);
+        var task = Assert.IsAssignableFrom<Task<bool>>(invocation);
+        var result = await task;
+
+        Assert.Equal(launchSucceeds, result);
+        Assert.Equal(["launch"], fixture.Operations);
+        Assert.False(fixture.ProcessController.LaunchToken.CanBeCanceled);
     }
 
     [Fact]
@@ -686,6 +737,13 @@ public sealed class SafeSwitchCoordinatorTests
         private bool _switchStarted;
     }
 
+    private static bool RequiredBooleanProperty(object instance, string propertyName)
+    {
+        var property = instance.GetType().GetProperty(propertyName);
+        Assert.NotNull(property);
+        return Assert.IsType<bool>(property.GetValue(instance));
+    }
+
     private sealed class FakeCheckpoint(
         List<string> operations,
         Action restoreState) : IAuthStateCheckpoint
@@ -742,6 +800,8 @@ public sealed class SafeSwitchCoordinatorTests
 
         public Action? ForceCallback { get; set; }
 
+        public Func<CancellationToken, Task>? ForceOperation { get; set; }
+
         public Task<CloseResult> CloseAsync(
             CodexPackageInfo package,
             TimeSpan timeout,
@@ -760,7 +820,7 @@ public sealed class SafeSwitchCoordinatorTests
             return Task.FromResult(CloseResult);
         }
 
-        public Task ForceTerminateAsync(
+        public async Task ForceTerminateAsync(
             IReadOnlyList<int> processIds,
             CancellationToken cancellationToken)
         {
@@ -773,7 +833,10 @@ public sealed class SafeSwitchCoordinatorTests
                 throw ForceException;
             }
 
-            return Task.CompletedTask;
+            if (ForceOperation is not null)
+            {
+                await ForceOperation(cancellationToken);
+            }
         }
 
         public Task LaunchAsync(CodexPackageInfo package, CancellationToken cancellationToken)

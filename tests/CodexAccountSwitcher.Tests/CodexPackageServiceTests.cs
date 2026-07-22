@@ -453,7 +453,77 @@ public sealed class CodexProcessControllerTests
         await controller.ForceTerminateAsync([100], default);
 
         Assert.Equal([100, 101], accessor.KilledProcessIds);
-        Assert.Equal(2, accessor.EnumerationCount);
+        Assert.Equal(3, accessor.EnumerationCount);
+    }
+
+    [Fact]
+    public async Task Force_terminate_waits_for_exit_and_reenumerates_before_returning()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnKill = _ => accessor.SetProcesses([]);
+
+        await controller.ForceTerminateAsync([100], default);
+
+        Assert.Equal([100, 100], accessor.WaitedProcessIds);
+        Assert.Equal(3, accessor.EnumerationCount);
+    }
+
+    [Fact]
+    public async Task Force_terminate_reenumerates_and_handles_descendant_created_during_termination()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var child = Process(101, 100, 101, "app", "resources", "late-child.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnKill = identity => accessor.SetProcesses(identity.Id == 100 ? [child] : []);
+
+        await controller.ForceTerminateAsync([100], default);
+
+        Assert.Equal([100, 101], accessor.KilledProcessIds);
+        Assert.Equal([100, 100, 101], accessor.WaitedProcessIds);
+        Assert.Equal(4, accessor.EnumerationCount);
+    }
+
+    [Fact]
+    public async Task Force_terminate_fails_closed_when_issued_identity_remains_after_bounded_wait()
+    {
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        accessor.KeepKilledProcessesAlive = true;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+
+        var exception = await Assert.ThrowsAsync<IOException>(() =>
+            controller.ForceTerminateAsync([100], default));
+
+        Assert.Equal("Codex processes did not exit after force termination.", exception.Message);
+        Assert.Equal([100, 100], accessor.WaitedProcessIds);
+        Assert.True(accessor.EnumerationCount >= 3);
+    }
+
+    [Fact]
+    public async Task Force_cancellation_during_exit_barrier_never_returns_success()
+    {
+        using var cancellationSource = new CancellationTokenSource();
+        var root = Process(100, 1, 100, "app", "ChatGPT.exe");
+        var accessor = new FakeCodexProcessAccessor([root]);
+        accessor.ExitResults[100] = false;
+        var controller = Controller(accessor);
+        await controller.CloseAsync(Package(), TimeSpan.FromSeconds(8), default);
+        accessor.OnWait = _ => cancellationSource.Cancel();
+
+        var exception = await Assert.ThrowsAsync<CodexForceTerminateCanceledException>(() =>
+            controller.ForceTerminateAsync([100], cancellationSource.Token));
+
+        Assert.True(exception.SideEffectsStarted);
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
     }
 
     [Fact]
@@ -647,11 +717,15 @@ public sealed class CodexProcessControllerTests
 
         public List<int> KilledProcessIds { get; } = [];
 
+        public bool KeepKilledProcessesAlive { get; set; }
+
         public Action<CodexProcessIdentity>? OnClose { get; set; }
 
         public Action? OnGetProcesses { get; set; }
 
         public Action<CodexProcessIdentity>? OnKill { get; set; }
+
+        public Action<CodexProcessIdentity>? OnWait { get; set; }
 
         public List<int> WaitedProcessIds { get; } = [];
 
@@ -701,6 +775,8 @@ public sealed class CodexProcessControllerTests
             WaitedProcessIds.Add(expectedIdentity.Id);
             WaitTimeouts.Add(timeout);
             Events.Add($"wait:{expectedIdentity.Id}");
+            OnWait?.Invoke(expectedIdentity);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!Matches(expectedIdentity))
             {
                 return Task.FromResult(true);
@@ -720,6 +796,13 @@ public sealed class CodexProcessControllerTests
             KilledProcessIds.Add(expectedIdentity.Id);
             KillEntireTreeValues.Add(entireProcessTree);
             OnKill?.Invoke(expectedIdentity);
+            if (!KeepKilledProcessesAlive && Matches(expectedIdentity))
+            {
+                CurrentIdentities.Remove(expectedIdentity.Id);
+                _processes = _processes
+                    .Where(process => process.Identity != expectedIdentity)
+                    .ToArray();
+            }
             return true;
         }
 

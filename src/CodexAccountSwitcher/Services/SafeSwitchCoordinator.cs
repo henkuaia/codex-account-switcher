@@ -5,7 +5,10 @@ using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.Services;
 
-public sealed record SwitchResult(bool Succeeded, string Message, bool LaunchSucceeded);
+public sealed record SwitchResult(bool Succeeded, string Message, bool LaunchSucceeded)
+{
+    public bool CanRetryLaunch { get; init; }
+}
 
 public sealed class SafeSwitchCoordinator
 {
@@ -309,7 +312,10 @@ public sealed class SafeSwitchCoordinator
                                     : priorStateRestored
                                         ? FailedLaunchFailureMessage
                                         : PreMutationLaunchFailureMessage,
-                            false);
+                            false)
+                        {
+                            CanRetryLaunch = true,
+                        };
                     }
                 }
                 catch (Exception exception)
@@ -321,6 +327,19 @@ public sealed class SafeSwitchCoordinator
 
         pendingException?.Throw();
         return result;
+    }
+
+    public async Task<bool> RetryLaunchAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _processController.LaunchAsync(_package, cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (IsOperationalLaunchFailure(exception))
+        {
+            return false;
+        }
     }
 
     private static bool IsOperationalFailure(SwitchStage stage, Exception exception) => stage switch

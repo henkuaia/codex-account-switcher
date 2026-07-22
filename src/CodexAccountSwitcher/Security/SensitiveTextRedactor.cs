@@ -24,7 +24,7 @@ public static partial class SensitiveTextRedactor
         return JsonTokenFieldRegex().Replace(redacted, "${prefix}" + RedactedValue + "\"");
     }
 
-    [GeneratedRegex(@"(?im)^(?<prefix>\s*Authorization\s*:\s*Bearer\s+)[^\s\r\n]+")]
+    [GeneratedRegex(@"(?im)(?<prefix>\bAuthorization\s*:\s*Bearer\s+)[^\s,;\r\n]+")]
     private static partial Regex AuthorizationHeaderRegex();
 
     [GeneratedRegex("(?<prefix>\"(?:access_token|refresh_token|id_token|OPENAI_API_KEY)\"\\s*:\\s*\")(?:\\\\.|[^\"\\\\])*(?<suffix>\")")]

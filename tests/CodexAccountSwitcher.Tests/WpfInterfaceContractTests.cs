@@ -30,6 +30,21 @@ public sealed class WpfInterfaceContractTests
         Assert.DoesNotContain(forbidden, xaml, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Main_window_binds_quota_status_retry_launch_and_unofficial_endpoint_disclosure()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("Text=\"{Binding QuotaStatusText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("ToolTip=\"{Binding QuotaToolTip}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding RetryLaunchCommand}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Binding=\"{Binding CanRetryLaunch}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("unofficial endpoint", xaml, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("AutomationProperties.HelpText", xaml, StringComparison.Ordinal);
+    }
+
     private static string FindDirectory(params string[] relativePath)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

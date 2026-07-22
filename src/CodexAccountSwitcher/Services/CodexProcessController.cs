@@ -116,9 +116,13 @@ internal interface IWindowsProcessApi
 
 public sealed class CodexProcessController : ICodexProcessController
 {
+    private const int MaximumForceTerminationWaves = 16;
+    private const string ForceTerminationTimeoutMessage =
+        "Codex processes did not exit after force termination.";
     private const string UntrustedForceTargetMessage =
         "Force termination target was not issued by the latest close operation.";
     private static readonly TimeSpan MaximumCloseTimeout = TimeSpan.FromSeconds(8);
+    private static readonly TimeSpan MaximumForceTerminationTimeout = TimeSpan.FromSeconds(8);
     private readonly IAppsFolderLauncher _appsFolderLauncher;
     private readonly Dictionary<int, CodexProcessIdentity> _issuedRemainingTargets = [];
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
@@ -243,10 +247,8 @@ public sealed class CodexProcessController : ICodexProcessController
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            var terminationTargets = SelectForceTerminationTargets(
-                requestedTargets,
-                _processAccessor.GetProcesses(),
-                _issuedInstallLocation!);
+            var installLocation = _issuedInstallLocation!;
+            var currentProcesses = _processAccessor.GetProcesses();
             cancellationToken.ThrowIfCancellationRequested();
 
             foreach (var identity in requestedTargets)
@@ -259,13 +261,64 @@ public sealed class CodexProcessController : ICodexProcessController
                 _issuedInstallLocation = null;
             }
 
-            foreach (var identity in terminationTargets)
+            var authorizedTargets = requestedTargets.ToDictionary(identity => identity.Id);
+            for (var wave = 0; wave < MaximumForceTerminationWaves; wave++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                sideEffectsStarted |= _processAccessor.Kill(identity, entireProcessTree: true);
+                var terminationTargets = SelectForceTerminationTargets(
+                    authorizedTargets.Values.ToArray(),
+                    currentProcesses,
+                    installLocation);
+                foreach (var identity in terminationTargets)
+                {
+                    authorizedTargets[identity.Id] = identity;
+                }
+
+                if (terminationTargets.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (var identity in terminationTargets)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    sideEffectsStarted |= _processAccessor.Kill(identity, entireProcessTree: true);
+                }
+
+                var exitResults = await Task.WhenAll(terminationTargets.Select(identity =>
+                    _processAccessor.WaitForExitAsync(
+                        identity,
+                        MaximumForceTerminationTimeout,
+                        cancellationToken)));
+                cancellationToken.ThrowIfCancellationRequested();
+
+                currentProcesses = _processAccessor.GetProcesses();
+                cancellationToken.ThrowIfCancellationRequested();
+                var remainingTargets = SelectForceTerminationTargets(
+                    authorizedTargets.Values.ToArray(),
+                    currentProcesses,
+                    installLocation);
+                foreach (var identity in remainingTargets)
+                {
+                    authorizedTargets[identity.Id] = identity;
+                }
+
+                if (remainingTargets.Count == 0)
+                {
+                    return;
+                }
+
+                var timedOutIdentities = terminationTargets
+                    .Where((_, index) => !exitResults[index])
+                    .ToArray();
+                if (remainingTargets.Any(remaining =>
+                        timedOutIdentities.Any(timedOut => IdentitiesMatch(remaining, timedOut))))
+                {
+                    throw new IOException(ForceTerminationTimeoutMessage);
+                }
             }
 
-            cancellationToken.ThrowIfCancellationRequested();
+            throw new IOException(ForceTerminationTimeoutMessage);
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
@@ -375,15 +428,24 @@ public sealed class CodexProcessController : ICodexProcessController
         var selectedTargets = new List<CodexProcessIdentity>();
         foreach (var trustedRoot in trustedRoots)
         {
-            if (!unambiguousEntries.TryGetValue(trustedRoot.Id, out var currentRoot) ||
-                !IdentitiesMatch(currentRoot.Identity, trustedRoot) ||
-                !IsInsideInstallLocation(currentRoot.Identity.ExecutablePath, installLocation))
+            if (ambiguousProcessIds.Contains(trustedRoot.Id) ||
+                !IsInsideInstallLocation(trustedRoot.ExecutablePath, installLocation))
             {
                 continue;
             }
 
-            selectedIdentities.Add(currentRoot.Identity.Id, currentRoot.Identity);
-            selectedTargets.Add(currentRoot.Identity);
+            if (!unambiguousEntries.TryGetValue(trustedRoot.Id, out var currentRoot))
+            {
+                selectedIdentities.Add(trustedRoot.Id, trustedRoot);
+                continue;
+            }
+
+            if (IdentitiesMatch(currentRoot.Identity, trustedRoot) &&
+                IsInsideInstallLocation(currentRoot.Identity.ExecutablePath, installLocation))
+            {
+                selectedIdentities.Add(currentRoot.Identity.Id, currentRoot.Identity);
+                selectedTargets.Add(currentRoot.Identity);
+            }
         }
 
         var currentCandidates = processes

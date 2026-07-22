@@ -4,12 +4,17 @@ namespace CodexAccountSwitcher.ViewModels;
 
 public sealed class AccountRowViewModel : ObservableObject
 {
+    private AccountRecord _account;
     private bool _isActive;
     private bool _canSwitch;
+    private string _displayIdentity;
+    private bool _hasQuotaStatus;
     private string? _switchUnavailableReason;
     private QuotaDisplay? _quotaDisplay;
     private string _quotaLabel = "Not queried";
     private string? _quotaError;
+    private string _quotaStatusText = string.Empty;
+    private string _quotaToolTip = string.Empty;
 
     internal AccountRowViewModel(
         AccountRecord account,
@@ -17,19 +22,16 @@ public sealed class AccountRowViewModel : ObservableObject
         bool canSwitch,
         string? switchUnavailableReason)
     {
-        Account = account ?? throw new ArgumentNullException(nameof(account));
+        _account = account ?? throw new ArgumentNullException(nameof(account));
+        _displayIdentity = ResolveDisplayIdentity(account);
         _isActive = isActive;
         _canSwitch = canSwitch;
         _switchUnavailableReason = switchUnavailableReason;
     }
 
-    public AccountRecord Account { get; }
+    public AccountRecord Account => _account;
 
-    public string DisplayIdentity => !string.IsNullOrWhiteSpace(Account.Alias)
-        ? Account.Alias
-        : !string.IsNullOrWhiteSpace(Account.AccountName)
-            ? Account.AccountName
-            : Account.Email;
+    public string DisplayIdentity => _displayIdentity;
 
     public bool IsActive
     {
@@ -67,6 +69,38 @@ public sealed class AccountRowViewModel : ObservableObject
         private set => SetProperty(ref _quotaError, value);
     }
 
+    public string QuotaStatusText
+    {
+        get => _quotaStatusText;
+        private set => SetProperty(ref _quotaStatusText, value);
+    }
+
+    public string QuotaToolTip
+    {
+        get => _quotaToolTip;
+        private set => SetProperty(ref _quotaToolTip, value);
+    }
+
+    public bool HasQuotaStatus
+    {
+        get => _hasQuotaStatus;
+        private set => SetProperty(ref _hasQuotaStatus, value);
+    }
+
+    internal void ApplyAccountState(
+        AccountRecord account,
+        bool isActive,
+        bool canSwitch,
+        string? switchUnavailableReason)
+    {
+        ArgumentNullException.ThrowIfNull(account);
+        SetProperty(ref _account, account, nameof(Account));
+        SetProperty(ref _displayIdentity, ResolveDisplayIdentity(account), nameof(DisplayIdentity));
+        IsActive = isActive;
+        CanSwitch = canSwitch;
+        SwitchUnavailableReason = switchUnavailableReason;
+    }
+
     internal void ApplyQuota(QuotaUpdate update)
     {
         ArgumentNullException.ThrowIfNull(update);
@@ -85,6 +119,19 @@ public sealed class AccountRowViewModel : ObservableObject
                 QuotaPeriod.Monthly => "Monthly",
                 _ => "Quota",
             };
+        QuotaStatusText = update.Error ?? FormatReset(update.Display?.ResetsAt);
+        QuotaToolTip = update.Error ?? update.Display?.Tooltip ?? string.Empty;
+        HasQuotaStatus = !string.IsNullOrEmpty(QuotaStatusText);
     }
 
+    private static string ResolveDisplayIdentity(AccountRecord account) =>
+        !string.IsNullOrWhiteSpace(account.Alias)
+            ? account.Alias
+            : !string.IsNullOrWhiteSpace(account.AccountName)
+                ? account.AccountName
+                : account.Email;
+
+    private static string FormatReset(DateTimeOffset? resetsAt) => resetsAt is { } value
+        ? $"Resets {value.UtcDateTime:yyyy-MM-dd HH:mm 'UTC'}"
+        : string.Empty;
 }

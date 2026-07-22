@@ -127,6 +127,44 @@ public sealed class QuotaResponseParserTests
         Assert.Equal(expectedRemaining, display.RemainingPercent);
     }
 
+    [Theory]
+    [InlineData("-0.1", 100)]
+    [InlineData("27.4", 73)]
+    [InlineData("27.5", 73)]
+    [InlineData("27.6", 72)]
+    [InlineData("99.5", 1)]
+    [InlineData("100.1", 0)]
+    public void Accepts_fractional_used_percent_and_rounds_remaining_away_from_zero(
+        string usedPercent,
+        int expectedRemaining)
+    {
+        var json =
+            "{\"rate_limit\":{\"primary_window\":{\"used_percent\":" + usedPercent +
+            ",\"limit_window_seconds\":604800}}}";
+
+        var result = QuotaResponseParser.Parse(json);
+
+        Assert.Null(result.Error);
+        Assert.Equal(expectedRemaining, result.Display!.RemainingPercent);
+    }
+
+    [Theory]
+    [InlineData("1e309")]
+    [InlineData("-1e309")]
+    [InlineData("NaN")]
+    [InlineData("Infinity")]
+    public void Non_finite_used_percent_returns_fixed_parse_error(string usedPercent)
+    {
+        var json =
+            "{\"rate_limit\":{\"primary_window\":{\"used_percent\":" + usedPercent +
+            ",\"limit_window_seconds\":604800}}}";
+
+        var result = QuotaResponseParser.Parse(json);
+
+        Assert.Null(result.Display);
+        Assert.Equal("The quota response is invalid.", result.Error);
+    }
+
     [Fact]
     public void Missing_reset_time_remains_null()
     {
@@ -145,7 +183,7 @@ public sealed class QuotaResponseParserTests
         var result = QuotaResponseParser.Parse(malformedJson);
 
         Assert.Null(result.Display);
-        Assert.NotNull(result.Error);
+        Assert.Equal("The quota response is invalid.", result.Error);
         Assert.DoesNotContain("raw-response-secret", result.Error, StringComparison.Ordinal);
     }
 
@@ -160,7 +198,27 @@ public sealed class QuotaResponseParserTests
         var result = QuotaResponseParser.Parse(json);
 
         Assert.Null(result.Display);
-        Assert.NotNull(result.Error);
+        Assert.Equal("The quota response is invalid.", result.Error);
         Assert.DoesNotContain(duration, result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Tooltip_retains_each_period_and_exact_reset_time()
+    {
+        var weeklyReset = DateTimeOffset.FromUnixTimeSeconds(1785000000);
+        var unknownReset = DateTimeOffset.FromUnixTimeSeconds(1787000000);
+        const string json = """
+        {"rate_limit":{
+          "primary_window":{"used_percent":20.5,"limit_window_seconds":604800,"reset_at":1785000000},
+          "secondary_window":{"used_percent":75.5,"limit_window_seconds":864000,"reset_at":1787000000}
+        }}
+        """;
+
+        var display = QuotaResponseParser.Parse(json).Display!;
+
+        Assert.Contains("Weekly", display.Tooltip, StringComparison.Ordinal);
+        Assert.Contains("Unknown", display.Tooltip, StringComparison.Ordinal);
+        Assert.Contains(weeklyReset.ToString("yyyy-MM-dd HH:mm 'UTC'"), display.Tooltip, StringComparison.Ordinal);
+        Assert.Contains(unknownReset.ToString("yyyy-MM-dd HH:mm 'UTC'"), display.Tooltip, StringComparison.Ordinal);
     }
 }

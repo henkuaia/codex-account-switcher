@@ -387,6 +387,29 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Failed_switch_dispatches_structured_result_after_late_caller_cancellation()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        using var cancellationSource = new CancellationTokenSource();
+        fixture.Dialog.ConfirmResult = true;
+        fixture.SwitchResult = new SwitchResult(
+            false,
+            "The prior authentication state was restored, but Codex launch failed.",
+            false);
+        fixture.BeforeSwitchReturn = cancellationSource.Cancel;
+
+        await fixture.ViewModel.SwitchCommand.ExecuteAsync(
+            fixture.Row(fixture.Second),
+            cancellationSource.Token);
+
+        Assert.Equal(
+            "The prior authentication state was restored, but Codex launch failed.",
+            fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.IsBusy);
+    }
+
+    [Fact]
     public async Task Quota_error_updates_only_affected_row_and_leaves_valid_switch_enabled()
     {
         var fixture = new Fixture();
@@ -403,6 +426,199 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("Unavailable", affected.QuotaLabel);
         Assert.Equal("quota failed", affected.QuotaError);
         Assert.True(affected.CanSwitch);
+    }
+
+    [Fact]
+    public async Task Registry_reloads_preserve_quota_by_account_key_and_refresh_row_identity()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var display = new QuotaDisplay(
+            QuotaPeriod.Weekly,
+            73,
+            DateTimeOffset.Parse("2026-07-25T12:34:00Z"),
+            TimeSpan.FromDays(7),
+            "weekly reset");
+        fixture.QuotaUpdates =
+        [
+            new QuotaUpdate(fixture.First.AccountKey, display, null),
+            new QuotaUpdate(fixture.Second.AccountKey, null, "quota failed"),
+        ];
+        await fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        var renamedFirst = fixture.First with { Alias = "Renamed first" };
+        var renamedSecond = fixture.Second with { AccountName = "Renamed second" };
+        fixture.Registries.Enqueue(new AccountRegistry(
+            3,
+            renamedSecond.AccountKey,
+            [renamedFirst, renamedSecond, fixture.Third]));
+
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.Equal(display, fixture.Row(renamedFirst).QuotaDisplay);
+        Assert.Equal("Renamed first", fixture.Row(renamedFirst).DisplayIdentity);
+        Assert.Equal("quota failed", fixture.Row(renamedSecond).QuotaError);
+        Assert.True(fixture.Row(renamedSecond).IsActive);
+        Assert.Equal("Not queried", fixture.Row(fixture.Third).QuotaLabel);
+
+        fixture.Registries.Enqueue(new AccountRegistry(
+            3,
+            fixture.Third.AccountKey,
+            [renamedFirst, fixture.Third]));
+
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.DoesNotContain(
+            fixture.ViewModel.Accounts,
+            row => row.Account.AccountKey == renamedSecond.AccountKey);
+        Assert.Equal(display, fixture.Row(renamedFirst).QuotaDisplay);
+    }
+
+    [Theory]
+    [InlineData("login")]
+    [InlineData("remove")]
+    [InlineData("switch")]
+    public async Task Account_operations_preserve_existing_quota_state(string operation)
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var display = new QuotaDisplay(
+            QuotaPeriod.Monthly,
+            41,
+            null,
+            TimeSpan.FromDays(30),
+            "monthly");
+        fixture.QuotaUpdates = [new QuotaUpdate(fixture.First.AccountKey, display, null)];
+        await fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        fixture.Registries.Enqueue(fixture.Registry with
+        {
+            ActiveAccountKey = operation == "switch"
+                ? fixture.Second.AccountKey
+                : fixture.First.AccountKey,
+        });
+        fixture.Dialog.ConfirmResult = true;
+        fixture.SwitchResult = new SwitchResult(true, "Account switch verified.", true);
+
+        if (operation == "login")
+        {
+            await fixture.ViewModel.AddCommand.ExecuteAsync();
+        }
+        else if (operation == "remove")
+        {
+            await fixture.ViewModel.RemoveCommand.ExecuteAsync();
+        }
+        else
+        {
+            await fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
+        }
+
+        Assert.Equal(display, fixture.Row(fixture.First).QuotaDisplay);
+    }
+
+    [Fact]
+    public void Quota_row_exposes_exact_reset_status_error_and_tooltip()
+    {
+        var row = new AccountRowViewModel(
+            Accounts.Record("key", "first@example.com"),
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+        var reset = DateTimeOffset.Parse("2026-07-25T12:34:00Z");
+        row.ApplyQuota(new QuotaUpdate(
+            row.Account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Unknown,
+                42,
+                reset,
+                TimeSpan.FromDays(12),
+                "Unknown: 42% remaining; reset 2026-07-25 12:34 UTC"),
+            null));
+
+        Assert.Equal(
+            "Resets 2026-07-25 12:34 UTC",
+            RequiredProperty<string>(row, "QuotaStatusText"));
+        Assert.Contains(
+            "Unknown",
+            RequiredProperty<string>(row, "QuotaToolTip"),
+            StringComparison.Ordinal);
+        Assert.True(RequiredProperty<bool>(row, "HasQuotaStatus"));
+
+        row.ApplyQuota(new QuotaUpdate(row.Account.AccountKey, null, "quota failed (HTTP 403)."));
+
+        Assert.Equal("quota failed (HTTP 403).", RequiredProperty<string>(row, "QuotaStatusText"));
+        Assert.Equal("quota failed (HTTP 403).", RequiredProperty<string>(row, "QuotaToolTip"));
+    }
+
+    [Theory]
+    [InlineData("success", "Codex launched.", false)]
+    [InlineData("failure", "Codex launch retry failed.", true)]
+    [InlineData("exception", "Codex launch retry failed.", true)]
+    public async Task Retry_launch_is_conditional_launch_only_and_uses_shared_operation_state(
+        string outcome,
+        string expectedStatus,
+        bool expectedCanRetry)
+    {
+        var first = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+        var second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
+        var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
+        var launchFailure = new SwitchResult(true, "Account switch was verified, but Codex launch failed.", false);
+        var retryProperty = typeof(SwitchResult).GetProperty("CanRetryLaunch");
+        Assert.NotNull(retryProperty);
+        retryProperty.SetValue(launchFailure, true);
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var tracker = new ActiveOperationTracker();
+        MainWindowViewModel? viewModel = null;
+        var retryCalls = 0;
+        var observedBusy = false;
+        var observedActivity = false;
+        Func<CancellationToken, Task<bool>> retryLaunchAsync = _ =>
+        {
+            retryCalls++;
+            observedBusy = viewModel!.IsBusy;
+            observedActivity = tracker.IsActive;
+            return outcome == "exception"
+                ? Task.FromException<bool>(new InvalidOperationException("raw launch secret"))
+                : Task.FromResult(outcome == "success");
+        };
+        var constructor = typeof(MainWindowViewModel)
+            .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .SingleOrDefault(candidate =>
+            {
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 9 &&
+                    parameters[5].ParameterType == typeof(Func<CancellationToken, Task<bool>>);
+            });
+        Assert.NotNull(constructor);
+        viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
+        [
+            (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registry)),
+            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>>)((_, _) => Task.FromResult(Succeeded())),
+            (Func<CancellationToken, Task<CommandResult>>)(_ => Task.FromResult(Succeeded())),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(launchFailure)),
+            retryLaunchAsync,
+            dialog,
+            new ImmediateDispatcher(),
+            tracker,
+        ]));
+        await viewModel.LoadAsync();
+
+        await viewModel.SwitchCommand.ExecuteAsync(Assert.Single(
+            viewModel.Accounts,
+            row => row.Account.AccountKey == second.AccountKey));
+
+        Assert.True(RequiredProperty<bool>(viewModel, "CanRetryLaunch"));
+        var command = RequiredProperty<AsyncCommand>(viewModel, "RetryLaunchCommand");
+        Assert.True(command.CanExecute(null));
+
+        await command.ExecuteAsync();
+
+        Assert.Equal(1, retryCalls);
+        Assert.True(observedBusy);
+        Assert.True(observedActivity);
+        Assert.Equal(expectedStatus, viewModel.StatusText);
+        Assert.DoesNotContain("raw launch secret", viewModel.StatusText, StringComparison.Ordinal);
+        Assert.Equal(expectedCanRetry, RequiredProperty<bool>(viewModel, "CanRetryLaunch"));
+        Assert.False(viewModel.IsBusy);
     }
 
     [Fact]
@@ -491,6 +707,13 @@ public sealed class MainWindowViewModelTests
 
     private static CommandResult Succeeded() => new(0, string.Empty, string.Empty);
 
+    private static T RequiredProperty<T>(object instance, string propertyName)
+    {
+        var property = instance.GetType().GetProperty(propertyName);
+        Assert.NotNull(property);
+        return Assert.IsType<T>(property.GetValue(instance));
+    }
+
     private static ApplicationExitCoordinator CreateExitCoordinator(
         ActiveOperationTracker tracker,
         ICollection<string> events) => new(
@@ -519,6 +742,7 @@ public sealed class MainWindowViewModelTests
                 LoginAsync,
                 RemoveAsync,
                 SwitchAsync,
+                _ => Task.FromResult(true),
                 Dialog,
                 Dispatcher,
                 activityTracker ?? new ActiveOperationTracker());

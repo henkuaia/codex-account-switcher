@@ -36,4 +36,21 @@ public sealed class SensitiveTextRedactorTests
         Assert.DoesNotContain(idToken, redacted, StringComparison.Ordinal);
         Assert.DoesNotContain(apiKey, redacted, StringComparison.Ordinal);
     }
+
+    [Theory]
+    [InlineData(
+        "request failed: Authorization: Bearer bearer-secret; retry later",
+        "request failed: Authorization: Bearer [REDACTED]; retry later")]
+    [InlineData(
+        "prefix Authorization : Bearer bearer-secret suffix",
+        "prefix Authorization : Bearer [REDACTED] suffix")]
+    public void Redacts_bearer_authorization_anywhere_in_a_line(
+        string input,
+        string expected)
+    {
+        var redacted = SensitiveTextRedactor.Redact(input, []);
+
+        Assert.Equal(expected, redacted);
+        Assert.DoesNotContain("bearer-secret", redacted, StringComparison.Ordinal);
+    }
 }

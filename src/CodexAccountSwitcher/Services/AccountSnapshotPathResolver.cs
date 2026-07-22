@@ -10,7 +10,9 @@ public static class AccountSnapshotPathResolver
 
     private static string ResolveFileStem(string accountKey)
     {
-        if (accountKey.Length > 0 && accountKey.All(IsSafeAsciiFileNameCharacter))
+        if (accountKey.Length > 0 &&
+            accountKey is not "." and not ".." &&
+            accountKey.All(IsSafeAsciiFileNameCharacter))
         {
             return accountKey;
         }

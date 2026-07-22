@@ -51,8 +51,9 @@
                             Margin="0,0,6,0"
                             Command="{Binding RefreshCommand}"
                             Style="{StaticResource ActionButtonStyle}"
-                            ToolTip="Refresh quota"
-                            AutomationProperties.Name="Refresh quota">
+                            ToolTip="Refresh quota using an unofficial endpoint"
+                            AutomationProperties.Name="Refresh quota"
+                            AutomationProperties.HelpText="Quota refresh uses an unofficial endpoint and may be unavailable.">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE72C;" />
                     </Button>
                     <Button x:Name="AddButton"
@@ -160,6 +161,7 @@
                                                     <Grid.RowDefinitions>
                                                         <RowDefinition Height="Auto" />
                                                         <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
                                                     </Grid.RowDefinitions>
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -182,13 +184,33 @@
                                                             </Style>
                                                         </TextBlock.Style>
                                                     </TextBlock>
-                                                    <ProgressBar Grid.Row="1"
+                                                    <TextBlock x:Name="QuotaStatusTextBlock"
+                                                               Grid.Row="1"
+                                                               Grid.ColumnSpan="2"
+                                                               Margin="0,3,0,0"
+                                                               FontSize="11"
+                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               Text="{Binding QuotaStatusText}"
+                                                               TextTrimming="CharacterEllipsis"
+                                                               ToolTip="{Binding QuotaToolTip}">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Setter Property="Visibility" Value="Collapsed" />
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding HasQuotaStatus}" Value="True">
+                                                                        <Setter Property="Visibility" Value="Visible" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                    <ProgressBar Grid.Row="2"
                                                                  Grid.ColumnSpan="2"
                                                                  Margin="0,5,0,0"
                                                                  Maximum="100"
                                                                  Value="{Binding QuotaDisplay.RemainingPercent, TargetNullValue=0}"
                                                                  Style="{StaticResource QuietProgressBarStyle}"
-                                                                 ToolTip="{Binding QuotaDisplay.Tooltip}" />
+                                                                 ToolTip="{Binding QuotaToolTip}" />
                                                 </Grid>
                                             </Grid>
                                         </Border>
@@ -231,13 +253,39 @@
                     Background="{StaticResource WindowBackgroundBrush}"
                     BorderBrush="{StaticResource BorderBrush}"
                     BorderThickness="0,1,0,0">
-                <TextBlock x:Name="StatusTextBlock"
-                           VerticalAlignment="Center"
-                           Foreground="{StaticResource TextSecondaryBrush}"
-                           Text="{Binding StatusText}"
-                           TextWrapping="NoWrap"
-                           TextTrimming="CharacterEllipsis"
-                           ToolTip="{Binding StatusText}" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock x:Name="StatusTextBlock"
+                               VerticalAlignment="Center"
+                               Foreground="{StaticResource TextSecondaryBrush}"
+                               Text="{Binding StatusText}"
+                               TextWrapping="NoWrap"
+                               TextTrimming="CharacterEllipsis"
+                               ToolTip="{Binding StatusText}" />
+                    <Button x:Name="RetryLaunchButton"
+                            Grid.Column="1"
+                            Width="36"
+                            Height="20"
+                            Margin="8,0,0,0"
+                            Command="{Binding RetryLaunchCommand}"
+                            ToolTip="Retry Codex launch"
+                            AutomationProperties.Name="Retry Codex launch">
+                        <Button.Style>
+                            <Style BasedOn="{StaticResource ActionButtonStyle}" TargetType="Button">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding CanRetryLaunch}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE72C;" />
+                    </Button>
+                </Grid>
             </Border>
         </Grid>
     </Border>

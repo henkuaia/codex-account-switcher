@@ -65,6 +65,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly IOperationActivityTracker _activityTracker;
     private AccountRegistry _registry = AccountRegistry.Empty;
     private int _operationGate;
+    private int _registryReloadPending;
     private bool _isBusy;
     private bool _canRetryLaunch;
     private bool _isHelperAvailable;
@@ -257,7 +258,7 @@ public sealed class MainWindowViewModel : ObservableObject
     }
 
     public Task LoadAsync(CancellationToken cancellationToken = default) =>
-        RunBusyAsync(LoadRegistryAsync, cancellationToken);
+        RunBusyAsync(LoadRegistryAsync, cancellationToken, queueRegistryReloadWhenBusy: true);
 
     private async Task LoadRegistryAsync(CancellationToken cancellationToken)
     {
@@ -491,28 +492,54 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task RunBusyAsync(
         Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken,
+        bool queueRegistryReloadWhenBusy = false)
+    {
+        while (true)
+        {
+            if (Interlocked.CompareExchange(ref _operationGate, 1, 0) != 0)
+            {
+                if (queueRegistryReloadWhenBusy)
+                {
+                    Interlocked.Exchange(ref _registryReloadPending, 1);
+                }
+
+                return;
+            }
+
+            await RunAcquiredBusyOperationAsync(operation, cancellationToken);
+            if (Interlocked.Exchange(ref _registryReloadPending, 0) == 0)
+            {
+                return;
+            }
+
+            operation = LoadRegistryAsync;
+            cancellationToken = CancellationToken.None;
+            queueRegistryReloadWhenBusy = true;
+        }
+    }
+
+    private async Task RunAcquiredBusyOperationAsync(
+        Func<CancellationToken, Task> operation,
         CancellationToken cancellationToken)
     {
-        if (Interlocked.CompareExchange(ref _operationGate, 1, 0) != 0)
-        {
-            return;
-        }
-
-        using var activity = _activityTracker.Begin();
-        try
-        {
-            await _dispatcher.InvokeAsync(() => SetBusy(true), cancellationToken);
-            await operation(cancellationToken);
-        }
-        finally
+        using (_activityTracker.Begin())
         {
             try
             {
-                await _dispatcher.InvokeAsync(() => SetBusy(false), CancellationToken.None);
+                await _dispatcher.InvokeAsync(() => SetBusy(true), cancellationToken);
+                await operation(cancellationToken);
             }
             finally
             {
-                Volatile.Write(ref _operationGate, 0);
+                try
+                {
+                    await _dispatcher.InvokeAsync(() => SetBusy(false), CancellationToken.None);
+                }
+                finally
+                {
+                    Volatile.Write(ref _operationGate, 0);
+                }
             }
         }
     }
@@ -566,11 +593,17 @@ public sealed class MainWindowViewModel : ObservableObject
     private void ApplyHelperAvailability(HelperAvailability availability)
     {
         ArgumentNullException.ThrowIfNull(availability);
+        var previousHelperAvailabilityError = HelperAvailabilityError;
+        var wasUnavailable = !IsHelperAvailable;
         IsHelperAvailable = availability.IsAvailable;
         HelperAvailabilityError = availability.Error;
         if (!availability.IsAvailable)
         {
             StatusText = availability.Error;
+        }
+        else if (wasUnavailable && StatusText == previousHelperAvailabilityError)
+        {
+            StatusText = string.Empty;
         }
 
         RaiseCommandCanExecuteChanged();

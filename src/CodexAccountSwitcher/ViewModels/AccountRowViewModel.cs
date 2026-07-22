@@ -127,9 +127,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private static string ResolveDisplayIdentity(AccountRecord account) =>
         !string.IsNullOrWhiteSpace(account.Alias)
             ? account.Alias
-            : !string.IsNullOrWhiteSpace(account.AccountName)
-                ? account.AccountName
-                : account.Email;
+            : account.Email;
 
     private static string FormatReset(DateTimeOffset? resetsAt) => resetsAt is { } value
         ? $"Resets {value.UtcDateTime:yyyy-MM-dd HH:mm 'UTC'}"

@@ -51,6 +51,28 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Account_row_uses_email_when_alias_is_empty_even_if_account_name_is_present()
+    {
+        var account = new AccountRecord(
+            "key",
+            "account-id",
+            "user-id",
+            "account@example.com",
+            string.Empty,
+            "Account name",
+            "plus",
+            "chatgpt");
+
+        var row = new AccountRowViewModel(
+            account,
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+
+        Assert.Equal(account.Email, row.DisplayIdentity);
+    }
+
+    [Fact]
     public async Task Initial_load_does_not_refresh_quota()
     {
         var fixture = new Fixture();
@@ -145,6 +167,43 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal(1, loadCallsBeforeRelease);
         Assert.Equal(0, removeCallsBeforeRelease);
+    }
+
+    [Fact]
+    public async Task Busy_window_open_requests_coalesce_to_one_reload_after_the_active_operation_releases()
+    {
+        var activityTracker = new RecordingOperationTracker();
+        var fixture = new Fixture(activityTracker: activityTracker);
+        await fixture.ViewModel.LoadAsync();
+        var refreshStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRefresh = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.QuotaRefreshOperation = async (_, _, cancellationToken) =>
+        {
+            refreshStarted.TrySetResult();
+            await releaseRefresh.Task.WaitAsync(cancellationToken);
+        };
+        var deferredReloadObserved = false;
+        fixture.LoadRegistryOperation = cancellationToken =>
+        {
+            deferredReloadObserved = activityTracker.CompletedOperationCount == 2;
+            return Task.FromResult(fixture.Registry);
+        };
+
+        var refresh = fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        await Task.WhenAll(
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync(),
+            fixture.ViewModel.LoadAsync());
+
+        Assert.Equal(1, fixture.LoadCallCount);
+
+        releaseRefresh.SetResult();
+        await refresh.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.True(deferredReloadObserved);
     }
 
     [Fact]
@@ -504,6 +563,36 @@ public sealed class MainWindowViewModelTests
         Assert.True(fixture.ViewModel.RemoveCommand.CanExecute(null));
         Assert.True(fixture.ViewModel.RefreshCommand.CanExecute(null));
         Assert.True(fixture.ViewModel.SwitchCommand.CanExecute(switchTarget));
+    }
+
+    [Fact]
+    public async Task Helper_recovery_clears_the_prior_helper_error_status()
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        fixture.Availability = fixture.MissingAvailability;
+        await fixture.ViewModel.LoadAsync();
+
+        fixture.Availability = fixture.AvailableAvailability;
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.Equal(string.Empty, fixture.ViewModel.StatusText);
+    }
+
+    [Fact]
+    public async Task Helper_recovery_preserves_an_unrelated_status_message()
+    {
+        var fixture = new DynamicAvailabilityFixture();
+        fixture.Availability = fixture.MissingAvailability;
+        await fixture.ViewModel.LoadAsync();
+        fixture.RetryLaunchResult = false;
+        typeof(MainWindowViewModel).GetProperty(nameof(MainWindowViewModel.CanRetryLaunch))!
+            .SetValue(fixture.ViewModel, true);
+        await fixture.ViewModel.RetryLaunchCommand.ExecuteAsync();
+
+        fixture.Availability = fixture.AvailableAvailability;
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.Equal("Codex launch retry failed.", fixture.ViewModel.StatusText);
     }
 
     [Theory]
@@ -1127,7 +1216,7 @@ public sealed class MainWindowViewModelTests
     {
         public Fixture(
             IUiDispatcher? dispatcher = null,
-            ActiveOperationTracker? activityTracker = null)
+            IOperationActivityTracker? activityTracker = null)
         {
             First = Accounts.Record("first-key", "first@example.com", "First", "first-account");
             Second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
@@ -1285,7 +1374,7 @@ public sealed class MainWindowViewModelTests
                 LoginAsync,
                 RemoveAsync,
                 SwitchAsync,
-                _ => Task.FromResult(true),
+                _ => Task.FromResult(RetryLaunchResult),
                 () => Availability,
                 Dialog,
                 new ImmediateDispatcher(),
@@ -1314,6 +1403,8 @@ public sealed class MainWindowViewModelTests
         public RemovalResult RemovalResult { get; set; } = new(true, "removal completed");
 
         public SwitchResult SwitchResult { get; set; } = new(false, "switch failed", true);
+
+        public bool RetryLaunchResult { get; set; } = true;
 
         public int LoadCallCount { get; private set; }
 
@@ -1505,6 +1596,37 @@ public sealed class MainWindowViewModelTests
             cancellationToken.ThrowIfCancellationRequested();
             action();
             return Task.CompletedTask;
+        }
+    }
+
+    private sealed class RecordingOperationTracker : IOperationActivityTracker
+    {
+        private int _activeCount;
+        private int _completedOperationCount;
+
+        public bool IsActive => Volatile.Read(ref _activeCount) != 0;
+
+        public int CompletedOperationCount => Volatile.Read(ref _completedOperationCount);
+
+        public IDisposable Begin()
+        {
+            Interlocked.Increment(ref _activeCount);
+            return new Activity(this);
+        }
+
+        private sealed class Activity(RecordingOperationTracker owner) : IDisposable
+        {
+            private RecordingOperationTracker? _owner = owner;
+
+            public void Dispose()
+            {
+                var owner = Interlocked.Exchange(ref _owner, null);
+                if (owner is not null)
+                {
+                    Interlocked.Decrement(ref owner._activeCount);
+                    Interlocked.Increment(ref owner._completedOperationCount);
+                }
+            }
         }
     }
 

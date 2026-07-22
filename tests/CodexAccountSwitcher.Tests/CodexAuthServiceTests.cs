@@ -70,6 +70,29 @@ public sealed class CodexAuthServiceTests
         Assert.Equal(1, runner.VisibleCallCount);
     }
 
+    [Fact]
+    public async Task Targeted_remove_uses_captured_direct_selector_with_reconcile_suppression()
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var method = typeof(CodexAuthService).GetMethod(
+            "RemoveAsync",
+            [typeof(string), typeof(CancellationToken)]);
+
+        Assert.NotNull(method);
+        var invocation = method.Invoke(service, ["unique@example.com", CancellationToken.None]);
+        var result = await Assert.IsAssignableFrom<Task<CommandResult>>(invocation);
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(["remove", "unique@example.com"], runner.LastRequest!.Arguments);
+        Assert.False(runner.LastRequest.Visible);
+        Assert.Equal(1, runner.CapturedCallCount);
+        Assert.Equal(0, runner.VisibleCallCount);
+        Assert.Equal("1", runner.LastRequest.Environment!["CODEX_AUTH_SKIP_SERVICE_RECONCILE"]);
+    }
+
     [Theory]
     [InlineData("switch")]
     [InlineData("login")]
@@ -109,7 +132,24 @@ public sealed class CodexAuthServiceTests
         Assert.False(result.Succeeded);
         Assert.Equal(0, runner.CapturedCallCount);
         Assert.Equal(0, runner.VisibleCallCount);
-        Assert.DoesNotContain("missing.exe", result.StandardError, StringComparison.Ordinal);
+        Assert.Contains(Path.GetFullPath(Path.Combine(directory.Path, "missing.exe")), result.StandardError, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Availability_reports_resolved_expected_helper_path()
+    {
+        using var directory = new TemporaryDirectory();
+        var missingPath = Path.Combine(directory.Path, "missing", "codex-auth.exe");
+        var service = new CodexAuthService(missingPath, directory.Path, new FakeProcessRunner());
+        var method = typeof(CodexAuthService).GetMethod("CheckAvailability");
+
+        Assert.NotNull(method);
+        var availability = method.Invoke(service, null);
+
+        Assert.NotNull(availability);
+        Assert.False(RequiredProperty<bool>(availability, "IsAvailable"));
+        Assert.Equal(Path.GetFullPath(missingPath), RequiredProperty<string>(availability, "ExpectedPath"));
+        Assert.Contains(Path.GetFullPath(missingPath), RequiredProperty<string>(availability, "Error"), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -131,11 +171,55 @@ public sealed class CodexAuthServiceTests
         Assert.Equal(parentPath, Environment.GetEnvironmentVariable("PATH"));
     }
 
+    [Theory]
+    [InlineData("switch")]
+    [InlineData("login")]
+    [InlineData("streaming-login")]
+    [InlineData("remove")]
+    public async Task Every_mutating_command_suppresses_managed_service_reconciliation(string command)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var service = new CodexAuthService(helperPath, directory.Path, runner);
+
+        switch (command)
+        {
+            case "switch":
+                await service.SwitchAsync("main", default);
+                break;
+            case "login":
+                await service.LoginAsync(default);
+                break;
+            case "streaming-login":
+                await service.LoginAsync((_, _) => ValueTask.CompletedTask, default);
+                break;
+            case "remove":
+                await service.RemoveAsync(default);
+                break;
+            default:
+                throw new InvalidOperationException($"Unknown command: {command}");
+        }
+
+        Assert.NotNull(runner.LastRequest?.Environment);
+        Assert.True(runner.LastRequest.Environment.TryGetValue(
+            "CODEX_AUTH_SKIP_SERVICE_RECONCILE",
+            out var value));
+        Assert.Equal("1", value);
+    }
+
     private static string CreateHelper(TemporaryDirectory directory)
     {
         const string helperFileName = "codex-auth.exe";
         directory.Write(helperFileName, string.Empty);
         return Path.Combine(directory.Path, helperFileName);
+    }
+
+    private static T RequiredProperty<T>(object instance, string propertyName)
+    {
+        var property = instance.GetType().GetProperty(propertyName);
+        Assert.NotNull(property);
+        return Assert.IsType<T>(property.GetValue(instance));
     }
 
     private sealed class FakeProcessRunner : IProcessRunner

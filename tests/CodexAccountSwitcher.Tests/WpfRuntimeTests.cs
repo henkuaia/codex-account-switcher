@@ -328,6 +328,14 @@ public sealed class WpfRuntimeTests
 
     private sealed class NoOpDialogService : IAccountDialogService
     {
+        public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(false);
+
+        public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
+            IReadOnlyList<AccountRowViewModel> accounts,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<AccountRowViewModel?>(null);
+
         public Task<bool> ConfirmSwitchAsync(
             AccountRowViewModel target,
             CancellationToken cancellationToken) => Task.FromResult(false);

@@ -45,6 +45,37 @@ public sealed class WpfInterfaceContractTests
         Assert.Contains("AutomationProperties.HelpText", xaml, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Add_confirmation_discloses_close_activation_and_restart_before_login()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "App.xaml.cs"));
+
+        Assert.Contains(
+            "Codex will close during device login. The authenticated account will become active, then Codex will restart.",
+            source,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Removal_dialog_is_compact_app_owned_single_selection_with_active_account_disabled()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "Views",
+            "RemoveAccountWindow.xaml"));
+
+        Assert.Contains("Width=\"400\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("SelectionMode=\"Single\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Binding=\"{Binding IsActive}\" Value=\"True\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Property=\"IsEnabled\" Value=\"False\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Active - switch first", xaml, StringComparison.Ordinal);
+        Assert.Contains("Content=\"Remove account\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain("5H", xaml, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("quota", xaml, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string FindDirectory(params string[] relativePath)
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);

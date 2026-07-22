@@ -13,10 +13,13 @@ public partial class App : System.Windows.Application
 {
     internal const string ActiveOperationExitMessage =
         "An account operation is still running. Wait for it to finish before exiting.";
+    internal const string SecondInstanceMessage =
+        "Codex Account Switcher is already running for this Windows user.";
 
     private HttpClient? _httpClient;
     private ApplicationExitCoordinator? _exitCoordinator;
     private MainWindow? _mainWindow;
+    private IDisposable? _singleInstanceOwnership;
     private TrayIconHost? _trayIcon;
 
     protected override async void OnStartup(StartupEventArgs e)
@@ -25,6 +28,18 @@ public partial class App : System.Windows.Application
 
         try
         {
+            var singleInstanceName = SingleInstanceOwnership.CreatePerUserName("CodexAccountSwitcher");
+            if ((_singleInstanceOwnership = SingleInstanceOwnership.TryAcquire(singleInstanceName)) is null)
+            {
+                System.Windows.MessageBox.Show(
+                    SecondInstanceMessage,
+                    "Codex account switcher",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                Shutdown();
+                return;
+            }
+
             var codexHome = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".codex");
@@ -39,6 +54,16 @@ public partial class App : System.Windows.Application
             _httpClient = new HttpClient();
             var quotaService = new QuotaService(_httpClient);
             var processController = new CodexProcessController();
+            var loginCoordinator = new SafeLoginCoordinator(
+                package,
+                codexHome,
+                processController,
+                authService,
+                registryService);
+            var removeCoordinator = new TargetedRemoveCoordinator(
+                codexHome,
+                authService,
+                registryService);
             var switchCoordinator = new SafeSwitchCoordinator(
                 package,
                 codexHome,
@@ -55,6 +80,8 @@ public partial class App : System.Windows.Application
                 registryService,
                 quotaService,
                 authService,
+                loginCoordinator,
+                removeCoordinator,
                 switchCoordinator,
                 dialogService,
                 uiDispatcher,
@@ -91,6 +118,8 @@ public partial class App : System.Windows.Application
     {
         _trayIcon?.Dispose();
         _httpClient?.Dispose();
+        _singleInstanceOwnership?.Dispose();
+        _singleInstanceOwnership = null;
         base.OnExit(e);
     }
 
@@ -217,6 +246,42 @@ internal sealed class AccountDialogService(
         ?? throw new ArgumentNullException(nameof(ownerProvider));
     private readonly IUiDispatcher _dispatcher = dispatcher
         ?? throw new ArgumentNullException(nameof(dispatcher));
+
+    public async Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
+    {
+        var confirmed = false;
+        await _dispatcher.InvokeAsync(
+            () => confirmed = System.Windows.MessageBox.Show(
+                _ownerProvider(),
+                "Codex will close during device login. The authenticated account will become active, then Codex will restart.",
+                "Add account",
+                MessageBoxButton.OKCancel,
+                MessageBoxImage.Warning) == MessageBoxResult.OK,
+            cancellationToken);
+        return confirmed;
+    }
+
+    public async Task<AccountRowViewModel?> SelectRemovalTargetAsync(
+        IReadOnlyList<AccountRowViewModel> accounts,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+        AccountRowViewModel? selected = null;
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                var window = new RemoveAccountWindow(accounts)
+                {
+                    Owner = _ownerProvider(),
+                };
+                if (window.ShowDialog() == true)
+                {
+                    selected = window.SelectedTarget;
+                }
+            },
+            cancellationToken);
+        return selected;
+    }
 
     public async Task<bool> ConfirmSwitchAsync(
         AccountRowViewModel target,

@@ -1,53 +1,51 @@
-using System.IO;
-using System.ComponentModel;
-using System.Runtime.ExceptionServices;
 using CodexAccountSwitcher.Models;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.ExceptionServices;
 
 namespace CodexAccountSwitcher.Services;
 
-public sealed record SwitchResult(bool Succeeded, string Message, bool LaunchSucceeded)
+public sealed record LoginResult(bool Succeeded, string Message, bool LaunchSucceeded)
 {
     public bool CanRetryLaunch { get; init; }
 }
 
-public sealed class SafeSwitchCoordinator
+public sealed class SafeLoginCoordinator
 {
-    private const string AlreadyActiveMessage = "The requested account is already active.";
-    private const string SelectorUnavailableMessage = "No unique account selector is available.";
-    private const string SwitchSucceededMessage = "Account switch verified.";
-    private const string SwitchFailedMessage =
-        "Account switch failed. The prior authentication state was restored.";
+    private const string LoginSucceededMessage = "Account login verified.";
+    private const string LoginFailedMessage =
+        "Account login failed. The prior authentication state was restored.";
     private const string CancellationMessage =
-        "Account switch was canceled after Codex closed. The prior authentication state was restored.";
+        "Account login was canceled after Codex closed. The prior authentication state was restored.";
     private const string PreMutationCancellationMessage =
-        "Account switch was canceled before authentication changed. Codex was restarted.";
+        "Account login was canceled before authentication changed. Codex was restarted.";
     private const string RecoveryFailureMessage =
         "Authentication state recovery could not be verified. Codex was not launched.";
     private const string SuccessfulLaunchFailureMessage =
-        "Account switch was verified, but Codex launch failed.";
+        "Account login was verified, but Codex launch failed.";
     private const string FailedLaunchFailureMessage =
         "The prior authentication state was restored, but Codex launch failed.";
     private const string PreMutationFailureMessage =
-        "Account switch failed before authentication changed.";
+        "Account login failed before authentication changed.";
     private const string PreMutationLaunchFailureMessage =
-        "Account switch failed before authentication changed, and Codex launch failed.";
+        "Account login failed before authentication changed, and Codex launch failed.";
     private const string CancellationLaunchFailureMessage =
-        "Account switch was canceled after Codex closed. " +
+        "Account login was canceled after Codex closed. " +
         "The prior authentication state was restored, but Codex launch failed.";
     private const string PreMutationCancellationLaunchFailureMessage =
-        "Account switch was canceled before authentication changed. Codex restart failed.";
+        "Account login was canceled before authentication changed. Codex restart failed.";
     private static readonly TimeSpan CloseTimeout = TimeSpan.FromSeconds(8);
 
     private readonly CodexPackageInfo _package;
     private readonly string _codexHome;
     private readonly ICodexProcessController _processController;
-    private readonly Func<string, CancellationToken, Task<CommandResult>> _switchAsync;
+    private readonly Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> _loginAsync;
     private readonly Func<string, CancellationToken, Task<AccountRegistry>> _loadRegistryAsync;
     private readonly Func<string, CancellationToken, Task<string>> _readAuthAccountIdAsync;
     private readonly Func<string, CancellationToken, Task<IAuthStateCheckpoint>> _captureAsync;
     private readonly Func<HelperAvailability> _checkHelperAvailability;
 
-    public SafeSwitchCoordinator(
+    public SafeLoginCoordinator(
         CodexPackageInfo package,
         string codexHome,
         ICodexProcessController processController,
@@ -57,39 +55,19 @@ public sealed class SafeSwitchCoordinator
             package,
             codexHome,
             processController,
-            CreateSwitchDelegate(codexAuthService),
-            CreateRegistryDelegate(accountRegistryService),
+            codexAuthService.LoginAsync,
+            accountRegistryService.LoadAsync,
             ReadAuthAccountIdAsync,
             CaptureAuthStateAsync,
-            CreateAvailabilityDelegate(codexAuthService))
+            codexAuthService.CheckAvailability)
     {
     }
 
-    internal SafeSwitchCoordinator(
+    internal SafeLoginCoordinator(
         CodexPackageInfo package,
         string codexHome,
         ICodexProcessController processController,
-        Func<string, CancellationToken, Task<CommandResult>> switchAsync,
-        Func<string, CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
-        Func<string, CancellationToken, Task<string>> readAuthAccountIdAsync,
-        Func<string, CancellationToken, Task<IAuthStateCheckpoint>> captureAsync)
-        : this(
-            package,
-            codexHome,
-            processController,
-            switchAsync,
-            loadRegistryAsync,
-            readAuthAccountIdAsync,
-            captureAsync,
-            static () => new HelperAvailability(true, "codex-auth.exe", string.Empty))
-    {
-    }
-
-    internal SafeSwitchCoordinator(
-        CodexPackageInfo package,
-        string codexHome,
-        ICodexProcessController processController,
-        Func<string, CancellationToken, Task<CommandResult>> switchAsync,
+        Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> loginAsync,
         Func<string, CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
         Func<string, CancellationToken, Task<string>> readAuthAccountIdAsync,
         Func<string, CancellationToken, Task<IAuthStateCheckpoint>> captureAsync,
@@ -99,7 +77,7 @@ public sealed class SafeSwitchCoordinator
         ArgumentException.ThrowIfNullOrWhiteSpace(codexHome);
         _codexHome = codexHome;
         _processController = processController ?? throw new ArgumentNullException(nameof(processController));
-        _switchAsync = switchAsync ?? throw new ArgumentNullException(nameof(switchAsync));
+        _loginAsync = loginAsync ?? throw new ArgumentNullException(nameof(loginAsync));
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _readAuthAccountIdAsync = readAuthAccountIdAsync
             ?? throw new ArgumentNullException(nameof(readAuthAccountIdAsync));
@@ -108,52 +86,22 @@ public sealed class SafeSwitchCoordinator
             ?? throw new ArgumentNullException(nameof(checkHelperAvailability));
     }
 
-    public async Task<SwitchResult> SwitchAsync(
-        AccountRecord target,
-        AccountRegistry before,
+    public async Task<LoginResult> LoginAsync(
+        ProcessOutputHandler outputHandler,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(before);
+        ArgumentNullException.ThrowIfNull(outputHandler);
         cancellationToken.ThrowIfCancellationRequested();
-
-        if (string.Equals(before.ActiveAccountKey, target.AccountKey, StringComparison.Ordinal))
-        {
-            try
-            {
-                var activeAuthAccountId = await _readAuthAccountIdAsync(_codexHome, cancellationToken);
-                if (string.Equals(
-                    activeAuthAccountId,
-                    target.ChatGptAccountId,
-                    StringComparison.Ordinal))
-                {
-                    return new SwitchResult(true, AlreadyActiveMessage, true);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception exception) when (IsOperationalNoOpVerificationFailure(exception))
-            {
-            }
-        }
-
-        var selector = AccountSelectorResolver.Resolve(target, before.Accounts);
-        if (!selector.IsAvailable)
-        {
-            return new SwitchResult(false, SelectorUnavailableMessage, true);
-        }
 
         var helperAvailability = _checkHelperAvailability();
         if (!helperAvailability.IsAvailable)
         {
-            return new SwitchResult(false, helperAvailability.Error, true);
+            return new LoginResult(false, helperAvailability.Error, true);
         }
 
         IAuthStateCheckpoint? checkpoint = null;
-        var result = new SwitchResult(false, SwitchFailedMessage, false);
-        var stage = SwitchStage.Close;
+        var result = new LoginResult(false, LoginFailedMessage, false);
+        var stage = LoginStage.Close;
         var recoveryResponsible = false;
         var restoreRequired = false;
         var launchAllowed = false;
@@ -172,7 +120,7 @@ public sealed class SafeSwitchCoordinator
             closeSideEffectsStarted = closeResult.SideEffectsStarted;
             if (!closeResult.AllExited)
             {
-                stage = SwitchStage.Force;
+                stage = LoginStage.Force;
                 await _processController.ForceTerminateAsync(
                     closeResult.RemainingProcessIds,
                     cancellationToken);
@@ -180,40 +128,41 @@ public sealed class SafeSwitchCoordinator
                 cancellationToken.ThrowIfCancellationRequested();
             }
 
-            stage = SwitchStage.Capture;
+            stage = LoginStage.Capture;
             checkpoint = await _captureAsync(_codexHome, CancellationToken.None);
             cancellationToken.ThrowIfCancellationRequested();
 
-            stage = SwitchStage.Switch;
-            var commandResult = await _switchAsync(selector.Value!, cancellationToken);
+            stage = LoginStage.Login;
+            var commandResult = await _loginAsync(outputHandler, cancellationToken);
             if (!commandResult.Succeeded)
             {
                 restoreRequired = true;
-                result = new SwitchResult(false, SwitchFailedMessage, false);
+                result = new LoginResult(false, LoginFailedMessage, false);
             }
             else
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                stage = SwitchStage.Verify;
+                stage = LoginStage.Verify;
                 var registry = await _loadRegistryAsync(_codexHome, cancellationToken);
                 var authAccountId = await _readAuthAccountIdAsync(_codexHome, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (!string.Equals(
-                        registry.ActiveAccountKey,
-                        target.AccountKey,
-                        StringComparison.Ordinal) ||
+                var activeAccounts = registry.Accounts.Where(account => string.Equals(
+                    account.AccountKey,
+                    registry.ActiveAccountKey,
+                    StringComparison.Ordinal)).ToArray();
+                if (activeAccounts.Length != 1 ||
                     !string.Equals(
+                        activeAccounts[0].ChatGptAccountId,
                         authAccountId,
-                        target.ChatGptAccountId,
                         StringComparison.Ordinal))
                 {
                     restoreRequired = true;
-                    result = new SwitchResult(false, SwitchFailedMessage, false);
+                    result = new LoginResult(false, LoginFailedMessage, false);
                 }
                 else
                 {
-                    result = new SwitchResult(true, SwitchSucceededMessage, false);
+                    result = new LoginResult(true, LoginSucceededMessage, false);
                     launchAllowed = true;
                 }
             }
@@ -223,7 +172,7 @@ public sealed class SafeSwitchCoordinator
             if (exception.SideEffectsStarted)
             {
                 launchAllowed = true;
-                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+                result = new LoginResult(false, PreMutationCancellationMessage, false);
             }
             else
             {
@@ -236,7 +185,7 @@ public sealed class SafeSwitchCoordinator
             if (closeSideEffectsStarted || exception.SideEffectsStarted)
             {
                 launchAllowed = true;
-                result = new SwitchResult(false, PreMutationCancellationMessage, false);
+                result = new LoginResult(false, PreMutationCancellationMessage, false);
             }
             else
             {
@@ -245,8 +194,8 @@ public sealed class SafeSwitchCoordinator
         }
         catch (OperationCanceledException exception) when (cancellationToken.IsCancellationRequested)
         {
-            if (stage == SwitchStage.Close ||
-                (stage == SwitchStage.Force &&
+            if (stage == LoginStage.Close ||
+                (stage == LoginStage.Force &&
                     checkpoint is null &&
                     !closeSideEffectsStarted &&
                     !forceRecoveryCommitted))
@@ -257,7 +206,7 @@ public sealed class SafeSwitchCoordinator
             {
                 restoreRequired = checkpoint is not null;
                 launchAllowed = checkpoint is null && recoveryResponsible;
-                result = new SwitchResult(
+                result = new LoginResult(
                     false,
                     checkpoint is null ? PreMutationCancellationMessage : CancellationMessage,
                     false);
@@ -267,9 +216,9 @@ public sealed class SafeSwitchCoordinator
         {
             restoreRequired = checkpoint is not null;
             launchAllowed = checkpoint is null && recoveryResponsible;
-            result = new SwitchResult(
+            result = new LoginResult(
                 false,
-                checkpoint is null ? PreMutationFailureMessage : SwitchFailedMessage,
+                checkpoint is null ? PreMutationFailureMessage : LoginFailedMessage,
                 false);
         }
         catch (Exception exception)
@@ -305,7 +254,7 @@ public sealed class SafeSwitchCoordinator
                 else
                 {
                     launchAllowed = false;
-                    result = new SwitchResult(false, RecoveryFailureMessage, false);
+                    result = new LoginResult(false, RecoveryFailureMessage, false);
                 }
             }
 
@@ -329,7 +278,7 @@ public sealed class SafeSwitchCoordinator
                 {
                     if (pendingException is null)
                     {
-                        result = new SwitchResult(
+                        result = new LoginResult(
                             result.Succeeded,
                             result.Succeeded
                                 ? SuccessfulLaunchFailureMessage
@@ -338,11 +287,11 @@ public sealed class SafeSwitchCoordinator
                                     PreMutationCancellationMessage,
                                     StringComparison.Ordinal)
                                     ? PreMutationCancellationLaunchFailureMessage
-                                : string.Equals(result.Message, CancellationMessage, StringComparison.Ordinal)
-                                    ? CancellationLaunchFailureMessage
-                                    : priorStateRestored
-                                        ? FailedLaunchFailureMessage
-                                        : PreMutationLaunchFailureMessage,
+                                    : string.Equals(result.Message, CancellationMessage, StringComparison.Ordinal)
+                                        ? CancellationLaunchFailureMessage
+                                        : priorStateRestored
+                                            ? FailedLaunchFailureMessage
+                                            : PreMutationLaunchFailureMessage,
                             false)
                         {
                             CanRetryLaunch = true,
@@ -360,34 +309,18 @@ public sealed class SafeSwitchCoordinator
         return result;
     }
 
-    public async Task<bool> RetryLaunchAsync(CancellationToken cancellationToken)
+    private static bool IsOperationalFailure(LoginStage stage, Exception exception) => stage switch
     {
-        try
-        {
-            await _processController.LaunchAsync(_package, cancellationToken);
-            return true;
-        }
-        catch (Exception exception) when (IsOperationalLaunchFailure(exception))
-        {
-            return false;
-        }
-    }
-
-    private static bool IsOperationalFailure(SwitchStage stage, Exception exception) => stage switch
-    {
-        SwitchStage.Close or SwitchStage.Force =>
+        LoginStage.Close or LoginStage.Force =>
             exception is Win32Exception or IOException or UnauthorizedAccessException,
-        SwitchStage.Capture =>
+        LoginStage.Capture =>
             exception is AuthStateCheckpointException or IOException or UnauthorizedAccessException,
-        SwitchStage.Switch =>
+        LoginStage.Login =>
             exception is Win32Exception or IOException or UnauthorizedAccessException,
-        SwitchStage.Verify =>
+        LoginStage.Verify =>
             exception is InvalidDataException or IOException or UnauthorizedAccessException,
         _ => false,
     };
-
-    private static bool IsOperationalNoOpVerificationFailure(Exception exception) =>
-        exception is InvalidDataException or IOException or UnauthorizedAccessException;
 
     private static bool IsOperationalRestoreFailure(Exception exception) =>
         exception is IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException;
@@ -410,32 +343,12 @@ public sealed class SafeSwitchCoordinator
         CancellationToken cancellationToken) =>
         await AuthStateTransaction.CaptureAsync(codexHome, cancellationToken);
 
-    private static Func<string, CancellationToken, Task<CommandResult>> CreateSwitchDelegate(
-        CodexAuthService codexAuthService)
-    {
-        ArgumentNullException.ThrowIfNull(codexAuthService);
-        return codexAuthService.SwitchAsync;
-    }
-
-    private static Func<string, CancellationToken, Task<AccountRegistry>> CreateRegistryDelegate(
-        AccountRegistryService accountRegistryService)
-    {
-        ArgumentNullException.ThrowIfNull(accountRegistryService);
-        return accountRegistryService.LoadAsync;
-    }
-
-    private static Func<HelperAvailability> CreateAvailabilityDelegate(CodexAuthService codexAuthService)
-    {
-        ArgumentNullException.ThrowIfNull(codexAuthService);
-        return codexAuthService.CheckAvailability;
-    }
-
-    private enum SwitchStage
+    private enum LoginStage
     {
         Close,
         Force,
         Capture,
-        Switch,
+        Login,
         Verify,
     }
 }

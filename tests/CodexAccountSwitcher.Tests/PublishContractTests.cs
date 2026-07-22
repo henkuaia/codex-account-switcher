@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace CodexAccountSwitcher.Tests;
 
@@ -46,6 +48,12 @@ public sealed class PublishContractTests
             "Assert-DotnetSucceeded -Operation 'dotnet publish'",
             "Copy-Item -LiteralPath $helperPath -Destination (Join-Path $stagingToolsDirectory 'codex-auth.exe') -Force",
             "Copy-Item -LiteralPath $helperManifestPath -Destination (Join-Path $stagingToolsDirectory 'manifest.json') -Force",
+            "$stagedHelperSha256 = (Get-FileHash -LiteralPath $stagedHelperPath -Algorithm SHA256).Hash",
+            "$stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw | ConvertFrom-Json",
+            "$stagedManifest.archive_sha256",
+            "$expectedArchiveSha256",
+            "$stagedManifest.executable_sha256",
+            "$expectedHelperSha256",
             "Move-Item -LiteralPath $stagingDirectory -Destination $finalDirectory");
         Assert.Contains(
             "7E8E79976FE6A106B200860738C81636D18C9EAAB0196F342C53FDAAA5791F11",
@@ -60,6 +68,13 @@ public sealed class PublishContractTests
 
         Assert.Contains(".NET 9 Desktop Runtime", readme, StringComparison.Ordinal);
         Assert.Contains("device login", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("认证成功的新账号会立即成为活动账号", readme, StringComparison.Ordinal);
+        Assert.Contains("应用自有的账号列表", readme, StringComparison.Ordinal);
+        Assert.Contains("不会刷新任何额度", readme, StringComparison.Ordinal);
+        Assert.Contains("活动账号不能删除，必须先切换到其他账号", readme, StringComparison.Ordinal);
+        Assert.Contains("同一 Windows 用户只能运行一个实例", readme, StringComparison.Ordinal);
+        Assert.Contains("CODEX_AUTH_SKIP_SERVICE_RECONCILE=1", readme, StringComparison.Ordinal);
+        Assert.Contains("托管自动切换服务", readme, StringComparison.Ordinal);
         Assert.Contains("Weekly", readme, StringComparison.Ordinal);
         Assert.Contains("Monthly", readme, StringComparison.Ordinal);
         Assert.Contains("Quota", readme, StringComparison.Ordinal);
@@ -109,6 +124,27 @@ public sealed class PublishContractTests
             File.ReadAllText(Path.Combine(fixture.FinalDirectory, "tools", "codex-auth.exe")));
     }
 
+    [Theory]
+    [InlineData("archive_sha256")]
+    [InlineData("executable_sha256")]
+    public void Publish_staged_manifest_hash_mismatch_leaves_previous_distribution_untouched(
+        string manifestProperty)
+    {
+        using var fixture = PublishFixture.Create(
+            validHelper: true,
+            manifestHashToCorrupt: manifestProperty);
+        fixture.CreatePreviousFinalDistribution();
+
+        var result = fixture.RunPublish();
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("Staged codex-auth manifest", result.Output, StringComparison.Ordinal);
+        Assert.Equal("stale", File.ReadAllText(Path.Combine(fixture.FinalDirectory, "stale-marker.txt")));
+        Assert.Equal(
+            "previous-helper",
+            File.ReadAllText(Path.Combine(fixture.FinalDirectory, "tools", "codex-auth.exe")));
+    }
+
     private static string FindRepositoryRoot()
     {
         for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -149,7 +185,9 @@ public sealed class PublishContractTests
 
         public string FinalDirectory { get; }
 
-        public static PublishFixture Create(bool validHelper)
+        public static PublishFixture Create(
+            bool validHelper,
+            string? manifestHashToCorrupt = null)
         {
             var repositoryRoot = FindRepositoryRoot();
             var root = Path.Combine(
@@ -207,6 +245,17 @@ public sealed class PublishContractTests
             File.Copy(
                 Path.Combine(repositoryRoot, "vendor", "codex-auth", "manifest.json"),
                 Path.Combine(root, "vendor", "codex-auth", "manifest.json"));
+
+            if (manifestHashToCorrupt is not null)
+            {
+                var manifestPath = Path.Combine(root, "vendor", "codex-auth", "manifest.json");
+                var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))?.AsObject()
+                    ?? throw new InvalidDataException("Fixture manifest must contain a JSON object.");
+                manifest[manifestHashToCorrupt] = "INVALID";
+                File.WriteAllText(
+                    manifestPath,
+                    manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true }));
+            }
 
             var fixtureHelper = Path.Combine(root, "vendor", "codex-auth", "codex-auth.exe");
             if (validHelper)

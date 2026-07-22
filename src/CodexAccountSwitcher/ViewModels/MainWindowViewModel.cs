@@ -18,6 +18,12 @@ public interface IOperationActivityTracker
 
 public interface IAccountDialogService
 {
+    Task<bool> ConfirmAddAsync(CancellationToken cancellationToken);
+
+    Task<AccountRowViewModel?> SelectRemovalTargetAsync(
+        IReadOnlyList<AccountRowViewModel> accounts,
+        CancellationToken cancellationToken);
+
     Task<bool> ConfirmSwitchAsync(
         AccountRowViewModel target,
         CancellationToken cancellationToken);
@@ -41,14 +47,19 @@ public sealed class MainWindowViewModel : ObservableObject
         IProgress<QuotaUpdate>,
         CancellationToken,
         Task> _refreshQuotaAsync;
-    private readonly Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> _loginAsync;
-    private readonly Func<CancellationToken, Task<CommandResult>> _removeAsync;
+    private readonly Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> _loginAsync;
+    private readonly Func<
+        AccountRecord,
+        AccountRegistry,
+        CancellationToken,
+        Task<RemovalResult>> _removeAsync;
     private readonly Func<
         AccountRecord,
         AccountRegistry,
         CancellationToken,
         Task<SwitchResult>> _switchAsync;
     private readonly Func<CancellationToken, Task<bool>> _retryLaunchAsync;
+    private readonly Func<HelperAvailability> _checkHelperAvailability;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
     private readonly IOperationActivityTracker _activityTracker;
@@ -56,6 +67,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private int _operationGate;
     private bool _isBusy;
     private bool _canRetryLaunch;
+    private bool _isHelperAvailable;
+    private string _helperAvailabilityError = string.Empty;
     private string _statusText = string.Empty;
 
     public MainWindowViewModel(
@@ -63,6 +76,8 @@ public sealed class MainWindowViewModel : ObservableObject
         AccountRegistryService accountRegistryService,
         QuotaService quotaService,
         CodexAuthService codexAuthService,
+        SafeLoginCoordinator safeLoginCoordinator,
+        TargetedRemoveCoordinator targetedRemoveCoordinator,
         SafeSwitchCoordinator safeSwitchCoordinator,
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
@@ -70,10 +85,11 @@ public sealed class MainWindowViewModel : ObservableObject
         : this(
             CreateLoadRegistryDelegate(codexHome, accountRegistryService),
             CreateRefreshQuotaDelegate(codexHome, quotaService),
-            CreateLoginDelegate(codexAuthService),
-            CreateRemoveDelegate(codexAuthService),
+            CreateLoginDelegate(safeLoginCoordinator),
+            CreateRemoveDelegate(targetedRemoveCoordinator),
             CreateSwitchDelegate(safeSwitchCoordinator),
             safeSwitchCoordinator.RetryLaunchAsync,
+            codexAuthService.CheckAvailability,
             dialogService,
             dispatcher,
             activityTracker)
@@ -98,6 +114,56 @@ public sealed class MainWindowViewModel : ObservableObject
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
         IOperationActivityTracker activityTracker)
+        : this(
+            loadRegistryAsync,
+            refreshQuotaAsync,
+            async (outputHandler, cancellationToken) =>
+            {
+                var result = await loginAsync(outputHandler, cancellationToken);
+                return new LoginResult(
+                    result.Succeeded,
+                    result.Succeeded ? "Login completed." : "Login failed.",
+                    true);
+            },
+            async (_, _, cancellationToken) =>
+            {
+                var result = await removeAsync(cancellationToken);
+                return new RemovalResult(
+                    result.Succeeded,
+                    result.Succeeded ? "Removal completed." : "Removal failed.");
+            },
+            switchAsync,
+            retryLaunchAsync,
+            static () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            dialogService,
+            dispatcher,
+            activityTracker)
+    {
+    }
+
+    internal MainWindowViewModel(
+        Func<CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
+        Func<
+            IReadOnlyList<AccountRecord>,
+            IProgress<QuotaUpdate>,
+            CancellationToken,
+            Task> refreshQuotaAsync,
+        Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> loginAsync,
+        Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<RemovalResult>> removeAsync,
+        Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<SwitchResult>> switchAsync,
+        Func<CancellationToken, Task<bool>> retryLaunchAsync,
+        Func<HelperAvailability> checkHelperAvailability,
+        IAccountDialogService dialogService,
+        IUiDispatcher dispatcher,
+        IOperationActivityTracker activityTracker)
     {
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _refreshQuotaAsync = refreshQuotaAsync ?? throw new ArgumentNullException(nameof(refreshQuotaAsync));
@@ -105,29 +171,35 @@ public sealed class MainWindowViewModel : ObservableObject
         _removeAsync = removeAsync ?? throw new ArgumentNullException(nameof(removeAsync));
         _switchAsync = switchAsync ?? throw new ArgumentNullException(nameof(switchAsync));
         _retryLaunchAsync = retryLaunchAsync ?? throw new ArgumentNullException(nameof(retryLaunchAsync));
+        _checkHelperAvailability = checkHelperAvailability
+            ?? throw new ArgumentNullException(nameof(checkHelperAvailability));
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _activityTracker = activityTracker ?? throw new ArgumentNullException(nameof(activityTracker));
 
+        var availability = _checkHelperAvailability();
+        _isHelperAvailable = availability.IsAvailable;
+        _helperAvailabilityError = availability.Error;
+
         RefreshCommand = new AsyncCommand(
             _dispatcher,
             (_, cancellationToken) => RunBusyAsync(RefreshQuotaAsync, cancellationToken),
-            _ => !IsBusy,
+            _ => !IsBusy && IsHelperAvailable,
             HandleCommandErrorAsync);
         AddCommand = new AsyncCommand(
             _dispatcher,
             (_, cancellationToken) => RunBusyAsync(LoginAsync, cancellationToken),
-            _ => !IsBusy,
+            _ => !IsBusy && IsHelperAvailable,
             HandleCommandErrorAsync);
         RemoveCommand = new AsyncCommand(
             _dispatcher,
             (_, cancellationToken) => RunBusyAsync(RemoveAsync, cancellationToken),
-            _ => !IsBusy,
+            _ => !IsBusy && IsHelperAvailable,
             HandleCommandErrorAsync);
         SwitchCommand = new AsyncCommand(
             _dispatcher,
             SwitchAccountAsync,
-            parameter => !IsBusy && parameter is AccountRowViewModel { CanSwitch: true },
+            parameter => !IsBusy && IsHelperAvailable && parameter is AccountRowViewModel { CanSwitch: true },
             HandleCommandErrorAsync);
         RetryLaunchCommand = new AsyncCommand(
             _dispatcher,
@@ -166,6 +238,18 @@ public sealed class MainWindowViewModel : ObservableObject
         private set => SetProperty(ref _isBusy, value);
     }
 
+    public bool IsHelperAvailable
+    {
+        get => _isHelperAvailable;
+        private set => SetProperty(ref _isHelperAvailable, value);
+    }
+
+    public string HelperAvailabilityError
+    {
+        get => _helperAvailabilityError;
+        private set => SetProperty(ref _helperAvailabilityError, value);
+    }
+
     public string StatusText
     {
         get => _statusText;
@@ -177,8 +261,15 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task LoadRegistryAsync(CancellationToken cancellationToken)
     {
+        var availability = _checkHelperAvailability();
         var registry = await _loadRegistryAsync(cancellationToken);
-        await _dispatcher.InvokeAsync(() => ApplyRegistry(registry), cancellationToken);
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                ApplyRegistry(registry);
+                ApplyHelperAvailability(availability);
+            },
+            cancellationToken);
     }
 
     private async Task RefreshQuotaAsync(CancellationToken cancellationToken)
@@ -206,26 +297,52 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private async Task LoginAsync(CancellationToken cancellationToken)
     {
-        var result = await _dialogService.RunLoginAsync(_loginAsync, cancellationToken);
+        if (!await _dialogService.ConfirmAddAsync(cancellationToken))
+        {
+            return;
+        }
+
+        LoginResult? loginResult = null;
+        await _dialogService.RunLoginAsync(
+            async (outputHandler, token) =>
+            {
+                loginResult = await _loginAsync(outputHandler, token);
+                return new CommandResult(
+                    loginResult.Succeeded ? 0 : 1,
+                    string.Empty,
+                    loginResult.Message);
+            },
+            cancellationToken);
+        var result = loginResult
+            ?? throw new InvalidOperationException("The account login did not return a result.");
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
-                StatusText = result.Succeeded ? "Login completed." : "Login failed.";
+                StatusText = result.Message;
+                CanRetryLaunch = result.CanRetryLaunch;
             },
             CancellationToken.None);
     }
 
     private async Task RemoveAsync(CancellationToken cancellationToken)
     {
-        var result = await _dialogService.RunRemoveAsync(_removeAsync, cancellationToken);
+        var target = await _dialogService.SelectRemovalTargetAsync(
+            Accounts.ToArray(),
+            cancellationToken);
+        if (target is null)
+        {
+            return;
+        }
+
+        var result = await _removeAsync(target.Account, _registry, cancellationToken);
         var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
-                StatusText = result.Succeeded ? "Removal completed." : "Removal failed.";
+                StatusText = result.Message;
             },
             CancellationToken.None);
     }
@@ -359,6 +476,19 @@ public sealed class MainWindowViewModel : ObservableObject
         RaiseCommandCanExecuteChanged();
     }
 
+    private void ApplyHelperAvailability(HelperAvailability availability)
+    {
+        ArgumentNullException.ThrowIfNull(availability);
+        IsHelperAvailable = availability.IsAvailable;
+        HelperAvailabilityError = availability.Error;
+        if (!availability.IsAvailable)
+        {
+            StatusText = availability.Error;
+        }
+
+        RaiseCommandCanExecuteChanged();
+    }
+
     private void SetBusy(bool value)
     {
         IsBusy = value;
@@ -397,18 +527,22 @@ public sealed class MainWindowViewModel : ObservableObject
             quotaService.RefreshAllAsync(accounts, codexHome, progress, cancellationToken);
     }
 
-    private static Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> CreateLoginDelegate(
-        CodexAuthService codexAuthService)
+    private static Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> CreateLoginDelegate(
+        SafeLoginCoordinator safeLoginCoordinator)
     {
-        ArgumentNullException.ThrowIfNull(codexAuthService);
-        return codexAuthService.LoginAsync;
+        ArgumentNullException.ThrowIfNull(safeLoginCoordinator);
+        return safeLoginCoordinator.LoginAsync;
     }
 
-    private static Func<CancellationToken, Task<CommandResult>> CreateRemoveDelegate(
-        CodexAuthService codexAuthService)
+    private static Func<
+        AccountRecord,
+        AccountRegistry,
+        CancellationToken,
+        Task<RemovalResult>> CreateRemoveDelegate(
+            TargetedRemoveCoordinator targetedRemoveCoordinator)
     {
-        ArgumentNullException.ThrowIfNull(codexAuthService);
-        return codexAuthService.RemoveAsync;
+        ArgumentNullException.ThrowIfNull(targetedRemoveCoordinator);
+        return targetedRemoveCoordinator.RemoveAsync;
     }
 
     private static Func<

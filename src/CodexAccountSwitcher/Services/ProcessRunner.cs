@@ -184,12 +184,9 @@ public sealed class ProcessRunner : IProcessRunner
     public async Task<CommandResult> RunVisibleAsync(ProcessRequest request, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Environment is { Count: > 0 })
-        {
-            throw new ArgumentException("Visible processes cannot override their environment.", nameof(request));
-        }
-
-        var startInfo = CreateStartInfo(request, useShellExecute: true);
+        var startInfo = CreateStartInfo(
+            request,
+            useShellExecute: request.Environment is not { Count: > 0 });
         using var process = _processFactory.Create(startInfo);
         cancellationToken.ThrowIfCancellationRequested();
         if (!process.Start())

@@ -145,6 +145,40 @@ public sealed class SafeSwitchCoordinatorTests
     }
 
     [Fact]
+    public async Task Missing_helper_returns_expected_path_before_closing_codex()
+    {
+        using var directory = new TemporaryDirectory();
+        var missingHelperPath = Path.Combine(directory.Path, "tools", "codex-auth.exe");
+        var operations = new List<string>();
+        var processController = new FakeProcessController(operations, static () => { });
+        var authService = new CodexAuthService(
+            missingHelperPath,
+            directory.Path,
+            new NeverProcessRunner());
+        var prior = Accounts.Record("prior-key", "prior@example.com", "prior", "prior-account");
+        var target = Accounts.Record("target-key", "target@example.com", "target", "target-account");
+        var registry = new AccountRegistry(3, prior.AccountKey, [prior, target]);
+        var coordinator = new SafeSwitchCoordinator(
+            new CodexPackageInfo(
+                "OpenAI.Codex_family",
+                "OpenAI.Codex_family!App",
+                @"C:\Program Files\WindowsApps\OpenAI.Codex",
+                @"C:\Program Files\WindowsApps\OpenAI.Codex\app\ChatGPT.exe",
+                @"C:\Program Files\WindowsApps\OpenAI.Codex\app\resources"),
+            directory.Path,
+            processController,
+            authService,
+            new AccountRegistryService());
+
+        var result = await coordinator.SwitchAsync(target, registry, default);
+
+        Assert.False(result.Succeeded);
+        Assert.True(result.LaunchSucceeded);
+        Assert.Contains(Path.GetFullPath(missingHelperPath), result.Message, StringComparison.Ordinal);
+        Assert.Empty(operations);
+    }
+
+    [Fact]
     public async Task Pre_cancelled_request_throws_without_side_effects()
     {
         var fixture = new Fixture();
@@ -850,6 +884,19 @@ public sealed class SafeSwitchCoordinatorTests
 
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class NeverProcessRunner : IProcessRunner
+    {
+        public Task<CommandResult> RunCapturedAsync(
+            ProcessRequest request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The helper must be rejected before process start.");
+
+        public Task<CommandResult> RunVisibleAsync(
+            ProcessRequest request,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("The helper must be rejected before process start.");
     }
 
     private sealed class UnexpectedTestException(string message) : Exception(message);

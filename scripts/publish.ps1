@@ -14,6 +14,7 @@ $stagingDirectory = [IO.Path]::GetFullPath((Join-Path $distDirectory ('.CodexAcc
 $backupDirectory = [IO.Path]::GetFullPath((Join-Path $distDirectory ('.CodexAccountSwitcher-backup-' + [Guid]::NewGuid().ToString('N'))))
 $helperPath = Join-Path $projectRoot 'vendor\codex-auth\codex-auth.exe'
 $helperManifestPath = Join-Path $projectRoot 'vendor\codex-auth\manifest.json'
+$expectedArchiveSha256 = 'CDF2C4D9CC827C91C24EB4C032B9F6792F581B42808DF5DB167C39B255EA7108'
 $expectedHelperSha256 = '7E8E79976FE6A106B200860738C81636D18C9EAAB0196F342C53FDAAA5791F11'
 
 function Assert-DotnetSucceeded {
@@ -116,6 +117,22 @@ try {
     New-Item -ItemType Directory -Force -Path $stagingToolsDirectory | Out-Null
     Copy-Item -LiteralPath $helperPath -Destination (Join-Path $stagingToolsDirectory 'codex-auth.exe') -Force
     Copy-Item -LiteralPath $helperManifestPath -Destination (Join-Path $stagingToolsDirectory 'manifest.json') -Force
+    $stagedHelperPath = Join-Path $stagingToolsDirectory 'codex-auth.exe'
+    $stagedManifestPath = Join-Path $stagingToolsDirectory 'manifest.json'
+
+    $stagedHelperSha256 = (Get-FileHash -LiteralPath $stagedHelperPath -Algorithm SHA256).Hash
+    if (-not [string]::Equals($stagedHelperSha256, $expectedHelperSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Staged codex-auth.exe SHA-256 mismatch. Expected $expectedHelperSha256 but found $stagedHelperSha256."
+    }
+
+    $stagedManifest = Get-Content -LiteralPath $stagedManifestPath -Raw | ConvertFrom-Json
+    if (-not [string]::Equals($stagedManifest.archive_sha256, $expectedArchiveSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Staged codex-auth manifest archive SHA-256 mismatch. Expected $expectedArchiveSha256 but found $($stagedManifest.archive_sha256)."
+    }
+
+    if (-not [string]::Equals($stagedManifest.executable_sha256, $expectedHelperSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Staged codex-auth manifest executable SHA-256 mismatch. Expected $expectedHelperSha256 but found $($stagedManifest.executable_sha256)."
+    }
 
     if (Test-Path -LiteralPath $finalDirectory) {
         Move-Item -LiteralPath $finalDirectory -Destination $backupDirectory

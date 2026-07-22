@@ -9,6 +9,28 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class MainWindowViewModelTests
 {
     [Fact]
+    public void Dialog_service_exposes_add_confirmation_before_login()
+    {
+        var method = typeof(IAccountDialogService).GetMethod(
+            "ConfirmAddAsync",
+            [typeof(CancellationToken)]);
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(Task<bool>), method.ReturnType);
+    }
+
+    [Fact]
+    public void Dialog_service_exposes_app_owned_removal_selection()
+    {
+        var method = typeof(IAccountDialogService).GetMethod(
+            "SelectRemovalTargetAsync",
+            [typeof(IReadOnlyList<AccountRowViewModel>), typeof(CancellationToken)]);
+
+        Assert.NotNull(method);
+        Assert.Equal(typeof(Task<AccountRowViewModel>), method.ReturnType);
+    }
+
+    [Fact]
     public async Task Initial_load_maps_active_account_and_disables_its_switch()
     {
         var fixture = new Fixture();
@@ -277,6 +299,143 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Canceled_add_confirmation_never_calls_login_or_reloads_registry()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        fixture.Dialog.ConfirmAddResult = false;
+
+        await fixture.ViewModel.AddCommand.ExecuteAsync();
+
+        Assert.Equal(0, fixture.LoginCallCount);
+        Assert.Equal(1, fixture.LoadCallCount);
+        Assert.Equal(["confirm-add"], fixture.Dialog.AddEvents);
+    }
+
+    [Fact]
+    public async Task Accepted_add_confirmation_occurs_before_login_transaction()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        fixture.Dialog.ConfirmAddResult = true;
+
+        await fixture.ViewModel.AddCommand.ExecuteAsync();
+
+        Assert.Equal(["confirm-add", "run-login"], fixture.Dialog.AddEvents);
+        Assert.Equal(1, fixture.LoginCallCount);
+    }
+
+    [Fact]
+    public async Task Safe_login_result_reloads_registry_and_exposes_launch_retry()
+    {
+        var first = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+        var added = Accounts.Record("added-key", "added@example.com", "Added", "added-account");
+        var registries = new Queue<AccountRegistry>(
+        [
+            new AccountRegistry(3, first.AccountKey, [first]),
+            new AccountRegistry(3, added.AccountKey, [first, added]),
+        ]);
+        var loginResult = new LoginResult(
+            true,
+            "Account login was verified, but Codex launch failed.",
+            false)
+        {
+            CanRetryLaunch = true,
+        };
+        var safeLoginCalls = 0;
+        var dialog = new FakeDialogService { ConfirmAddResult = true };
+        var constructor = typeof(MainWindowViewModel)
+            .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .SingleOrDefault(candidate =>
+            {
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 10 &&
+                    parameters[2].ParameterType == typeof(
+                        Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>) &&
+                    parameters[3].ParameterType == typeof(
+                        Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>);
+            });
+
+        Assert.NotNull(constructor);
+        var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
+        [
+            (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registries.Dequeue())),
+            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) =>
+            {
+                safeLoginCalls++;
+                return Task.FromResult(loginResult);
+            }),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>)((_, _, _) => Task.FromResult(new RemovalResult(true, "unused"))),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true))),
+            (Func<CancellationToken, Task<bool>>)(_ => Task.FromResult(true)),
+            (Func<HelperAvailability>)(() => new HelperAvailability(true, @"C:\tools\codex-auth.exe", string.Empty)),
+            dialog,
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+        ]));
+        await viewModel.LoadAsync();
+
+        await viewModel.AddCommand.ExecuteAsync();
+
+        Assert.Equal(1, safeLoginCalls);
+        Assert.Equal(2, viewModel.Accounts.Count);
+        Assert.True(Assert.Single(viewModel.Accounts, row => row.Account.AccountKey == added.AccountKey).IsActive);
+        Assert.Equal(loginResult.Message, viewModel.StatusText);
+        Assert.True(viewModel.CanRetryLaunch);
+        Assert.Equal(["confirm-add", "run-login"], dialog.AddEvents);
+    }
+
+    [Fact]
+    public async Task Missing_helper_disables_helper_dependent_commands_but_not_retry_launch()
+    {
+        var first = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+        var second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
+        var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
+        const string expectedPath = @"C:\expected\tools\codex-auth.exe";
+        var availability = new HelperAvailability(
+            false,
+            expectedPath,
+            $"The codex-auth helper is unavailable at the expected path: {expectedPath}");
+        var constructor = typeof(MainWindowViewModel)
+            .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .Single(candidate =>
+            {
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 10 &&
+                    parameters[2].ParameterType == typeof(
+                        Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>) &&
+                    parameters[3].ParameterType == typeof(
+                        Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>);
+            });
+        var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
+        [
+            (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registry)),
+            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) => Task.FromResult(new LoginResult(false, "unused", true))),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>)((_, _, _) => Task.FromResult(new RemovalResult(true, "unused"))),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true))),
+            (Func<CancellationToken, Task<bool>>)(_ => Task.FromResult(true)),
+            (Func<HelperAvailability>)(() => availability),
+            new FakeDialogService(),
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+        ]));
+
+        await viewModel.LoadAsync();
+        typeof(MainWindowViewModel).GetProperty(nameof(MainWindowViewModel.CanRetryLaunch))!
+            .SetValue(viewModel, true);
+
+        Assert.False(viewModel.AddCommand.CanExecute(null));
+        Assert.False(viewModel.RemoveCommand.CanExecute(null));
+        Assert.False(viewModel.RefreshCommand.CanExecute(null));
+        Assert.False(viewModel.SwitchCommand.CanExecute(
+            Assert.Single(viewModel.Accounts, row => row.Account.AccountKey == second.AccountKey)));
+        Assert.True(viewModel.RetryLaunchCommand.CanExecute(null));
+        Assert.Contains(expectedPath, viewModel.StatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Confirmed_successful_switch_reloads_before_updating_active_row()
     {
         var fixture = new Fixture();
@@ -332,6 +491,82 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(1, fixture.RemoveCallCount);
         Assert.Equal(2, fixture.LoadCallCount);
         Assert.Single(fixture.ViewModel.Accounts);
+    }
+
+    [Fact]
+    public async Task Canceled_removal_selection_never_calls_remove_or_reloads_registry()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        fixture.Dialog.CancelRemovalSelection = true;
+
+        await fixture.ViewModel.RemoveCommand.ExecuteAsync();
+
+        Assert.Equal(0, fixture.RemoveCallCount);
+        Assert.Equal(1, fixture.LoadCallCount);
+    }
+
+    [Fact]
+    public async Task Product_remove_targets_selected_non_active_account_without_quota_refresh()
+    {
+        var first = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+        var second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
+        var third = Accounts.Record("third-key", "third@example.com", "Third", "third-account");
+        var before = new AccountRegistry(3, first.AccountKey, [first, second, third]);
+        var after = new AccountRegistry(3, first.AccountKey, [first, third]);
+        var registries = new Queue<AccountRegistry>([before, after]);
+        var dialog = new FakeDialogService();
+        var quotaRefreshCalls = 0;
+        var removalCalls = 0;
+        AccountRecord? removedTarget = null;
+        AccountRegistry? observedRegistry = null;
+        var constructor = typeof(MainWindowViewModel)
+            .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            .SingleOrDefault(candidate =>
+            {
+                var parameters = candidate.GetParameters();
+                return parameters.Length == 10 &&
+                    parameters[3].ParameterType == typeof(
+                        Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>);
+            });
+
+        Assert.NotNull(constructor);
+        var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
+        [
+            (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registries.Dequeue())),
+            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) =>
+            {
+                quotaRefreshCalls++;
+                return Task.CompletedTask;
+            }),
+            (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) => Task.FromResult(new LoginResult(false, "unused", true))),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>)((target, registry, _) =>
+            {
+                removalCalls++;
+                removedTarget = target;
+                observedRegistry = registry;
+                return Task.FromResult(new RemovalResult(true, "Account removal verified."));
+            }),
+            (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true))),
+            (Func<CancellationToken, Task<bool>>)(_ => Task.FromResult(true)),
+            (Func<HelperAvailability>)(() => new HelperAvailability(true, @"C:\tools\codex-auth.exe", string.Empty)),
+            dialog,
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+        ]));
+        await viewModel.LoadAsync();
+        dialog.RemovalTarget = Assert.Single(
+            viewModel.Accounts,
+            row => row.Account.AccountKey == second.AccountKey);
+
+        await viewModel.RemoveCommand.ExecuteAsync();
+
+        Assert.Equal(1, removalCalls);
+        Assert.Same(second, removedTarget);
+        Assert.Equal(before, observedRegistry);
+        Assert.Equal(0, quotaRefreshCalls);
+        Assert.DoesNotContain(viewModel.Accounts, row => row.Account.AccountKey == second.AccountKey);
+        Assert.Equal("Account removal verified.", viewModel.StatusText);
     }
 
     [Theory]
@@ -875,8 +1110,33 @@ public sealed class MainWindowViewModelTests
     {
         public bool ConfirmResult { get; set; }
 
+        public bool ConfirmAddResult { get; set; } = true;
+
+        public List<string> AddEvents { get; } = [];
+
+        public AccountRowViewModel? RemovalTarget { get; set; }
+
+        public bool CancelRemovalSelection { get; set; }
+
         public TaskCompletionSource LoginStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AddEvents.Add("confirm-add");
+            return Task.FromResult(ConfirmAddResult);
+        }
+
+        public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
+            IReadOnlyList<AccountRowViewModel> accounts,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(CancelRemovalSelection
+                ? null
+                : RemovalTarget ?? accounts.FirstOrDefault(account => !account.IsActive));
+        }
 
         public Task<bool> ConfirmSwitchAsync(
             AccountRowViewModel target,
@@ -890,6 +1150,7 @@ public sealed class MainWindowViewModelTests
             Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> operation,
             CancellationToken cancellationToken)
         {
+            AddEvents.Add("run-login");
             LoginStarted.TrySetResult();
             return operation(static (_, _) => ValueTask.CompletedTask, cancellationToken);
         }

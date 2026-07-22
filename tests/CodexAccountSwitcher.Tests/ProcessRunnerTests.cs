@@ -304,6 +304,32 @@ public sealed class ProcessRunnerTests
         Assert.False(process.WaitTokens[1].CanBeCanceled);
     }
 
+    [Fact]
+    public async Task Visible_process_applies_environment_without_hiding_console()
+    {
+        var process = new FakeStartedProcess();
+        var factory = new FakeProcessFactory(process);
+        var runner = new ProcessRunner(factory);
+
+        var result = await runner.RunVisibleAsync(
+            new ProcessRequest(
+                "fake.exe",
+                ["remove"],
+                Visible: true,
+                Environment: new Dictionary<string, string>
+                {
+                    ["CODEX_AUTH_SKIP_SERVICE_RECONCILE"] = "1",
+                }),
+            CancellationToken.None);
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(factory.StartInfo);
+        Assert.False(factory.StartInfo.UseShellExecute);
+        Assert.False(factory.StartInfo.CreateNoWindow);
+        Assert.Equal("1", factory.StartInfo.Environment["CODEX_AUTH_SKIP_SERVICE_RECONCILE"]);
+        Assert.Equal(1, process.StartCallCount);
+    }
+
     private sealed class FakeProcessFactory(IStartedProcess process) : IProcessFactory
     {
         public ProcessStartInfo? StartInfo { get; private set; }

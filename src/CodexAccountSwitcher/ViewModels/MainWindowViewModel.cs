@@ -44,6 +44,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
     private AccountRegistry _registry = AccountRegistry.Empty;
+    private int _operationGate;
     private bool _isBusy;
     private string _statusText = string.Empty;
 
@@ -92,18 +93,22 @@ public sealed class MainWindowViewModel : ObservableObject
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
 
         RefreshCommand = new AsyncCommand(
+            _dispatcher,
             (_, cancellationToken) => RunBusyAsync(RefreshQuotaAsync, cancellationToken),
             _ => !IsBusy,
             HandleCommandErrorAsync);
         AddCommand = new AsyncCommand(
+            _dispatcher,
             (_, cancellationToken) => RunBusyAsync(LoginAsync, cancellationToken),
             _ => !IsBusy,
             HandleCommandErrorAsync);
         RemoveCommand = new AsyncCommand(
+            _dispatcher,
             (_, cancellationToken) => RunBusyAsync(RemoveAsync, cancellationToken),
             _ => !IsBusy,
             HandleCommandErrorAsync);
         SwitchCommand = new AsyncCommand(
+            _dispatcher,
             SwitchAccountAsync,
             parameter => !IsBusy && parameter is AccountRowViewModel { CanSwitch: true },
             HandleCommandErrorAsync);
@@ -166,27 +171,27 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task LoginAsync(CancellationToken cancellationToken)
     {
         var result = await _dialogService.RunLoginAsync(_loginAsync, cancellationToken);
-        var registry = await _loadRegistryAsync(cancellationToken);
+        var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
                 StatusText = result.Succeeded ? "Login completed." : "Login failed.";
             },
-            cancellationToken);
+            CancellationToken.None);
     }
 
     private async Task RemoveAsync(CancellationToken cancellationToken)
     {
         var result = await _dialogService.RunRemoveAsync(_removeAsync, cancellationToken);
-        var registry = await _loadRegistryAsync(cancellationToken);
+        var registry = await _loadRegistryAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
                 StatusText = result.Succeeded ? "Removal completed." : "Removal failed.";
             },
-            cancellationToken);
+            CancellationToken.None);
     }
 
     private Task SwitchAccountAsync(object? parameter, CancellationToken cancellationToken)
@@ -211,14 +216,14 @@ public sealed class MainWindowViewModel : ObservableObject
         var result = await _switchAsync(target.Account, _registry, cancellationToken);
         if (result.Succeeded)
         {
-            var registry = await _loadRegistryAsync(cancellationToken);
+            var registry = await _loadRegistryAsync(CancellationToken.None);
             await _dispatcher.InvokeAsync(
                 () =>
                 {
                     ApplyRegistry(registry);
                     StatusText = result.Message;
                 },
-                cancellationToken);
+                CancellationToken.None);
             return;
         }
 
@@ -229,19 +234,26 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<CancellationToken, Task> operation,
         CancellationToken cancellationToken)
     {
-        if (IsBusy)
+        if (Interlocked.CompareExchange(ref _operationGate, 1, 0) != 0)
         {
             return;
         }
 
-        await _dispatcher.InvokeAsync(() => SetBusy(true), cancellationToken);
         try
         {
+            await _dispatcher.InvokeAsync(() => SetBusy(true), cancellationToken);
             await operation(cancellationToken);
         }
         finally
         {
-            await _dispatcher.InvokeAsync(() => SetBusy(false), CancellationToken.None);
+            try
+            {
+                await _dispatcher.InvokeAsync(() => SetBusy(false), CancellationToken.None);
+            }
+            finally
+            {
+                Volatile.Write(ref _operationGate, 0);
+            }
         }
     }
 
@@ -277,10 +289,10 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private void RaiseCommandCanExecuteChanged()
     {
-        RefreshCommand.RaiseCanExecuteChanged();
-        AddCommand.RaiseCanExecuteChanged();
-        RemoveCommand.RaiseCanExecuteChanged();
-        SwitchCommand.RaiseCanExecuteChanged();
+        RefreshCommand.NotifyCanExecuteChanged();
+        AddCommand.NotifyCanExecuteChanged();
+        RemoveCommand.NotifyCanExecuteChanged();
+        SwitchCommand.NotifyCanExecuteChanged();
     }
 
     private static Func<CancellationToken, Task<AccountRegistry>> CreateLoadRegistryDelegate(

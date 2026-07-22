@@ -4,16 +4,19 @@ namespace CodexAccountSwitcher.ViewModels;
 
 public sealed class AsyncCommand : ICommand
 {
+    private readonly IUiDispatcher _dispatcher;
     private readonly Func<object?, CancellationToken, Task> _executeAsync;
     private readonly Func<object?, bool>? _canExecute;
     private readonly Func<Exception, Task>? _handleErrorAsync;
-    private bool _isExecuting;
+    private int _executionGate;
 
     public AsyncCommand(
+        IUiDispatcher dispatcher,
         Func<object?, CancellationToken, Task> executeAsync,
         Func<object?, bool>? canExecute = null,
         Func<Exception, Task>? handleErrorAsync = null)
     {
+        _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _executeAsync = executeAsync ?? throw new ArgumentNullException(nameof(executeAsync));
         _canExecute = canExecute;
         _handleErrorAsync = handleErrorAsync;
@@ -22,7 +25,7 @@ public sealed class AsyncCommand : ICommand
     public event EventHandler? CanExecuteChanged;
 
     public bool CanExecute(object? parameter) =>
-        !_isExecuting && (_canExecute?.Invoke(parameter) ?? true);
+        Volatile.Read(ref _executionGate) == 0 && (_canExecute?.Invoke(parameter) ?? true);
 
     public void Execute(object? parameter)
     {
@@ -33,40 +36,60 @@ public sealed class AsyncCommand : ICommand
         object? parameter = null,
         CancellationToken cancellationToken = default)
     {
-        if (!CanExecute(parameter))
+        if (!(_canExecute?.Invoke(parameter) ?? true) ||
+            Interlocked.CompareExchange(ref _executionGate, 1, 0) != 0)
         {
             return;
         }
 
-        _isExecuting = true;
-        RaiseCanExecuteChanged();
         try
         {
+            await _dispatcher.InvokeAsync(NotifyCanExecuteChanged, cancellationToken);
             await _executeAsync(parameter, cancellationToken);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
         }
         catch (Exception exception)
         {
-            if (_handleErrorAsync is not null)
-            {
-                try
-                {
-                    await _handleErrorAsync(exception);
-                }
-                catch
-                {
-                }
-            }
+            await HandleErrorAsync(exception);
         }
         finally
         {
-            _isExecuting = false;
-            RaiseCanExecuteChanged();
+            try
+            {
+                await _dispatcher.InvokeAsync(
+                    () =>
+                    {
+                        Volatile.Write(ref _executionGate, 0);
+                        NotifyCanExecuteChanged();
+                    },
+                    CancellationToken.None);
+            }
+            catch (Exception exception)
+            {
+                Volatile.Write(ref _executionGate, 0);
+                await HandleErrorAsync(exception);
+            }
         }
     }
 
-    public void RaiseCanExecuteChanged() =>
+    internal void NotifyCanExecuteChanged() =>
         CanExecuteChanged?.Invoke(this, EventArgs.Empty);
+
+    private async Task HandleErrorAsync(Exception exception)
+    {
+        if (_handleErrorAsync is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _handleErrorAsync(exception);
+        }
+        catch
+        {
+        }
+    }
 }

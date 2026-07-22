@@ -82,6 +82,57 @@ public sealed class MainWindowViewModelTests
         Assert.False(fixture.ViewModel.IsBusy);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task View_model_gate_rejects_competing_work_before_delayed_busy_dispatch(
+        bool competeWithLoad)
+    {
+        var dispatcher = new ControllableDispatcher();
+        var fixture = new Fixture(dispatcher);
+        await fixture.ViewModel.LoadAsync();
+        var delayedBusy = dispatcher.DelayInvocation(2);
+
+        var first = fixture.ViewModel.AddCommand.ExecuteAsync();
+        await delayedBusy.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        var second = competeWithLoad
+            ? fixture.ViewModel.LoadAsync()
+            : fixture.ViewModel.RemoveCommand.ExecuteAsync();
+        await second.WaitAsync(TimeSpan.FromSeconds(5));
+        var loadCallsBeforeRelease = fixture.LoadCallCount;
+        var removeCallsBeforeRelease = fixture.RemoveCallCount;
+
+        delayedBusy.Release();
+        await first.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(1, loadCallsBeforeRelease);
+        Assert.Equal(0, removeCallsBeforeRelease);
+    }
+
+    [Fact]
+    public async Task Async_command_raises_execution_notifications_only_on_awaited_dispatcher()
+    {
+        var dispatcher = new ControllableDispatcher();
+        var fixture = new Fixture(dispatcher);
+        await fixture.ViewModel.LoadAsync();
+        var notificationLocations = new List<bool>();
+        fixture.ViewModel.AddCommand.CanExecuteChanged += (_, _) =>
+            notificationLocations.Add(dispatcher.IsDispatching);
+        var delayedNotification = dispatcher.DelayNextInvocation();
+
+        var running = fixture.ViewModel.AddCommand.ExecuteAsync();
+        await delayedNotification.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        var overlap = fixture.ViewModel.AddCommand.ExecuteAsync();
+        await overlap.WaitAsync(TimeSpan.FromSeconds(5));
+
+        delayedNotification.Release();
+        await running.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotEmpty(notificationLocations);
+        Assert.All(notificationLocations, Assert.True);
+        Assert.Equal(1, fixture.LoginCallCount);
+    }
+
     [Fact]
     public async Task Canceled_confirmation_never_calls_switch_coordinator()
     {
@@ -153,6 +204,58 @@ public sealed class MainWindowViewModelTests
         Assert.Single(fixture.ViewModel.Accounts);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Login_and_removal_complete_reload_after_late_caller_cancellation(bool login)
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        using var cancellationSource = new CancellationTokenSource();
+        fixture.Registries.Enqueue(fixture.Registry with
+        {
+            Accounts = [fixture.First, fixture.Second, fixture.Third],
+        });
+        fixture.LoginOperation = (_, _) =>
+        {
+            cancellationSource.Cancel();
+            return Task.FromResult(Succeeded());
+        };
+        fixture.RemoveOperation = _ =>
+        {
+            cancellationSource.Cancel();
+            return Task.FromResult(Succeeded());
+        };
+
+        var command = login ? fixture.ViewModel.AddCommand : fixture.ViewModel.RemoveCommand;
+        await command.ExecuteAsync(cancellationToken: cancellationSource.Token);
+
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.Equal(3, fixture.ViewModel.Accounts.Count);
+        Assert.False(fixture.ViewModel.IsBusy);
+    }
+
+    [Fact]
+    public async Task Verified_switch_completes_reload_after_late_caller_cancellation()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        using var cancellationSource = new CancellationTokenSource();
+        fixture.Dialog.ConfirmResult = true;
+        fixture.SwitchResult = new SwitchResult(true, "Account switch verified.", true);
+        fixture.BeforeSwitchReturn = cancellationSource.Cancel;
+        fixture.Registries.Enqueue(fixture.Registry with { ActiveAccountKey = fixture.Second.AccountKey });
+
+        await fixture.ViewModel.SwitchCommand.ExecuteAsync(
+            fixture.Row(fixture.Second),
+            cancellationSource.Token);
+
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.True(fixture.Row(fixture.Second).IsActive);
+        Assert.Equal("Account switch verified.", fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.IsBusy);
+    }
+
     [Fact]
     public async Task Quota_error_updates_only_affected_row_and_leaves_valid_switch_enabled()
     {
@@ -200,18 +303,67 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal("unexpected removal failure", fixture.ViewModel.StatusText);
         Assert.False(fixture.ViewModel.IsBusy);
+    }
 
-        fixture.RemoveOperation = _ => Task.FromException<CommandResult>(
-            new InvalidOperationException("WPF command failure"));
+    [Fact]
+    public async Task ICommand_execute_contains_asynchronous_failure_until_status_dispatch_completes()
+    {
+        var dispatcher = new ControllableDispatcher();
+        var fixture = new Fixture(dispatcher);
+        await fixture.ViewModel.LoadAsync();
+        var operationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var operationResult = new TaskCompletionSource<CommandResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var statusUpdated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.RemoveOperation = _ =>
+        {
+            operationStarted.TrySetResult();
+            return operationResult.Task;
+        };
+        fixture.ViewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(MainWindowViewModel.StatusText) &&
+                fixture.ViewModel.StatusText == "WPF command failure")
+            {
+                statusUpdated.TrySetResult();
+            }
+        };
+
         ((ICommand)fixture.ViewModel.RemoveCommand).Execute(null);
+        await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var busyClearDispatch = dispatcher.DelayNextInvocation();
+        operationResult.SetException(new InvalidOperationException("WPF command failure"));
+        await busyClearDispatch.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+        var statusDispatch = dispatcher.DelayNextInvocation();
+        busyClearDispatch.Release();
+        await statusDispatch.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.NotEqual("WPF command failure", fixture.ViewModel.StatusText);
+
+        statusDispatch.Release();
+        await statusUpdated.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("WPF command failure", fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.IsBusy);
+    }
+
+    [Fact]
+    public async Task Unrelated_operation_cancellation_updates_status_as_an_error()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        fixture.RemoveOperation = _ => Task.FromException<CommandResult>(
+            new OperationCanceledException("internal operation canceled"));
+
+        await fixture.ViewModel.RemoveCommand.ExecuteAsync();
+
+        Assert.Equal("internal operation canceled", fixture.ViewModel.StatusText);
+        Assert.False(fixture.ViewModel.IsBusy);
     }
 
     private static CommandResult Succeeded() => new(0, string.Empty, string.Empty);
 
     private sealed class Fixture
     {
-        public Fixture()
+        public Fixture(IUiDispatcher? dispatcher = null)
         {
             First = Accounts.Record("first-key", "first@example.com", "First", "first-account");
             Second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
@@ -219,7 +371,7 @@ public sealed class MainWindowViewModelTests
             Registry = new AccountRegistry(3, First.AccountKey, [First, Second]);
             Registries.Enqueue(Registry);
             Dialog = new FakeDialogService();
-            Dispatcher = new ImmediateDispatcher();
+            Dispatcher = dispatcher ?? new ImmediateDispatcher();
             ViewModel = new MainWindowViewModel(
                 LoadRegistryAsync,
                 RefreshQuotaAsync,
@@ -250,6 +402,8 @@ public sealed class MainWindowViewModelTests
 
         public SwitchResult SwitchResult { get; set; } = new(false, "switch failed", true);
 
+        public Action? BeforeSwitchReturn { get; set; }
+
         public int LoadCallCount { get; private set; }
 
         public int QuotaRefreshCallCount { get; private set; }
@@ -262,7 +416,7 @@ public sealed class MainWindowViewModelTests
 
         public FakeDialogService Dialog { get; }
 
-        public ImmediateDispatcher Dispatcher { get; }
+        public IUiDispatcher Dispatcher { get; }
 
         public MainWindowViewModel ViewModel { get; }
 
@@ -317,6 +471,7 @@ public sealed class MainWindowViewModelTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             SwitchCallCount++;
+            BeforeSwitchReturn?.Invoke();
             return Task.FromResult(SwitchResult);
         }
     }
@@ -357,5 +512,68 @@ public sealed class MainWindowViewModelTests
             action();
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class ControllableDispatcher : IUiDispatcher
+    {
+        private DelayedInvocation? _nextInvocation;
+        private int _invocationsBeforeDelay;
+        private int _isDispatching;
+
+        public bool IsDispatching => Volatile.Read(ref _isDispatching) != 0;
+
+        public DelayedInvocation DelayNextInvocation() => DelayInvocation(1);
+
+        public DelayedInvocation DelayInvocation(int invocationNumber)
+        {
+            Assert.True(invocationNumber > 0);
+            var invocation = new DelayedInvocation();
+            Assert.Null(Interlocked.CompareExchange(ref _nextInvocation, invocation, null));
+            Volatile.Write(ref _invocationsBeforeDelay, invocationNumber - 1);
+            return invocation;
+        }
+
+        public async Task InvokeAsync(Action action, CancellationToken cancellationToken)
+        {
+            DelayedInvocation? delayed = null;
+            if (Volatile.Read(ref _nextInvocation) is not null &&
+                Interlocked.Decrement(ref _invocationsBeforeDelay) < 0)
+            {
+                delayed = Interlocked.Exchange(ref _nextInvocation, null);
+            }
+            if (delayed is not null)
+            {
+                delayed.MarkEntered();
+                await delayed.WaitForReleaseAsync(cancellationToken);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            Interlocked.Increment(ref _isDispatching);
+            try
+            {
+                action();
+            }
+            finally
+            {
+                Interlocked.Decrement(ref _isDispatching);
+            }
+        }
+    }
+
+    private sealed class DelayedInvocation
+    {
+        private readonly TaskCompletionSource _entered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task Entered => _entered.Task;
+
+        public void MarkEntered() => _entered.TrySetResult();
+
+        public void Release() => _release.TrySetResult();
+
+        public Task WaitForReleaseAsync(CancellationToken cancellationToken) =>
+            _release.Task.WaitAsync(cancellationToken);
     }
 }

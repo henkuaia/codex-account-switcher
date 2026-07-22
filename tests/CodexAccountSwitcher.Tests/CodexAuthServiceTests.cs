@@ -237,6 +237,59 @@ public sealed class CodexAuthServiceTests
     }
 
     [Theory]
+    [InlineData(false, "invalid-data")]
+    [InlineData(true, "invalid-data")]
+    [InlineData(false, "argument")]
+    [InlineData(true, "argument")]
+    [InlineData(false, "not-supported")]
+    [InlineData(true, "not-supported")]
+    public async Task Expected_staging_errors_return_failure_before_helper_start(
+        bool streaming,
+        string exceptionKind)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var stager = new FakeCodexCliStager
+        {
+            Exception = CreateStagingException(exceptionKind),
+        };
+        var service = CreateInjectedService(helperPath, directory.Path, runner, stager);
+
+        var result = streaming
+            ? await service.LoginAsync((_, _) => ValueTask.CompletedTask, default)
+            : await service.LoginAsync(default);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Codex CLI", result.StandardError, StringComparison.Ordinal);
+        Assert.Equal(1, stager.CallCount);
+        Assert.Equal(0, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Pre_cancelled_login_propagates_cancellation_before_helper_start(bool streaming)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var stager = new FakeCodexCliStager { Result = directory.Path };
+        var service = CreateInjectedService(helperPath, directory.Path, runner, stager);
+        using var cancellationSource = new CancellationTokenSource();
+        cancellationSource.Cancel();
+
+        var exception = await Assert.ThrowsAnyAsync<OperationCanceledException>(() => streaming
+            ? service.LoginAsync((_, _) => ValueTask.CompletedTask, cancellationSource.Token)
+            : service.LoginAsync(cancellationSource.Token));
+
+        Assert.Equal(cancellationSource.Token, exception.CancellationToken);
+        Assert.Equal(0, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
+    }
+
+    [Theory]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Login_adds_staged_cache_directory_to_child_path(bool streaming)
@@ -307,6 +360,14 @@ public sealed class CodexAuthServiceTests
             cliDirectory,
             runner,
             new FakeCodexCliStager { Result = cliDirectory });
+
+    private static Exception CreateStagingException(string exceptionKind) => exceptionKind switch
+    {
+        "invalid-data" => new InvalidDataException("invalid hash"),
+        "argument" => new ArgumentException("invalid path"),
+        "not-supported" => new NotSupportedException("unsupported path"),
+        _ => throw new InvalidOperationException(),
+    };
 
     private static CodexAuthService CreateInjectedService(
         string helperPath,

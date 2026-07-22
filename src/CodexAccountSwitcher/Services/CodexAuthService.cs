@@ -92,7 +92,9 @@ public sealed class CodexAuthService
                 _codexCliDirectory,
                 cancellationToken);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidDataException or
+            ArgumentException or NotSupportedException)
         {
             return CommandResult.Failed(CliStagingFailureMessage);
         }

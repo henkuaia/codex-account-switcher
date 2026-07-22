@@ -10,7 +10,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
 
         await service.SwitchAsync("main", default);
 
@@ -26,7 +26,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
 
         await service.LoginAsync(default);
 
@@ -42,7 +42,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
         ProcessOutputHandler outputHandler = (_, _) => ValueTask.CompletedTask;
 
         await service.LoginAsync(outputHandler, default);
@@ -59,7 +59,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
 
         await service.RemoveAsync(default);
 
@@ -76,7 +76,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
         var method = typeof(CodexAuthService).GetMethod(
             "RemoveAsync",
             [typeof(string), typeof(CancellationToken)]);
@@ -107,7 +107,7 @@ public sealed class CodexAuthServiceTests
                 "Authorization: Bearer output-token-secret",
                 "{\"access_token\":\"error-token-secret\"}"),
         };
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
 
         var result = command == "switch"
             ? await service.SwitchAsync("main", default)
@@ -125,7 +125,10 @@ public sealed class CodexAuthServiceTests
     {
         using var directory = new TemporaryDirectory();
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(Path.Combine(directory.Path, "missing.exe"), directory.Path, runner);
+        var service = CreateService(
+            Path.Combine(directory.Path, "missing.exe"),
+            directory.Path,
+            runner);
 
         var result = await service.SwitchAsync("main", default);
 
@@ -140,7 +143,7 @@ public sealed class CodexAuthServiceTests
     {
         using var directory = new TemporaryDirectory();
         var missingPath = Path.Combine(directory.Path, "missing", "codex-auth.exe");
-        var service = new CodexAuthService(missingPath, directory.Path, new FakeProcessRunner());
+        var service = CreateService(missingPath, directory.Path, new FakeProcessRunner());
         var method = typeof(CodexAuthService).GetMethod("CheckAvailability");
 
         Assert.NotNull(method);
@@ -161,7 +164,7 @@ public sealed class CodexAuthServiceTests
         Directory.CreateDirectory(cliDirectory);
         var parentPath = Environment.GetEnvironmentVariable("PATH");
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, cliDirectory, runner);
+        var service = CreateService(helperPath, cliDirectory, runner);
 
         await service.LoginAsync(default);
 
@@ -181,7 +184,7 @@ public sealed class CodexAuthServiceTests
         using var directory = new TemporaryDirectory();
         var helperPath = CreateHelper(directory);
         var runner = new FakeProcessRunner();
-        var service = new CodexAuthService(helperPath, directory.Path, runner);
+        var service = CreateService(helperPath, directory.Path, runner);
 
         switch (command)
         {
@@ -207,6 +210,110 @@ public sealed class CodexAuthServiceTests
             out var value));
         Assert.Equal("1", value);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Login_staging_failure_returns_before_helper_start(bool streaming)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var stager = new FakeCodexCliStager
+        {
+            Exception = new IOException("copy denied"),
+        };
+        var service = CreateInjectedService(helperPath, directory.Path, runner, stager);
+
+        var result = streaming
+            ? await service.LoginAsync((_, _) => ValueTask.CompletedTask, default)
+            : await service.LoginAsync(default);
+
+        Assert.False(result.Succeeded);
+        Assert.Contains("Codex CLI", result.StandardError, StringComparison.Ordinal);
+        Assert.Equal(1, stager.CallCount);
+        Assert.Equal(0, runner.CapturedCallCount);
+        Assert.Equal(0, runner.StreamingCallCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Login_adds_staged_cache_directory_to_child_path(bool streaming)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var sourceDirectory = Path.Combine(directory.Path, "package", "resources");
+        var cacheDirectory = Path.Combine(directory.Path, "cache", "codex-cli");
+        Directory.CreateDirectory(cacheDirectory);
+        var runner = new FakeProcessRunner();
+        var stager = new FakeCodexCliStager { Result = cacheDirectory };
+        var service = CreateInjectedService(helperPath, sourceDirectory, runner, stager);
+        var parentPath = Environment.GetEnvironmentVariable("PATH");
+
+        if (streaming)
+        {
+            await service.LoginAsync((_, _) => ValueTask.CompletedTask, default);
+        }
+        else
+        {
+            await service.LoginAsync(default);
+        }
+
+        Assert.Equal(sourceDirectory, stager.LastCliDirectory);
+        Assert.StartsWith(
+            string.Concat(Path.GetFullPath(cacheDirectory), Path.PathSeparator),
+            runner.LastRequest!.Environment!["PATH"],
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(streaming ? 1 : 0, runner.StreamingCallCount);
+        Assert.Equal(streaming ? 0 : 1, runner.CapturedCallCount);
+        Assert.Equal(parentPath, Environment.GetEnvironmentVariable("PATH"));
+    }
+
+    [Theory]
+    [InlineData("switch")]
+    [InlineData("remove")]
+    [InlineData("targeted-remove")]
+    public async Task Switch_and_remove_do_not_stage_codex_cli(string command)
+    {
+        using var directory = new TemporaryDirectory();
+        var helperPath = CreateHelper(directory);
+        var runner = new FakeProcessRunner();
+        var stager = new FakeCodexCliStager
+        {
+            Exception = new IOException("must not be observed"),
+        };
+        var service = CreateInjectedService(helperPath, directory.Path, runner, stager);
+
+        var result = command switch
+        {
+            "switch" => await service.SwitchAsync("main", default),
+            "remove" => await service.RemoveAsync(default),
+            "targeted-remove" => await service.RemoveAsync("main", default),
+            _ => throw new InvalidOperationException(),
+        };
+
+        Assert.True(result.Succeeded);
+        Assert.Equal(0, stager.CallCount);
+        Assert.NotNull(runner.LastRequest);
+    }
+
+    private static CodexAuthService CreateService(
+        string helperPath,
+        string cliDirectory,
+        IProcessRunner runner) =>
+        CreateInjectedService(
+            helperPath,
+            cliDirectory,
+            runner,
+            new FakeCodexCliStager { Result = cliDirectory });
+
+    private static CodexAuthService CreateInjectedService(
+        string helperPath,
+        string cliDirectory,
+        IProcessRunner runner,
+        ICodexCliStager stager) =>
+        new(helperPath, cliDirectory, runner, stager);
 
     private static string CreateHelper(TemporaryDirectory directory)
     {
@@ -256,6 +363,30 @@ public sealed class CodexAuthServiceTests
             LastRequest = request;
             StreamingCallCount++;
             return Task.FromResult(CapturedResult);
+        }
+    }
+
+    private sealed class FakeCodexCliStager : ICodexCliStager
+    {
+        public int CallCount { get; private set; }
+
+        public Exception? Exception { get; init; }
+
+        public string? LastCliDirectory { get; private set; }
+
+        public string Result { get; init; } = string.Empty;
+
+        public Task<string> StageAsync(string cliDirectory, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
+            LastCliDirectory = cliDirectory;
+            if (Exception is not null)
+            {
+                return Task.FromException<string>(Exception);
+            }
+
+            return Task.FromResult(Result);
         }
     }
 }

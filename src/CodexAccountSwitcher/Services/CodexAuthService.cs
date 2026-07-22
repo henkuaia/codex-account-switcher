@@ -9,18 +9,34 @@ public sealed class CodexAuthService
 {
     private const string HelperFileName = "codex-auth.exe";
     private const string SkipServiceReconcileVariable = "CODEX_AUTH_SKIP_SERVICE_RECONCILE";
+    private const string CliStagingFailureMessage = "The Codex CLI could not be prepared.";
     private readonly string _helperPath;
     private readonly string _codexCliDirectory;
+    private readonly ICodexCliStager _codexCliStager;
     private readonly IProcessRunner _processRunner;
 
     public CodexAuthService(string helperPath, string codexCliDirectory, IProcessRunner? processRunner = null)
+        : this(
+            helperPath,
+            codexCliDirectory,
+            processRunner ?? new ProcessRunner(),
+            new CodexCliStager())
+    {
+    }
+
+    internal CodexAuthService(
+        string helperPath,
+        string codexCliDirectory,
+        IProcessRunner processRunner,
+        ICodexCliStager codexCliStager)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(helperPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(codexCliDirectory);
 
         _helperPath = helperPath;
         _codexCliDirectory = codexCliDirectory;
-        _processRunner = processRunner ?? new ProcessRunner();
+        _processRunner = processRunner ?? throw new ArgumentNullException(nameof(processRunner));
+        _codexCliStager = codexCliStager ?? throw new ArgumentNullException(nameof(codexCliStager));
     }
 
     public Task<CommandResult> SwitchAsync(string selector, CancellationToken cancellationToken)
@@ -65,13 +81,25 @@ public sealed class CodexAuthService
         return LoginAsyncCore(outputHandler, cancellationToken);
     }
 
-    private Task<CommandResult> LoginAsyncCore(
+    private async Task<CommandResult> LoginAsyncCore(
         ProcessOutputHandler? outputHandler,
         CancellationToken cancellationToken)
     {
-        if (!TryResolveCliDirectory(out var cliDirectory))
+        string stagedCliDirectory;
+        try
         {
-            return Task.FromResult(CommandResult.Failed("The Codex CLI directory is unavailable."));
+            stagedCliDirectory = await _codexCliStager.StageAsync(
+                _codexCliDirectory,
+                cancellationToken);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return CommandResult.Failed(CliStagingFailureMessage);
+        }
+
+        if (!TryResolveCliDirectory(stagedCliDirectory, out var cliDirectory))
+        {
+            return CommandResult.Failed("The Codex CLI directory is unavailable.");
         }
 
         var path = Environment.GetEnvironmentVariable("PATH");
@@ -81,8 +109,12 @@ public sealed class CodexAuthService
         var environment = CreateMutationEnvironment(childPath);
 
         return outputHandler is null
-            ? RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken)
-            : RunCapturedAsync(["login", "--device-auth"], environment, outputHandler, cancellationToken);
+            ? await RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken)
+            : await RunCapturedAsync(
+                ["login", "--device-auth"],
+                environment,
+                outputHandler,
+                cancellationToken);
     }
 
     public async Task<CommandResult> RemoveAsync(CancellationToken cancellationToken)
@@ -173,12 +205,12 @@ public sealed class CodexAuthService
         return availability.IsAvailable;
     }
 
-    private bool TryResolveCliDirectory(out string cliDirectory)
+    private static bool TryResolveCliDirectory(string requestedDirectory, out string cliDirectory)
     {
         cliDirectory = string.Empty;
         try
         {
-            cliDirectory = Path.GetFullPath(_codexCliDirectory);
+            cliDirectory = Path.GetFullPath(requestedDirectory);
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
         {

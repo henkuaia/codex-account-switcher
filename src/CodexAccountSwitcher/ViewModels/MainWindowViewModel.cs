@@ -262,15 +262,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task LoadRegistryAsync(CancellationToken cancellationToken)
     {
         var availability = _checkHelperAvailability();
-        AccountRegistry registry;
-        try
-        {
-            registry = await _loadRegistryAsync(cancellationToken);
-        }
-        catch (System.IO.InvalidDataException)
-        {
-            registry = AccountRegistry.Empty;
-        }
+        var registry = await LoadRegistryOrEmptyAsync(cancellationToken);
 
         await _dispatcher.InvokeAsync(
             () =>
@@ -338,7 +330,7 @@ public sealed class MainWindowViewModel : ObservableObject
             result.HelperAvailability,
             CancellationToken.None);
 
-        var registry = await _loadRegistryAsync(CancellationToken.None);
+        var registry = await LoadRegistryOrEmptyAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
@@ -376,7 +368,7 @@ public sealed class MainWindowViewModel : ObservableObject
             result.HelperAvailability,
             CancellationToken.None);
 
-        var registry = await _loadRegistryAsync(CancellationToken.None);
+        var registry = await LoadRegistryOrEmptyAsync(CancellationToken.None);
         await _dispatcher.InvokeAsync(
             () =>
             {
@@ -427,7 +419,7 @@ public sealed class MainWindowViewModel : ObservableObject
 
         if (result.Succeeded)
         {
-            var registry = await _loadRegistryAsync(CancellationToken.None);
+            var registry = await LoadRegistryOrEmptyAsync(CancellationToken.None);
             await _dispatcher.InvokeAsync(
                 () =>
                 {
@@ -468,6 +460,18 @@ public sealed class MainWindowViewModel : ObservableObject
             () => ApplyHelperAvailability(availability),
             cancellationToken);
         return availability.IsAvailable;
+    }
+
+    private async Task<AccountRegistry> LoadRegistryOrEmptyAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _loadRegistryAsync(cancellationToken);
+        }
+        catch (System.IO.InvalidDataException)
+        {
+            return AccountRegistry.Empty;
+        }
     }
 
     private async Task<bool> ApplyResultHelperAvailabilityAsync(

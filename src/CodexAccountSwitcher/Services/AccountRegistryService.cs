@@ -58,12 +58,14 @@ public sealed class AccountRegistryService
             Array.AsReadOnly(accounts.ToArray()));
     }
 
-    private static List<AccountRecord> LoadCurrentAccounts(IReadOnlyList<AccountDto> registryAccounts)
+    private static List<AccountRecord> LoadCurrentAccounts(IReadOnlyList<AccountDto?> registryAccounts)
     {
         var accounts = new List<AccountRecord>();
         foreach (var account in registryAccounts)
         {
-            if (string.IsNullOrWhiteSpace(account.AccountKey) || string.IsNullOrWhiteSpace(account.Email))
+            if (account is null ||
+                string.IsNullOrWhiteSpace(account.AccountKey) ||
+                string.IsNullOrWhiteSpace(account.Email))
             {
                 throw new InvalidDataException("The account registry contains an invalid account.");
             }
@@ -84,14 +86,14 @@ public sealed class AccountRegistryService
 
     private static async Task<List<AccountRecord>> LoadLegacyAccountsAsync(
         string codexHome,
-        IReadOnlyList<AccountDto> registryAccounts,
+        IReadOnlyList<AccountDto?> registryAccounts,
         CancellationToken cancellationToken)
     {
         var accounts = new List<AccountRecord>();
         var emails = new HashSet<string>(StringComparer.Ordinal);
         foreach (var account in registryAccounts)
         {
-            if (string.IsNullOrWhiteSpace(account.Email))
+            if (account is null || string.IsNullOrWhiteSpace(account.Email))
             {
                 throw new InvalidDataException("The account registry contains an invalid account.");
             }
@@ -251,7 +253,7 @@ public sealed class AccountRegistryService
         public string? ActiveEmail { get; init; }
 
         [JsonPropertyName("accounts")]
-        public List<AccountDto>? Accounts { get; init; }
+        public List<AccountDto?>? Accounts { get; init; }
     }
 
     private sealed class AccountDto

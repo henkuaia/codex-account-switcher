@@ -208,6 +208,18 @@ public sealed class AccountRegistryServiceTests
             () => new AccountRegistryService().LoadAsync(home.Path, default));
     }
 
+    [Theory]
+    [InlineData("{\"version\": 2, \"accounts\": [null]}")]
+    [InlineData("{\"schema_version\": 3, \"accounts\": [null]}")]
+    public async Task Registry_account_null_element_throws_invalid_data(string registryJson)
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", registryJson);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => new AccountRegistryService().LoadAsync(home.Path, default));
+    }
+
     [Fact]
     public async Task Current_v3_unknown_active_account_key_throws_invalid_data()
     {

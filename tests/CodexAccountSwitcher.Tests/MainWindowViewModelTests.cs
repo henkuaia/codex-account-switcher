@@ -630,6 +630,25 @@ public sealed class MainWindowViewModelTests
         Assert.Single(fixture.ViewModel.Accounts);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Login_and_removal_invalid_registry_reload_replaces_existing_rows_with_empty_state(
+        bool login)
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        fixture.LoadRegistryOperation = _ => Task.FromException<AccountRegistry>(
+            new System.IO.InvalidDataException("registry is invalid"));
+
+        var command = login ? fixture.ViewModel.AddCommand : fixture.ViewModel.RemoveCommand;
+        await command.ExecuteAsync();
+
+        Assert.Equal(2, fixture.LoadCallCount);
+        Assert.Empty(fixture.ViewModel.Accounts);
+        Assert.True(fixture.ViewModel.AddCommand.CanExecute(null));
+    }
+
     [Fact]
     public async Task Canceled_removal_selection_never_calls_remove_or_reloads_registry()
     {

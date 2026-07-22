@@ -30,7 +30,7 @@ public sealed class AuthStateTransactionTests
     {
         using var home = new TemporaryDirectory();
         WriteBytes(home.Path, "accounts/notes.json", [7, 8, 9]);
-        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        using var transaction = await AuthStateTransaction.CaptureForLoginAsync(home.Path, default);
         WriteBytes(home.Path, "accounts/new-account.auth.json", [1, 2, 3]);
 
         var restored = await transaction.RestoreAndVerifyAsync(default);
@@ -46,7 +46,7 @@ public sealed class AuthStateTransactionTests
         using var home = new TemporaryDirectory();
         var originalSnapshot = new byte[] { 0, 17, 34, 255 };
         WriteBytes(home.Path, "accounts/existing.auth.json", originalSnapshot);
-        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        using var transaction = await AuthStateTransaction.CaptureForLoginAsync(home.Path, default);
         WriteBytes(home.Path, "accounts/existing.auth.json", [9, 8, 7]);
 
         var restored = await transaction.RestoreAndVerifyAsync(default);
@@ -63,7 +63,7 @@ public sealed class AuthStateTransactionTests
         using var home = new TemporaryDirectory();
         var originalSnapshot = new byte[] { 255, 34, 17, 0 };
         WriteBytes(home.Path, "accounts/existing.auth.json", originalSnapshot);
-        using var transaction = await AuthStateTransaction.CaptureAsync(home.Path, default);
+        using var transaction = await AuthStateTransaction.CaptureForLoginAsync(home.Path, default);
         File.Delete(Path.Combine(home.Path, "accounts", "existing.auth.json"));
 
         var restored = await transaction.RestoreAndVerifyAsync(default);
@@ -72,6 +72,45 @@ public sealed class AuthStateTransactionTests
         Assert.Equal(
             originalSnapshot,
             File.ReadAllBytes(Path.Combine(home.Path, "accounts", "existing.auth.json")));
+    }
+
+    [Fact]
+    public async Task Switch_transaction_capture_ignores_unreadable_account_snapshot()
+    {
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            EnumerationException = new IOException("simulated unreadable snapshot"),
+        };
+
+        using var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
+
+        Assert.Empty(fileSystem.RestoreOperations);
+    }
+
+    [Fact]
+    public async Task Failed_switch_rollback_does_not_touch_changed_or_new_account_snapshots()
+    {
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            Files =
+            {
+                ["home/auth.json"] = [1],
+                ["home/accounts/registry.json"] = [2],
+                ["home/accounts/existing.auth.json"] = [3],
+            },
+        };
+        using var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
+        fileSystem.Files["home/accounts/existing.auth.json"] = [4];
+        fileSystem.Files["home/accounts/new.auth.json"] = [5];
+
+        var restored = await transaction.RestoreAndVerifyAsync(default);
+
+        Assert.True(restored);
+        Assert.Equal([4], fileSystem.Files["home/accounts/existing.auth.json"]);
+        Assert.Equal([5], fileSystem.Files["home/accounts/new.auth.json"]);
+        Assert.DoesNotContain(
+            fileSystem.RestoreOperations,
+            operation => operation.EndsWith(".auth.json", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -123,7 +162,10 @@ public sealed class AuthStateTransactionTests
                 ["home/accounts/existing.auth.json"] = [1, 2, 3],
             },
         };
-        using var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
+        using var transaction = await AuthStateTransaction.CaptureForLoginAsync(
+            "home",
+            fileSystem,
+            default);
         fileSystem.Files["home/accounts/existing.auth.json"] = [9];
         fileSystem.CorruptAfterRestorePath = "home/accounts/existing.auth.json";
 
@@ -133,6 +175,54 @@ public sealed class AuthStateTransactionTests
         Assert.Contains(
             "write:home/accounts/existing.auth.json",
             fileSystem.RestoreOperations);
+    }
+
+    [Fact]
+    public async Task Login_capture_duplicate_snapshot_path_fails_and_clears_every_returned_buffer()
+    {
+        const string snapshotPath = "home/accounts/existing.auth.json";
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            Files =
+            {
+                [snapshotPath] = [1, 2, 3],
+            },
+            AccountSnapshotPaths = [snapshotPath, snapshotPath],
+        };
+
+        var exception = await Assert.ThrowsAsync<AuthStateCheckpointException>(
+            () => AuthStateTransaction.CaptureForLoginAsync("home", fileSystem, default));
+
+        Assert.Equal("Authentication state checkpoint failed.", exception.Message);
+        Assert.Equal(2, fileSystem.ReturnedBuffers.Count);
+        Assert.All(
+            fileSystem.ReturnedBuffers,
+            buffer => Assert.All(buffer, value => Assert.Equal((byte)0, value)));
+    }
+
+    [Fact]
+    public async Task Login_capture_case_variant_snapshot_paths_fail_and_clear_every_returned_buffer()
+    {
+        const string firstPath = "home/accounts/existing.auth.json";
+        const string secondPath = "home/accounts/EXISTING.auth.json";
+        var fileSystem = new FakeAuthStateFileSystem
+        {
+            Files =
+            {
+                [firstPath] = [1, 2, 3],
+                [secondPath] = [4, 5, 6],
+            },
+            AccountSnapshotPaths = [firstPath, secondPath],
+        };
+
+        var exception = await Assert.ThrowsAsync<AuthStateCheckpointException>(
+            () => AuthStateTransaction.CaptureForLoginAsync("home", fileSystem, default));
+
+        Assert.Equal("Authentication state checkpoint failed.", exception.Message);
+        Assert.Equal(2, fileSystem.ReturnedBuffers.Count);
+        Assert.All(
+            fileSystem.ReturnedBuffers,
+            buffer => Assert.All(buffer, value => Assert.Equal((byte)0, value)));
     }
 
     [Fact]
@@ -214,7 +304,10 @@ public sealed class AuthStateTransactionTests
                 ["home/accounts/existing.auth.json"] = [8, 9, 10],
             },
         };
-        var transaction = await AuthStateTransaction.CaptureAsync("home", fileSystem, default);
+        var transaction = await AuthStateTransaction.CaptureForLoginAsync(
+            "home",
+            fileSystem,
+            default);
         var buffers = typeof(AuthStateTransaction)
             .GetFields(BindingFlags.Instance | BindingFlags.NonPublic)
             .Where(field => field.FieldType == typeof(byte[]))
@@ -261,8 +354,24 @@ public sealed class AuthStateTransactionTests
 
         public string? CorruptAfterRestorePath { get; set; }
 
+        public Exception? EnumerationException { get; set; }
+
+        public IReadOnlyList<string>? AccountSnapshotPaths { get; set; }
+
+        public List<byte[]> ReturnedBuffers { get; } = [];
+
         public IReadOnlyList<string> EnumerateAccountSnapshotPaths(string accountsPath)
         {
+            if (EnumerationException is not null)
+            {
+                throw EnumerationException;
+            }
+
+            if (AccountSnapshotPaths is not null)
+            {
+                return AccountSnapshotPaths;
+            }
+
             var normalizedAccountsPath = Normalize(accountsPath).TrimEnd('/') + "/";
             return Files.Keys
                 .Where(path => path.StartsWith(normalizedAccountsPath, StringComparison.Ordinal) &&
@@ -291,6 +400,7 @@ public sealed class AuthStateTransactionTests
             }
 
             var returned = bytes.ToArray();
+            ReturnedBuffers.Add(returned);
             if (_readCount == 1)
             {
                 FirstReturnedBuffer = returned;

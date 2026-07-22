@@ -381,7 +381,7 @@ public sealed class SafeLoginCoordinator
     private static async Task<IAuthStateCheckpoint> CaptureAuthStateAsync(
         string codexHome,
         CancellationToken cancellationToken) =>
-        await AuthStateTransaction.CaptureAsync(codexHome, cancellationToken);
+        await AuthStateTransaction.CaptureForLoginAsync(codexHome, cancellationToken);
 
     private enum LoginStage
     {

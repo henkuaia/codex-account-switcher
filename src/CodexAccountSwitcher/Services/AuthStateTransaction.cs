@@ -36,6 +36,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
     private readonly Dictionary<string, byte[]> _accountSnapshots;
     private readonly bool _authExisted;
     private readonly bool _registryExisted;
+    private readonly bool _includeAccountSnapshots;
     private bool _disposed;
 
     private AuthStateTransaction(
@@ -45,6 +46,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
         byte[]? registryBytes,
         string accountsPath,
         Dictionary<string, byte[]> accountSnapshots,
+        bool includeAccountSnapshots,
         IAuthStateFileSystem fileSystem)
     {
         _authPath = authPath;
@@ -53,6 +55,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
         _registryBytes = registryBytes;
         _accountsPath = accountsPath;
         _accountSnapshots = accountSnapshots;
+        _includeAccountSnapshots = includeAccountSnapshots;
         _fileSystem = fileSystem;
         _authExisted = authBytes is not null;
         _registryExisted = registryBytes is not null;
@@ -61,11 +64,45 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
     public static Task<AuthStateTransaction> CaptureAsync(
         string codexHome,
         CancellationToken cancellationToken) =>
-        CaptureAsync(codexHome, new AuthStateFileSystem(), cancellationToken);
+        CaptureAsync(
+            codexHome,
+            new AuthStateFileSystem(),
+            includeAccountSnapshots: false,
+            cancellationToken);
 
-    internal static async Task<AuthStateTransaction> CaptureAsync(
+    internal static Task<AuthStateTransaction> CaptureForLoginAsync(
+        string codexHome,
+        CancellationToken cancellationToken) =>
+        CaptureAsync(
+            codexHome,
+            new AuthStateFileSystem(),
+            includeAccountSnapshots: true,
+            cancellationToken);
+
+    internal static Task<AuthStateTransaction> CaptureAsync(
         string codexHome,
         IAuthStateFileSystem fileSystem,
+        CancellationToken cancellationToken) =>
+        CaptureAsync(
+            codexHome,
+            fileSystem,
+            includeAccountSnapshots: false,
+            cancellationToken);
+
+    internal static Task<AuthStateTransaction> CaptureForLoginAsync(
+        string codexHome,
+        IAuthStateFileSystem fileSystem,
+        CancellationToken cancellationToken) =>
+        CaptureAsync(
+            codexHome,
+            fileSystem,
+            includeAccountSnapshots: true,
+            cancellationToken);
+
+    private static async Task<AuthStateTransaction> CaptureAsync(
+        string codexHome,
+        IAuthStateFileSystem fileSystem,
+        bool includeAccountSnapshots,
         CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(codexHome);
@@ -82,15 +119,27 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             var registryPath = Path.Combine(accountsPath, "registry.json");
             authBytes = await fileSystem.ReadAsync(authPath, cancellationToken);
             registryBytes = await fileSystem.ReadAsync(registryPath, cancellationToken);
-            foreach (var snapshotPath in fileSystem.EnumerateAccountSnapshotPaths(accountsPath))
+            if (includeAccountSnapshots)
             {
-                var snapshotBytes = await fileSystem.ReadAsync(snapshotPath, cancellationToken);
-                if (snapshotBytes is null)
+                foreach (var snapshotPath in fileSystem.EnumerateAccountSnapshotPaths(accountsPath))
                 {
-                    throw new IOException("An account snapshot changed during checkpoint capture.");
-                }
+                    byte[]? snapshotBytes = null;
+                    try
+                    {
+                        snapshotBytes = await fileSystem.ReadAsync(snapshotPath, cancellationToken);
+                        if (snapshotBytes is null)
+                        {
+                            throw new IOException("An account snapshot changed during checkpoint capture.");
+                        }
 
-                accountSnapshots.Add(snapshotPath, snapshotBytes);
+                        accountSnapshots.Add(snapshotPath, snapshotBytes);
+                        snapshotBytes = null;
+                    }
+                    finally
+                    {
+                        Clear(snapshotBytes);
+                    }
+                }
             }
 
             var transaction = new AuthStateTransaction(
@@ -100,6 +149,7 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
                 registryBytes,
                 accountsPath,
                 accountSnapshots,
+                includeAccountSnapshots,
                 fileSystem);
             ownershipTransferred = true;
             return transaction;
@@ -137,7 +187,8 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             _registryExisted,
             _registryBytes,
             cancellationToken);
-        var snapshotsRestored = await TryRestoreAccountSnapshotsAsync(cancellationToken);
+        var snapshotsRestored = !_includeAccountSnapshots ||
+            await TryRestoreAccountSnapshotsAsync(cancellationToken);
 
         byte[]? currentAuth = null;
         byte[]? currentRegistry = null;
@@ -147,7 +198,8 @@ internal sealed class AuthStateTransaction : IAuthStateCheckpoint
             currentAuth = authRead.Bytes;
             var registryRead = await TryReadAsync(_registryPath, cancellationToken);
             currentRegistry = registryRead.Bytes;
-            var snapshotsMatch = await TryAccountSnapshotsMatchAsync(cancellationToken);
+            var snapshotsMatch = !_includeAccountSnapshots ||
+                await TryAccountSnapshotsMatchAsync(cancellationToken);
 
             return authRestored &&
                 registryRestored &&

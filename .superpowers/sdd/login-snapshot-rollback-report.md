@@ -102,3 +102,91 @@ SHA here would change the commit object).
 - Concurrent external mutation during checkpoint capture was not exercised; the
   transaction fails closed if an enumerated snapshot disappears before its bytes
   are read.
+
+---
+
+## Review Fix Follow-up
+
+### Findings
+
+The first implementation made the shared default transaction snapshot-aware.
+Because `SafeSwitchCoordinator` also uses that default, switch capture gained
+new snapshot reads and failures, while failed switch rollback gained snapshot
+writes and deletes. The login-only scope was therefore not preserved.
+
+The snapshot capture loop also read each byte array before inserting it into an
+`OrdinalIgnoreCase` dictionary. If `Add` rejected an exact duplicate or
+case-variant path, the second array had not transferred ownership to the
+dictionary and escaped the outer dictionary-value cleanup.
+
+### Review RED
+
+SafeSwitch transaction boundary:
+
+```powershell
+& '.\.tools\dotnet\dotnet.exe' test '.\tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj' --configuration Release --filter 'FullyQualifiedName~Switch_transaction_capture_ignores_unreadable_account_snapshot|FullyQualifiedName~Failed_switch_rollback_does_not_touch_changed_or_new_account_snapshots' --no-restore
+```
+
+Result: 0 passed, 2 failed as expected. Snapshot enumeration raised the fixed
+checkpoint exception, and failed-switch rollback restored a changed snapshot
+instead of leaving it untouched.
+
+Duplicate-path buffer ownership:
+
+```powershell
+& '.\.tools\dotnet\dotnet.exe' test '.\tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj' --configuration Release --filter 'FullyQualifiedName~Login_capture_duplicate_snapshot_path|FullyQualifiedName~Login_capture_case_variant_snapshot_paths' --no-restore
+```
+
+Result: 0 passed, 2 failed as expected. Both cases produced the fixed exception,
+but the second of two returned snapshot buffers retained nonzero bytes.
+
+### Review Fix
+
+- Restored `AuthStateTransaction.CaptureAsync` to the original two-file
+  `auth.json` plus `accounts/registry.json` transaction used by SafeSwitch.
+- Added explicit `CaptureForLoginAsync` overloads that enable account-snapshot
+  capture and changed only `SafeLoginCoordinator` to use them.
+- Snapshot restore and verification are skipped entirely in the default mode,
+  so failed switches do not enumerate, rewrite, or delete account snapshots.
+- Added per-iteration ownership transfer. A snapshot buffer is nulled only after
+  successful dictionary insertion; otherwise its local `finally` clears it.
+  `OrdinalIgnoreCase` identity and the fixed checkpoint error remain unchanged.
+
+### Review GREEN
+
+Switch boundary plus the three original login rollback cases: 5 passed, 0
+failed, 0 skipped.
+
+Duplicate and case-variant buffer tests: 2 passed, 0 failed, 0 skipped.
+
+Relevant transaction and coordinator suites:
+
+```powershell
+& '.\.tools\dotnet\dotnet.exe' test '.\tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj' --configuration Release --filter 'FullyQualifiedName~AuthStateTransactionTests|FullyQualifiedName~SafeLoginCoordinatorTests|FullyQualifiedName~SafeSwitchCoordinatorTests' --no-restore
+```
+
+Result: 80 passed, 0 failed, 0 skipped.
+
+Full Release solution:
+
+```powershell
+& '.\.tools\dotnet\dotnet.exe' test '.\CodexAccountSwitcher.sln' --configuration Release --no-restore
+```
+
+Result: 347 passed, 0 failed, 0 skipped. `git diff --check` exited 0 and
+emitted only LF-to-CRLF working-copy warnings.
+
+### Review Secret Handling
+
+Exact duplicate and case-variant paths fail with
+`Authentication state checkpoint failed.`. Tests retain references to every
+synthetic array returned by the fake file system and verify that all bytes,
+including the rejected second buffer, are zero after capture fails. No snapshot
+bytes or paths are added to UI, logs, exception messages, or this report.
+
+### Review Commit and Unverified
+
+The follow-up is committed separately from `1270412`; its final SHA is supplied
+in the task handoff. No real Codex login, quota, switch, removal, or file access
+under `C:\Users\demax\.codex` was performed. Startup, UI, minor-version behavior,
+and manual WPF runtime interaction remain outside the verified scope.

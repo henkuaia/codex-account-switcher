@@ -29,6 +29,8 @@ public sealed record QuotaDisplay(
 
 public sealed record WeeklyQuotaEstimate(decimal LowerUsd, decimal UpperUsd);
 
+public sealed record PeriodQuotaEstimate(decimal LowerUsd, decimal UpperUsd);
+
 public sealed record QuotaParseResult(QuotaDisplay? Display, string? Error)
 {
     public static QuotaParseResult Success(QuotaDisplay? display) => new(display, null);

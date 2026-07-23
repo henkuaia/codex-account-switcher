@@ -69,6 +69,7 @@ public sealed class WpfRuntimeTests
                 var viewModel = CreateViewModel(registry);
                 await viewModel.LoadAsync();
                 mainWindow = new MainWindow(viewModel);
+                Assert.True(mainWindow.ShowInTaskbar);
                 mainWindow.Show();
                 await mainWindow.Dispatcher.InvokeAsync(
                     static () => { },
@@ -162,6 +163,7 @@ public sealed class WpfRuntimeTests
                 confirmationWindow.Close();
 
                 localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                Assert.False(localizedWindow.ShowInTaskbar);
                 var localizedFirstRender = localizedWindow.ShowAndWaitForFirstRenderAsync(CancellationToken.None);
                 Assert.False(localizedFirstRender.IsCompleted);
                 await localizedFirstRender.WaitAsync(TimeSpan.FromSeconds(5));

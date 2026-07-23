@@ -16,7 +16,7 @@
         AllowsTransparency="True"
         ResizeMode="NoResize"
         Background="Transparent"
-        ShowInTaskbar="False"
+        ShowInTaskbar="True"
         Closing="Window_Closing">
     <Border Background="{StaticResource SurfaceBrush}"
             BorderBrush="{StaticResource BorderBrush}"

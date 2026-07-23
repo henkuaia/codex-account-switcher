@@ -31,7 +31,7 @@
 - Returns `false` for an invalid root, missing `credits` array, or a redeemed item with a missing/invalid `redeemed_at`.
 - Returns `true` and `null` when the response is valid but has no redeemed credit inside the requested window.
 
-- [ ] **Step 1: Add failing parser tests**
+- [x] **Step 1: Add failing parser tests**
 
 Cover these concrete cases:
 
@@ -61,7 +61,7 @@ public void Finds_latest_redeemed_credit_inside_window()
 
 Also assert that an empty valid array returns `true`/`null`, while malformed JSON and redeemed entries without a valid timestamp return `false`.
 
-- [ ] **Step 2: Run the parser tests and verify RED**
+- [x] **Step 2: Run the parser tests and verify RED**
 
 Run:
 
@@ -71,7 +71,7 @@ Run:
 
 Expected: compilation fails because `ResetCreditHistoryParser` does not exist.
 
-- [ ] **Step 3: Implement the minimal parser**
+- [x] **Step 3: Implement the minimal parser**
 
 Implement one static parser that:
 
@@ -85,7 +85,7 @@ public static bool TryFindLatestRedeemedAt(
 
 It must require a root object with a `credits` array, compare `status` to `redeemed` case-insensitively, parse `redeemed_at` with invariant round-trip rules, and choose the latest timestamp in the inclusive `[windowStart, serverNow]` interval.
 
-- [ ] **Step 4: Run the parser tests and verify GREEN**
+- [x] **Step 4: Run the parser tests and verify GREEN**
 
 Run the command from Step 2.
 
@@ -107,7 +107,7 @@ Expected: all `ResetCreditHistoryParserTests` pass.
 - Produces: `PeriodQuotaEstimator.TryEstimate(string json, double usedPercent, DateOnly segmentStartDate, bool includeStartDayInLower)`.
 - Keeps `WeeklyQuotaEstimator.TryEstimate(...)` and `WeeklyQuotaEstimate` backward compatible by delegating to the shared estimator with `includeStartDayInLower: false`.
 
-- [ ] **Step 1: Add failing period-estimator tests**
+- [x] **Step 1: Add failing period-estimator tests**
 
 Use 25% usage with 50 Credits on the boundary day and 100 Credits afterwards:
 
@@ -124,7 +124,7 @@ Assert.Equal(24m, range.UpperUsd);
 
 With `includeStartDayInLower: true`, assert both bounds are `US$24`. Keep the existing invalid-percentage, invalid-JSON, and Weekly range expectations unchanged.
 
-- [ ] **Step 2: Run focused estimator tests and verify RED**
+- [x] **Step 2: Run focused estimator tests and verify RED**
 
 Run:
 
@@ -134,7 +134,7 @@ Run:
 
 Expected: compilation fails because the shared estimator and result type do not exist.
 
-- [ ] **Step 3: Implement the shared estimator and Weekly wrapper**
+- [x] **Step 3: Implement the shared estimator and Weekly wrapper**
 
 Move the existing Credits parsing and `1000 Credits = US$40` conversion into `PeriodQuotaEstimator`. Calculate:
 
@@ -147,7 +147,7 @@ lowerCredits = includeStartDayInLower
 
 Divide each bound by `usedPercent / 100`, convert to USD, and round to two decimals. Make `WeeklyQuotaEstimator` delegate with `includeStartDayInLower: false`.
 
-- [ ] **Step 4: Run focused estimator tests and verify GREEN**
+- [x] **Step 4: Run focused estimator tests and verify GREEN**
 
 Run the command from Step 2.
 
@@ -167,7 +167,7 @@ Expected: all period and Weekly estimator tests pass with unchanged Weekly value
 - Adds a best-effort authenticated GET to `https://chatgpt.com/backend-api/wham/rate-limit-reset-credits` only for eligible Monthly windows.
 - Preserves `QuotaDisplay.EstimatedPeriodQuotaLowerUsd` and `EstimatedPeriodQuotaUpperUsd` as the UI contract.
 
-- [ ] **Step 1: Add failing Monthly service tests**
+- [x] **Step 1: Add failing Monthly service tests**
 
 Add tests proving:
 
@@ -179,7 +179,7 @@ Add tests proving:
 
 Assert the Monthly Analytics URL uses the latest redeemed date and an exclusive server-current-date-plus-one end date.
 
-- [ ] **Step 2: Run QuotaService tests and verify RED**
+- [x] **Step 2: Run QuotaService tests and verify RED**
 
 Run:
 
@@ -189,7 +189,7 @@ Run:
 
 Expected: the new Monthly request-count and estimate assertions fail.
 
-- [ ] **Step 3: Implement the Monthly service path**
+- [x] **Step 3: Implement the Monthly service path**
 
 Keep the existing Weekly path unchanged. For Monthly:
 
@@ -202,7 +202,7 @@ includeStartDayInLower = segmentStart UTC time is exactly 00:00:00
 
 Return the original `QuotaDisplay` on timeout, HTTP failure, invalid reset history, invalid Analytics, or a zero/inconsistent estimate. Reuse authenticated request construction and redaction behavior.
 
-- [ ] **Step 4: Run QuotaService tests and verify GREEN**
+- [x] **Step 4: Run QuotaService tests and verify GREEN**
 
 Run the command from Step 2.
 
@@ -222,11 +222,11 @@ Expected: all QuotaService tests pass.
 - Produces: `估算单次月额度：产生用量后可计算` for zero usage.
 - Produces: `估算单次月额度：暂不可用` when an eligible Monthly response has no estimate.
 
-- [ ] **Step 1: Add failing view-model tests**
+- [x] **Step 1: Add failing view-model tests**
 
 Create Monthly `QuotaDisplay` cases for a range, an equal-bound value, zero usage, and unavailable estimate. Assert `HasEstimatedPeriodQuotaText` is true and the exact Chinese text matches the interface above. Keep all Weekly assertions unchanged.
 
-- [ ] **Step 2: Run view-model tests and verify RED**
+- [x] **Step 2: Run view-model tests and verify RED**
 
 Run:
 
@@ -236,11 +236,11 @@ Run:
 
 Expected: Monthly estimate visibility/text assertions fail.
 
-- [ ] **Step 3: Implement period-specific estimate text**
+- [x] **Step 3: Implement period-specific estimate text**
 
 Extend only `UpdateMetadataDisplay()` so Weekly and Monthly share the existing estimate fields but render period-specific Chinese labels. Do not change XAML layout.
 
-- [ ] **Step 4: Run view-model tests and verify GREEN**
+- [x] **Step 4: Run view-model tests and verify GREEN**
 
 Run the command from Step 2.
 
@@ -260,7 +260,7 @@ Expected: all focused tests pass.
 - Replaces only the installed application binaries after a successful publish.
 - Keeps the local feature branch and pushes its HEAD to remote `main`.
 
-- [ ] **Step 1: Run the complete Release suite**
+- [x] **Step 1: Run the complete Release suite**
 
 Run:
 
@@ -270,7 +270,7 @@ Run:
 
 Expected: all tests pass with zero failures and zero skips.
 
-- [ ] **Step 2: Publish and verify the artifact contract**
+- [x] **Step 2: Publish and verify the artifact contract**
 
 Record SHA-256 for `%USERPROFILE%\.codex\auth.json` and all existing account snapshot files, then run:
 
@@ -280,7 +280,7 @@ Record SHA-256 for `%USERPROFILE%\.codex\auth.json` and all existing account sna
 
 Verify the expected nine-file output, helper and manifest hashes, and absence of staging/backup residue. Confirm authentication hashes remain unchanged.
 
-- [ ] **Step 3: Replace the installed build**
+- [x] **Step 3: Replace the installed build**
 
 Stop only `CodexAccountSwitcher.exe`. Rename the existing
 `C:\Users\demax\Apps\CodexAccountSwitcher` directory to a timestamped sibling
@@ -290,7 +290,7 @@ original path, verify hashes, and restart `CodexAccountSwitcher.exe`.
 Do not close Codex, perform a live account switch, consume a reset credit, or
 automatically call the quota endpoints.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 Run:
 

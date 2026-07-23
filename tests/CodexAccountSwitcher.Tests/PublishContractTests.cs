@@ -7,6 +7,46 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class PublishContractTests
 {
     [Fact]
+    public void Application_project_embeds_the_eight_size_product_icon()
+    {
+        var root = FindRepositoryRoot();
+        var project = File.ReadAllText(Path.Combine(
+            root,
+            "src",
+            "CodexAccountSwitcher",
+            "CodexAccountSwitcher.csproj"));
+        var iconPath = Path.Combine(
+            root,
+            "src",
+            "CodexAccountSwitcher",
+            "Assets",
+            "CodexAccountSwitcher.ico");
+
+        Assert.Contains(
+            "<ApplicationIcon>Assets\\CodexAccountSwitcher.ico</ApplicationIcon>",
+            project,
+            StringComparison.Ordinal);
+        Assert.True(File.Exists(iconPath));
+
+        using var stream = File.OpenRead(iconPath);
+        using var reader = new BinaryReader(stream);
+        Assert.Equal(0, reader.ReadUInt16());
+        Assert.Equal(1, reader.ReadUInt16());
+        Assert.Equal(8, reader.ReadUInt16());
+        var sizes = new List<int>();
+        for (var index = 0; index < 8; index++)
+        {
+            var width = reader.ReadByte();
+            var height = reader.ReadByte();
+            sizes.Add(width == 0 ? 256 : width);
+            Assert.Equal(width, height);
+            stream.Position += 14;
+        }
+
+        Assert.Equal([16, 20, 24, 32, 48, 64, 128, 256], sizes);
+    }
+
+    [Fact]
     public void Publish_script_uses_the_pinned_sdk_and_stages_the_verified_helper()
     {
         var script = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "scripts", "publish.ps1"));
@@ -67,7 +107,8 @@ public sealed class PublishContractTests
         var readme = File.ReadAllText(Path.Combine(FindRepositoryRoot(), "README.md"));
 
         Assert.Contains(".NET 9 Desktop Runtime", readme, StringComparison.Ordinal);
-        Assert.Contains("device login", readme, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("普通浏览器登录", readme, StringComparison.Ordinal);
+        Assert.DoesNotContain("device login", readme, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("认证成功的新账号会立即成为活动账号", readme, StringComparison.Ordinal);
         Assert.Contains("应用自有的账号列表", readme, StringComparison.Ordinal);
         Assert.Contains("不会刷新任何额度", readme, StringComparison.Ordinal);

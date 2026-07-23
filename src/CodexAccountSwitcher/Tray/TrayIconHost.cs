@@ -1,6 +1,4 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
-using System.Runtime.InteropServices;
 using Forms = System.Windows.Forms;
 
 namespace CodexAccountSwitcher.Tray;
@@ -18,7 +16,7 @@ public sealed class TrayIconHost : IDisposable
     {
         _openAction = openAction ?? throw new ArgumentNullException(nameof(openAction));
         _exitAction = exitAction ?? throw new ArgumentNullException(nameof(exitAction));
-        _icon = CreateSwitchIcon();
+        _icon = LoadApplicationIcon();
 
         var openItem = new Forms.ToolStripMenuItem("Open");
         openItem.Click += (_, _) => _openAction();
@@ -73,35 +71,12 @@ public sealed class TrayIconHost : IDisposable
         _exitAction();
     }
 
-    private static Icon CreateSwitchIcon()
+    private static Icon LoadApplicationIcon()
     {
-        using var bitmap = new Bitmap(32, 32);
-        using (var graphics = Graphics.FromImage(bitmap))
-        using (var pen = new Pen(Color.FromArgb(45, 102, 120), 3.2f))
-        using (var brush = new SolidBrush(Color.FromArgb(45, 102, 120)))
-        {
-            graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            pen.StartCap = LineCap.Round;
-            pen.EndCap = LineCap.Round;
-            graphics.DrawLine(pen, 7, 11, 23, 11);
-            graphics.FillPolygon(brush, [new Point(23, 6), new Point(29, 11), new Point(23, 16)]);
-            graphics.DrawLine(pen, 25, 21, 9, 21);
-            graphics.FillPolygon(brush, [new Point(9, 16), new Point(3, 21), new Point(9, 26)]);
-        }
-
-        var handle = bitmap.GetHicon();
-        try
-        {
-            using var temporary = Icon.FromHandle(handle);
-            return (Icon)temporary.Clone();
-        }
-        finally
-        {
-            DestroyIcon(handle);
-        }
+        var executablePath = Environment.ProcessPath
+            ?? throw new InvalidOperationException("The application executable path is unavailable.");
+        using var extracted = Icon.ExtractAssociatedIcon(executablePath)
+            ?? throw new InvalidOperationException("The embedded application icon is unavailable.");
+        return (Icon)extracted.Clone();
     }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool DestroyIcon(nint handle);
 }

@@ -11,6 +11,11 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <AssemblyName>CodexAccountSwitcher</AssemblyName>
     <RootNamespace>CodexAccountSwitcher</RootNamespace>
+    <ApplicationIcon>Assets\CodexAccountSwitcher.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\CodexAccountSwitcher.ico" />
+  </ItemGroup>
 
 </Project>

@@ -5,6 +5,7 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
         Title="Codex accounts"
+        Icon="Assets/CodexAccountSwitcher.ico"
         Width="440"
         MinWidth="440"
         MaxWidth="440"

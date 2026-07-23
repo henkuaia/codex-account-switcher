@@ -75,6 +75,7 @@ public sealed class WpfRuntimeTests
                     static () => { },
                     DispatcherPriority.ApplicationIdle);
 
+                Assert.NotNull(mainWindow.Icon);
                 Assert.Same(viewModel, mainWindow.DataContext);
                 Assert.Equal(440, mainWindow.Width);
                 Assert.Equal(480, mainWindow.MinHeight);

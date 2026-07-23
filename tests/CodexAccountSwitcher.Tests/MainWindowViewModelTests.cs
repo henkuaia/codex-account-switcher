@@ -9,14 +9,13 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class MainWindowViewModelTests
 {
     [Fact]
-    public void Dialog_service_exposes_add_confirmation_before_login()
+    public void Dialog_service_does_not_expose_redundant_add_confirmation()
     {
         var method = typeof(IAccountDialogService).GetMethod(
             "ConfirmAddAsync",
             [typeof(CancellationToken)]);
 
-        Assert.NotNull(method);
-        Assert.Equal(typeof(Task<bool>), method.ReturnType);
+        Assert.Null(method);
     }
 
     [Fact]
@@ -494,30 +493,15 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
-    public async Task Canceled_add_confirmation_never_calls_login_or_reloads_registry()
+    public async Task Add_starts_the_single_login_window_without_pre_confirmation()
     {
         var fixture = new Fixture();
         await fixture.ViewModel.LoadAsync();
-        fixture.Dialog.ConfirmAddResult = false;
-
         await fixture.ViewModel.AddCommand.ExecuteAsync();
 
-        Assert.Equal(0, fixture.LoginCallCount);
-        Assert.Equal(1, fixture.LoadCallCount);
-        Assert.Equal(["confirm-add"], fixture.Dialog.AddEvents);
-    }
-
-    [Fact]
-    public async Task Accepted_add_confirmation_occurs_before_login_transaction()
-    {
-        var fixture = new Fixture();
-        await fixture.ViewModel.LoadAsync();
-        fixture.Dialog.ConfirmAddResult = true;
-
-        await fixture.ViewModel.AddCommand.ExecuteAsync();
-
-        Assert.Equal(["confirm-add", "run-login"], fixture.Dialog.AddEvents);
+        Assert.Equal(["run-login"], fixture.Dialog.AddEvents);
         Assert.Equal(1, fixture.LoginCallCount);
+        Assert.Equal(2, fixture.LoadCallCount);
     }
 
     [Fact]
@@ -538,7 +522,7 @@ public sealed class MainWindowViewModelTests
             CanRetryLaunch = true,
         };
         var safeLoginCalls = 0;
-        var dialog = new FakeDialogService { ConfirmAddResult = true };
+        var dialog = new FakeDialogService();
         var constructor = typeof(MainWindowViewModel)
             .GetConstructors(System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             .SingleOrDefault(candidate =>
@@ -578,7 +562,7 @@ public sealed class MainWindowViewModelTests
         Assert.True(Assert.Single(viewModel.Accounts, row => row.Account.AccountKey == added.AccountKey).IsActive);
         Assert.Equal(loginResult.Message, viewModel.StatusText);
         Assert.True(viewModel.CanRetryLaunch);
-        Assert.Equal(["confirm-add", "run-login"], dialog.AddEvents);
+        Assert.Equal(["run-login"], dialog.AddEvents);
     }
 
     [Fact]
@@ -647,7 +631,6 @@ public sealed class MainWindowViewModelTests
 
         await fixture.ExecuteAsync(command, switchTarget);
 
-        Assert.Equal(0, fixture.Dialog.ConfirmAddCallCount);
         Assert.Equal(0, fixture.Dialog.SelectRemovalTargetCallCount);
         Assert.Equal(0, fixture.Dialog.ConfirmSwitchCallCount);
         Assert.Equal(0, fixture.Dialog.RunLoginCallCount);
@@ -745,7 +728,8 @@ public sealed class MainWindowViewModelTests
 
         await fixture.ExecuteAsync(operation, switchTarget);
 
-        Assert.Equal(1, fixture.Dialog.TotalConfirmationOrSelectionCalls);
+        Assert.Equal(operation == "login" ? 0 : 1, fixture.Dialog.TotalConfirmationOrSelectionCalls);
+        Assert.Equal(operation == "login" ? 1 : 0, fixture.Dialog.RunLoginCallCount);
         Assert.Equal(operation == "login" ? 1 : 0, fixture.LoginCallCount);
         Assert.Equal(operation == "remove" ? 1 : 0, fixture.RemoveCallCount);
         Assert.Equal(operation == "switch" ? 1 : 0, fixture.SwitchCallCount);
@@ -1701,8 +1685,6 @@ public sealed class MainWindowViewModelTests
     {
         public Action? AfterDialog { get; set; }
 
-        public int ConfirmAddCallCount { get; private set; }
-
         public int SelectRemovalTargetCallCount { get; private set; }
 
         public int ConfirmSwitchCallCount { get; private set; }
@@ -1710,15 +1692,7 @@ public sealed class MainWindowViewModelTests
         public int RunLoginCallCount { get; private set; }
 
         public int TotalConfirmationOrSelectionCalls =>
-            ConfirmAddCallCount + SelectRemovalTargetCallCount + ConfirmSwitchCallCount;
-
-        public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            ConfirmAddCallCount++;
-            AfterDialog?.Invoke();
-            return Task.FromResult(true);
-        }
+            SelectRemovalTargetCallCount + ConfirmSwitchCallCount;
 
         public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
             IReadOnlyList<AccountRowViewModel> accounts,
@@ -1765,8 +1739,6 @@ public sealed class MainWindowViewModelTests
     {
         public bool ConfirmResult { get; set; }
 
-        public bool ConfirmAddResult { get; set; } = true;
-
         public List<string> AddEvents { get; } = [];
 
         public AccountRowViewModel? RemovalTarget { get; set; }
@@ -1777,13 +1749,6 @@ public sealed class MainWindowViewModelTests
 
         public TaskCompletionSource LoginStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            AddEvents.Add("confirm-add");
-            return Task.FromResult(ConfirmAddResult);
-        }
 
         public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
             IReadOnlyList<AccountRowViewModel> accounts,

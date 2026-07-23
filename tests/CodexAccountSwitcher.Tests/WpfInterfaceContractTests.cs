@@ -60,16 +60,14 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
-    public void Add_confirmation_discloses_close_browser_login_save_and_restart()
+    public void Add_flow_has_no_pre_confirmation_message_box()
     {
         var source = File.ReadAllText(Path.Combine(
             FindDirectory("src", "CodexAccountSwitcher"),
             "App.xaml.cs"));
 
-        Assert.Contains(
-            "添加账号时 Codex 会暂时关闭，并打开普通浏览器登录。登录成功后账号会保存，Codex 随后重启。",
-            source,
-            StringComparison.Ordinal);
+        Assert.DoesNotContain("ConfirmAddAsync", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("MessageBoxButton.OKCancel", source, StringComparison.Ordinal);
     }
 
     [Fact]

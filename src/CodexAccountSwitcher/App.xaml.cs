@@ -258,20 +258,6 @@ internal sealed class AccountDialogService(
             MessageBoxButton.YesNo,
             MessageBoxImage.Question) == MessageBoxResult.Yes);
 
-    public async Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
-    {
-        var confirmed = false;
-        await _dispatcher.InvokeAsync(
-            () => confirmed = System.Windows.MessageBox.Show(
-                _ownerProvider(),
-                "添加账号时 Codex 会暂时关闭，并打开普通浏览器登录。登录成功后账号会保存，Codex 随后重启。",
-                "添加账号",
-                MessageBoxButton.OKCancel,
-                MessageBoxImage.Warning) == MessageBoxResult.OK,
-            cancellationToken);
-        return confirmed;
-    }
-
     public async Task<AccountRowViewModel?> SelectRemovalTargetAsync(
         IReadOnlyList<AccountRowViewModel> accounts,
         CancellationToken cancellationToken)

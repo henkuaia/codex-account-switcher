@@ -19,8 +19,6 @@ public interface IOperationActivityTracker
 
 public interface IAccountDialogService
 {
-    Task<bool> ConfirmAddAsync(CancellationToken cancellationToken);
-
     Task<AccountMetadata?> EditMetadataAsync(
         AccountRowViewModel target,
         CancellationToken cancellationToken);
@@ -385,11 +383,6 @@ public sealed class MainWindowViewModel : ObservableObject
     private async Task LoginAsync(CancellationToken cancellationToken)
     {
         if (!await RecheckHelperAvailabilityAsync(cancellationToken))
-        {
-            return;
-        }
-
-        if (!await _dialogService.ConfirmAddAsync(cancellationToken))
         {
             return;
         }

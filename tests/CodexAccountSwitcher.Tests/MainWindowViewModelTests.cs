@@ -118,6 +118,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(1, fixture.QuotaRefreshCallCount);
         Assert.Equal("Weekly", fixture.Row(fixture.First).QuotaLabel);
         Assert.Equal("Quota", fixture.Row(fixture.Second).QuotaLabel);
+        Assert.Equal("额度刷新完成。", fixture.ViewModel.StatusText);
     }
 
     [Fact]

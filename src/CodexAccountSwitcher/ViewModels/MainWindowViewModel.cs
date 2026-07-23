@@ -375,7 +375,7 @@ public sealed class MainWindowViewModel : ObservableObject
                         StringComparison.Ordinal))?.ApplyQuota(update);
                 }
 
-                StatusText = "Quota refresh completed.";
+                StatusText = "额度刷新完成。";
             },
             cancellationToken);
     }

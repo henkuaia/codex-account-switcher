@@ -41,6 +41,8 @@ public sealed class WpfRuntimeTests
             OperationWindow? operationWindow = null;
             OperationWindow? preflightWindow = null;
             OperationWindow? localizedWindow = null;
+            OperationWindow? dialogLoginWindow = null;
+            OperationWindow? dialogRemoveWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
             try
             {
@@ -239,6 +241,86 @@ public sealed class WpfRuntimeTests
                 Assert.Equal("Completed", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
                 preflightWindow.Fail();
                 Assert.Equal("Operation failed", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
+
+                var dialog = new AccountDialogService(
+                    () => null,
+                    new WpfUiDispatcher(Dispatcher.CurrentDispatcher));
+                const string url = "https://auth.openai.com/codex/device";
+                const string deviceCode = "ABCD-EFGH";
+                var windowsBeforeLogin = Application.Current.Windows.OfType<OperationWindow>().ToHashSet();
+                var loginResult = await dialog.RunLoginAsync(
+                    async (outputHandler, cancellationToken) =>
+                    {
+                        dialogLoginWindow = Assert.Single(
+                            Application.Current.Windows.OfType<OperationWindow>(),
+                            window => !windowsBeforeLogin.Contains(window));
+                        await outputHandler(
+                            new ProcessOutputLine(
+                                ProcessOutputStream.StandardOutput,
+                                "\u001b[90mWelcome to Codex [v0.145.0-alpha.30]\u001b[0m"),
+                            cancellationToken);
+                        await outputHandler(
+                            new ProcessOutputLine(
+                                ProcessOutputStream.StandardOutput,
+                                $"  \u001b[94m{url}\u001b[0m"),
+                            cancellationToken);
+                        await outputHandler(
+                            new ProcessOutputLine(
+                                ProcessOutputStream.StandardOutput,
+                                $"    \u001b[94m{deviceCode}\u001b[0m"),
+                            cancellationToken);
+                        return new CommandResult(0, string.Empty, string.Empty);
+                    },
+                    CancellationToken.None);
+
+                Assert.True(loginResult.Succeeded);
+                Assert.NotNull(dialogLoginWindow);
+                Assert.Equal("添加账号", dialogLoginWindow.Title);
+                Assert.Equal("添加账号", Assert.IsType<TextBlock>(dialogLoginWindow.FindName("HeadingText")).Text);
+                Assert.Equal("已完成", Assert.IsType<TextBlock>(dialogLoginWindow.FindName("PhaseText")).Text);
+                var loginClose = Assert.IsType<Button>(dialogLoginWindow.FindName("CloseButton"));
+                var loginHeaderClose = Assert.IsType<Button>(dialogLoginWindow.FindName("HeaderCloseButton"));
+                Assert.Equal("关闭", loginClose.Content);
+                Assert.Equal("关闭", loginHeaderClose.ToolTip);
+                Assert.Equal("关闭", AutomationProperties.GetName(loginHeaderClose));
+                var loginOutput = Assert.IsType<TextBox>(dialogLoginWindow.FindName("OutputTextBox")).Text;
+                Assert.Contains("欢迎使用 Codex [v0.145.0-alpha.30]", loginOutput, StringComparison.Ordinal);
+                Assert.DoesNotContain('\u001b', loginOutput);
+                Assert.DoesNotContain("90m", loginOutput, StringComparison.Ordinal);
+                Assert.DoesNotContain("94m", loginOutput, StringComparison.Ordinal);
+                Assert.DoesNotContain("0m", loginOutput, StringComparison.Ordinal);
+                Assert.Contains($"  {url}", loginOutput, StringComparison.Ordinal);
+                Assert.Contains($"    {deviceCode}", loginOutput, StringComparison.Ordinal);
+                dialogLoginWindow.Close();
+                Assert.DoesNotContain(
+                    Application.Current.Windows.OfType<OperationWindow>(),
+                    window => !windowsBeforeLogin.Contains(window));
+
+                var windowsBeforeRemoval = Application.Current.Windows.OfType<OperationWindow>().ToHashSet();
+                var removeResult = await dialog.RunRemoveAsync(
+                    _ =>
+                    {
+                        dialogRemoveWindow = Assert.Single(
+                            Application.Current.Windows.OfType<OperationWindow>(),
+                            window => !windowsBeforeRemoval.Contains(window));
+                        return Task.FromResult(new CommandResult(0, string.Empty, string.Empty));
+                    },
+                    CancellationToken.None);
+
+                Assert.True(removeResult.Succeeded);
+                Assert.NotNull(dialogRemoveWindow);
+                Assert.Equal("Remove account", dialogRemoveWindow.Title);
+                Assert.Equal("Remove account", Assert.IsType<TextBlock>(dialogRemoveWindow.FindName("HeadingText")).Text);
+                Assert.Equal("Completed", Assert.IsType<TextBlock>(dialogRemoveWindow.FindName("PhaseText")).Text);
+                var removeClose = Assert.IsType<Button>(dialogRemoveWindow.FindName("CloseButton"));
+                var removeHeaderClose = Assert.IsType<Button>(dialogRemoveWindow.FindName("HeaderCloseButton"));
+                Assert.Equal("Close", removeClose.Content);
+                Assert.Equal("Close", removeHeaderClose.ToolTip);
+                Assert.Equal("Close", AutomationProperties.GetName(removeHeaderClose));
+                dialogRemoveWindow.Close();
+                Assert.DoesNotContain(
+                    Application.Current.Windows.OfType<OperationWindow>(),
+                    window => !windowsBeforeRemoval.Contains(window));
             }
             finally
             {
@@ -258,6 +340,18 @@ public sealed class WpfRuntimeTests
                 {
                     operationWindow.Complete(new CommandResult(1, string.Empty, string.Empty));
                     operationWindow.Close();
+                }
+
+                if (dialogLoginWindow?.IsVisible == true)
+                {
+                    dialogLoginWindow.Complete(new CommandResult(1, string.Empty, string.Empty));
+                    dialogLoginWindow.Close();
+                }
+
+                if (dialogRemoveWindow?.IsVisible == true)
+                {
+                    dialogRemoveWindow.Complete(new CommandResult(1, string.Empty, string.Empty));
+                    dialogRemoveWindow.Close();
                 }
 
                 if (mainWindow is not null)

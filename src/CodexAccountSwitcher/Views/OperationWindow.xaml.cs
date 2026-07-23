@@ -27,6 +27,7 @@ public partial class OperationWindow : Window
         ArgumentNullException.ThrowIfNull(text);
         _text = text;
         InitializeComponent();
+        Title = text.Heading;
         HeadingText.Text = text.Heading;
         PhaseText.Text = text.Phase;
         CloseButton.Content = text.Close;

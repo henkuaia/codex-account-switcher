@@ -74,6 +74,193 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Refresh_monthly_quota_uses_latest_redeemed_reset_for_estimate()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-08-22T22:06:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-30T00:00:00Z");
+        var resetAfter = (long)(resetAt - serverNow).TotalSeconds;
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath switch
+            {
+                "/backend-api/wham/usage" => JsonResponse("""
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":2592000,
+                      "reset_at":RESET_AT,
+                      "reset_after_seconds":RESET_AFTER
+                    }}}
+                    """
+                    .Replace(
+                        "RESET_AT",
+                        resetAt.ToUnixTimeSeconds().ToString(
+                            System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal)
+                    .Replace(
+                        "RESET_AFTER",
+                        resetAfter.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal)),
+                "/backend-api/wham/rate-limit-reset-credits" => JsonResponse("""
+                    {"credits":[
+                      {"status":"redeemed","redeemed_at":"2026-07-25T08:00:00Z"},
+                      {"status":"redeemed","redeemed_at":"2026-07-26T12:30:00Z"},
+                      {"status":"available","redeemed_at":null}
+                    ]}
+                    """),
+                _ => JsonResponse("""
+                    {"data":[
+                      {"date":"2026-07-26","totals":{"credits":50}},
+                      {"date":"2026-07-27","totals":{"credits":100}}
+                    ]}
+                    """),
+            }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Equal(16m, update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        var requests = handler.Requests.ToArray();
+        Assert.Equal(3, requests.Length);
+        Assert.Equal(
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+            requests[1].RequestUri!.ToString());
+        Assert.Equal(
+            "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts?start_date=2026-07-26&end_date=2026-07-31&group_by=day",
+            requests[2].RequestUri!.ToString());
+        Assert.All(requests, request =>
+        {
+            Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+            Assert.Equal("acct-1", request.Headers.GetValues("ChatGPT-Account-Id").Single());
+        });
+    }
+
+    [Fact]
+    public async Task Refresh_monthly_quota_without_redeemed_reset_uses_natural_window_start()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-08-22T00:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-30T00:00:00Z");
+        var resetAfter = (long)(resetAt - serverNow).TotalSeconds;
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath switch
+            {
+                "/backend-api/wham/usage" => JsonResponse("""
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":2592000,
+                      "reset_at":RESET_AT,
+                      "reset_after_seconds":RESET_AFTER
+                    }}}
+                    """
+                    .Replace(
+                        "RESET_AT",
+                        resetAt.ToUnixTimeSeconds().ToString(
+                            System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal)
+                    .Replace(
+                        "RESET_AFTER",
+                        resetAfter.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal)),
+                "/backend-api/wham/rate-limit-reset-credits" => JsonResponse("""{"credits":[]}"""),
+                _ => JsonResponse("""
+                    {"data":[
+                      {"date":"2026-07-23","totals":{"credits":50}},
+                      {"date":"2026-07-24","totals":{"credits":100}}
+                    ]}
+                    """),
+            }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(24m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        var requests = handler.Requests.ToArray();
+        Assert.Equal(3, requests.Length);
+        Assert.Equal(
+            "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts?start_date=2026-07-23&end_date=2026-07-31&group_by=day",
+            requests[2].RequestUri!.ToString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Reset_history_failure_preserves_successful_monthly_percentage(bool invalidJson)
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-08-22T22:06:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-30T00:00:00Z");
+        var resetAfter = (long)(resetAt - serverNow).TotalSeconds;
+        var requestCount = 0;
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            Interlocked.Increment(ref requestCount) == 1
+                ? JsonResponse("""
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":2592000,
+                      "reset_at":RESET_AT,
+                      "reset_after_seconds":RESET_AFTER
+                    }}}
+                    """
+                    .Replace(
+                        "RESET_AT",
+                        resetAt.ToUnixTimeSeconds().ToString(
+                            System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal)
+                    .Replace(
+                        "RESET_AFTER",
+                        resetAfter.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal))
+                : invalidJson
+                    ? JsonResponse("""{"credits":{}}""")
+                    : new HttpResponseMessage(HttpStatusCode.Forbidden)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Null(update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Zero_monthly_usage_skips_reset_history_and_analytics()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse("""
+            {"rate_limit":{"secondary_window":{
+              "used_percent":0,
+              "limit_window_seconds":2592000,
+              "reset_at":1787436360,
+              "reset_after_seconds":1965960
+            }}}
+            """)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(100, update.Display!.RemainingPercent);
+        Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Null(update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
     public async Task Analytics_failure_preserves_successful_weekly_percentage()
     {
         using var home = new TemporaryDirectory();

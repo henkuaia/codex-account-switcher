@@ -9,6 +9,8 @@ namespace CodexAccountSwitcher.Services;
 public sealed class QuotaService
 {
     private static readonly Uri UsageEndpoint = new("https://chatgpt.com/backend-api/wham/usage");
+    private static readonly Uri ResetCreditHistoryEndpoint =
+        new("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits");
     private const string AnalyticsEndpoint =
         "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(10);
@@ -70,7 +72,7 @@ public sealed class QuotaService
 
             var display = parsed.Display is null
                 ? null
-                : await TryApplyWeeklyEstimateAsync(
+                : await TryApplyEstimateAsync(
                     parsed.Display,
                     account,
                     snapshot,
@@ -100,6 +102,31 @@ public sealed class QuotaService
         }
     }
 
+    private async Task<QuotaDisplay> TryApplyEstimateAsync(
+        QuotaDisplay display,
+        AccountRecord account,
+        AuthSnapshot snapshot,
+        CancellationToken requestCancellationToken,
+        CancellationToken userCancellationToken)
+    {
+        return display.Period switch
+        {
+            QuotaPeriod.Weekly => await TryApplyWeeklyEstimateAsync(
+                display,
+                account,
+                snapshot,
+                requestCancellationToken,
+                userCancellationToken),
+            QuotaPeriod.Monthly => await TryApplyMonthlyEstimateAsync(
+                display,
+                account,
+                snapshot,
+                requestCancellationToken,
+                userCancellationToken),
+            _ => display,
+        };
+    }
+
     private async Task<QuotaDisplay> TryApplyWeeklyEstimateAsync(
         QuotaDisplay display,
         AccountRecord account,
@@ -115,8 +142,92 @@ public sealed class QuotaService
         }
 
         var resetStart = display.ResetsAt.Value - display.WindowDuration;
+        return await TryApplyPeriodEstimateAsync(
+            display,
+            account,
+            snapshot,
+            resetStart,
+            includeStartDayInLower: false,
+            requestCancellationToken,
+            userCancellationToken);
+    }
+
+    private async Task<QuotaDisplay> TryApplyMonthlyEstimateAsync(
+        QuotaDisplay display,
+        AccountRecord account,
+        AuthSnapshot snapshot,
+        CancellationToken requestCancellationToken,
+        CancellationToken userCancellationToken)
+    {
+        if (display.UsedPercent <= 0 ||
+            display.ResetsAt is null ||
+            display.ServerNow is null ||
+            display.WindowDuration <= TimeSpan.Zero)
+        {
+            return display;
+        }
+
+        var naturalStart = display.ResetsAt.Value - display.WindowDuration;
+        try
+        {
+            using var request = CreateAuthenticatedRequest(
+                ResetCreditHistoryEndpoint,
+                account,
+                snapshot);
+            using var response = await _httpClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                requestCancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return display;
+            }
+
+            var responseBody = await response.Content.ReadAsStringAsync(requestCancellationToken);
+            if (!ResetCreditHistoryParser.TryFindLatestRedeemedAt(
+                    responseBody,
+                    naturalStart,
+                    display.ServerNow.Value,
+                    out var latestRedeemedAt))
+            {
+                return display;
+            }
+
+            var segmentStart = latestRedeemedAt ?? naturalStart;
+            return await TryApplyPeriodEstimateAsync(
+                display,
+                account,
+                snapshot,
+                segmentStart,
+                segmentStart.UtcDateTime.TimeOfDay == TimeSpan.Zero,
+                requestCancellationToken,
+                userCancellationToken);
+        }
+        catch (OperationCanceledException) when (!userCancellationToken.IsCancellationRequested)
+        {
+            return display;
+        }
+        catch (HttpRequestException)
+        {
+            return display;
+        }
+        catch (InvalidDataException)
+        {
+            return display;
+        }
+    }
+
+    private async Task<QuotaDisplay> TryApplyPeriodEstimateAsync(
+        QuotaDisplay display,
+        AccountRecord account,
+        AuthSnapshot snapshot,
+        DateTimeOffset segmentStart,
+        bool includeStartDayInLower,
+        CancellationToken requestCancellationToken,
+        CancellationToken userCancellationToken)
+    {
         var serverNow = display.ServerNow ?? DateTimeOffset.UtcNow;
-        var startDate = DateOnly.FromDateTime(resetStart.UtcDateTime);
+        var startDate = DateOnly.FromDateTime(segmentStart.UtcDateTime);
         var endDateExclusive = DateOnly.FromDateTime(serverNow.UtcDateTime).AddDays(1);
         if (endDateExclusive <= startDate)
         {
@@ -139,11 +250,12 @@ public sealed class QuotaService
             }
 
             var responseBody = await response.Content.ReadAsStringAsync(requestCancellationToken);
-            var estimate = WeeklyQuotaEstimator.TryEstimate(
+            var estimate = PeriodQuotaEstimator.TryEstimate(
                 responseBody,
                 display.UsedPercent,
-                startDate);
-            return estimate is null
+                startDate,
+                includeStartDayInLower);
+            return estimate is null || estimate.UpperUsd <= 0
                 ? display
                 : display with
                 {

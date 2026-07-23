@@ -30,7 +30,30 @@ public sealed class QuotaResponseParserTests
 
         Assert.Equal(expected, result.Display!.Period);
         Assert.Equal(73, result.Display.RemainingPercent);
+        Assert.Equal(27, result.Display.UsedPercent);
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1785000000), result.Display.ResetsAt);
+    }
+
+    [Fact]
+    public void Derives_server_time_from_reset_fields()
+    {
+        var result = QuotaResponseParser.Parse("""
+        {
+          "rate_limit": {
+            "secondary_window": {
+              "used_percent": 12.5,
+              "limit_window_seconds": 604800,
+              "reset_at": 1785000000,
+              "reset_after_seconds": 86400
+            }
+          }
+        }
+        """);
+
+        Assert.Equal(12.5, result.Display!.UsedPercent);
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeSeconds(1785000000 - 86400),
+            result.Display.ServerNow);
     }
 
     [Theory]

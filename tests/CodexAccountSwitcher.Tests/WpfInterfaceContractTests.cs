@@ -55,6 +55,7 @@ public sealed class WpfInterfaceContractTests
         Assert.Contains("Text=\"{Binding AvailableResetText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding UsedResetText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding PeriodQuotaText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding EstimatedPeriodQuotaText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding OfficialMonthlyLimitText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DataContext.EditMetadataCommand", xaml, StringComparison.Ordinal);
     }

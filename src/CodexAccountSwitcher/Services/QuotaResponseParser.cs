@@ -79,7 +79,11 @@ public static class QuotaResponseParser
             RemainingPercent(usedPercent),
             ReadResetAt(window),
             TimeSpan.FromSeconds(windowSeconds),
-            string.Empty));
+            string.Empty)
+        {
+            UsedPercent = usedPercent,
+            ServerNow = ReadServerNow(window),
+        });
     }
 
     private static bool TryReadInteger(JsonElement element, string propertyName, out long value)
@@ -176,6 +180,29 @@ public static class QuotaResponseParser
             return DateTimeOffset.FromUnixTimeSeconds(resetAt);
         }
         catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    private static DateTimeOffset? ReadServerNow(JsonElement window)
+    {
+        if (!TryReadInteger(window, "reset_at", out var resetAt) ||
+            !TryReadInteger(window, "reset_after_seconds", out var resetAfter) ||
+            resetAfter < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(checked(resetAt - resetAfter));
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+        catch (OverflowException)
         {
             return null;
         }

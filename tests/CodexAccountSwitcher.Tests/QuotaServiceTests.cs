@@ -31,6 +31,76 @@ public sealed class QuotaServiceTests
         Assert.Equal(73, update.Display!.RemainingPercent);
     }
 
+    [Fact]
+    public async Task Refresh_weekly_quota_fetches_analytics_and_applies_estimated_usd_range()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-07-27T12:00:00Z").ToUnixTimeSeconds();
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? JsonResponse("""
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":604800,
+                      "reset_at":RESET_AT,
+                      "reset_after_seconds":172800
+                    }}}
+                    """.Replace(
+                        "RESET_AT",
+                        resetAt.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal))
+                : JsonResponse("""
+                    {"data":[
+                      {"date":"2026-07-20","totals":{"credits":100}},
+                      {"date":"2026-07-21","totals":{"credits":50}}
+                    ]}
+                    """)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(8m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        var requests = handler.Requests.ToArray();
+        Assert.Equal(2, requests.Length);
+        Assert.Equal(
+            "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts?start_date=2026-07-20&end_date=2026-07-26&group_by=day",
+            requests[1].RequestUri!.ToString());
+        Assert.Equal("Bearer", requests[1].Headers.Authorization!.Scheme);
+        Assert.Equal("acct-1", requests[1].Headers.GetValues("ChatGPT-Account-Id").Single());
+    }
+
+    [Fact]
+    public async Task Analytics_failure_preserves_successful_weekly_percentage()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var requestCount = 0;
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            Interlocked.Increment(ref requestCount) == 1
+                ? JsonResponse("""
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":604800,
+                      "reset_at":1785000000,
+                      "reset_after_seconds":172800
+                    }}}
+                    """)
+                : new HttpResponseMessage(HttpStatusCode.Forbidden)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Null(update.Display.EstimatedPeriodQuotaUpperUsd);
+    }
+
     [Theory]
     [InlineData(HttpStatusCode.Unauthorized)]
     [InlineData(HttpStatusCode.Forbidden)]
@@ -185,10 +255,12 @@ public sealed class QuotaServiceTests
             $"{{\"auth_mode\":\"chatgpt\",\"tokens\":{{\"access_token\":\"{accessToken}\",\"account_id\":\"{accountId}\"}}}}");
     }
 
-    private static HttpResponseMessage JsonResponse() => new(HttpStatusCode.OK)
+    private static HttpResponseMessage JsonResponse() => JsonResponse("""
+        {"rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":604800}}}
+        """);
+
+    private static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK)
     {
-        Content = new StringContent("""
-            {"rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":604800}}}
-            """),
+        Content = new StringContent(json),
     };
 }

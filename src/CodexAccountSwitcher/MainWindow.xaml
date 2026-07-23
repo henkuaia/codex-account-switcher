@@ -250,6 +250,21 @@
                                                                     </TextBlock.Style>
                                                                 </TextBlock>
                                                             </WrapPanel>
+                                                            <TextBlock Margin="0,3,0,0"
+                                                                       FontSize="11"
+                                                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                                                       Text="{Binding EstimatedPeriodQuotaText}">
+                                                                <TextBlock.Style>
+                                                                    <Style TargetType="TextBlock">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                        <Style.Triggers>
+                                                                            <DataTrigger Binding="{Binding HasEstimatedPeriodQuotaText}" Value="True">
+                                                                                <Setter Property="Visibility" Value="Visible" />
+                                                                            </DataTrigger>
+                                                                        </Style.Triggers>
+                                                                    </Style>
+                                                                </TextBlock.Style>
+                                                            </TextBlock>
                                                         </StackPanel>
                                                         <Button x:Name="EditMetadataButton"
                                                                 Grid.Column="1"

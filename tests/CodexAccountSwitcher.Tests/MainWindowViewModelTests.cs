@@ -1183,6 +1183,62 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Weekly_estimate_is_separate_from_manually_recorded_quota()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyMetadata(new AccountMetadata(40m, 0));
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Weekly,
+                75,
+                null,
+                TimeSpan.FromDays(7),
+                "weekly")
+            {
+                UsedPercent = 25,
+                EstimatedPeriodQuotaLowerUsd = 8m,
+                EstimatedPeriodQuotaUpperUsd = 24m,
+            },
+            null));
+
+        Assert.Equal("单次周额度 US$40", row.PeriodQuotaText);
+        Assert.Equal("估算单次周额度 US$8–24", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
+    public void Unused_weekly_window_explains_why_estimate_is_missing()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Weekly,
+                100,
+                null,
+                TimeSpan.FromDays(7),
+                "weekly")
+            {
+                UsedPercent = 0,
+            },
+            null));
+
+        Assert.Equal("估算单次周额度：产生用量后可计算", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
     public async Task Metadata_load_and_edit_are_isolated_by_account_key_and_saved_before_display()
     {
         var first = Accounts.Record("first-key", "first@example.com");

@@ -11,6 +11,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private string _displayIdentity;
     private bool _hasQuotaStatus;
     private bool _hasOfficialMonthlyLimit;
+    private bool _hasEstimatedPeriodQuotaText;
     private string? _switchUnavailableReason;
     private QuotaDisplay? _quotaDisplay;
     private AccountMetadata _metadata = new(null, 0);
@@ -18,6 +19,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private string _usedResetText = "已用重置 0（本机）";
     private string _periodQuotaText = "单次额度 —";
     private string _officialMonthlyLimitText = string.Empty;
+    private string _estimatedPeriodQuotaText = string.Empty;
     private string _quotaLabel = "Not queried";
     private string? _quotaError;
     private string _quotaStatusText = string.Empty;
@@ -126,6 +128,18 @@ public sealed class AccountRowViewModel : ObservableObject
         private set => SetProperty(ref _hasOfficialMonthlyLimit, value);
     }
 
+    public string EstimatedPeriodQuotaText
+    {
+        get => _estimatedPeriodQuotaText;
+        private set => SetProperty(ref _estimatedPeriodQuotaText, value);
+    }
+
+    public bool HasEstimatedPeriodQuotaText
+    {
+        get => _hasEstimatedPeriodQuotaText;
+        private set => SetProperty(ref _hasEstimatedPeriodQuotaText, value);
+    }
+
     internal void ApplyAccountState(
         AccountRecord account,
         bool isActive,
@@ -206,6 +220,22 @@ public sealed class AccountRowViewModel : ObservableObject
         OfficialMonthlyLimitText = QuotaDisplay?.IndividualLimitUsd is { } limit
             ? $"官方月度上限 US${FormatUsd(limit)}"
             : string.Empty;
+
+        HasEstimatedPeriodQuotaText = QuotaDisplay?.Period == QuotaPeriod.Weekly;
+        EstimatedPeriodQuotaText = QuotaDisplay switch
+        {
+            { Period: QuotaPeriod.Weekly, EstimatedPeriodQuotaLowerUsd: { } lower,
+                EstimatedPeriodQuotaUpperUsd: { } upper } when lower == upper =>
+                $"估算单次周额度 US${FormatUsd(lower)}",
+            { Period: QuotaPeriod.Weekly, EstimatedPeriodQuotaLowerUsd: { } lower,
+                EstimatedPeriodQuotaUpperUsd: { } upper } =>
+                $"估算单次周额度 US${FormatUsd(lower)}–{FormatUsd(upper)}",
+            { Period: QuotaPeriod.Weekly, UsedPercent: <= 0 } =>
+                "估算单次周额度：产生用量后可计算",
+            { Period: QuotaPeriod.Weekly } =>
+                "估算单次周额度：暂不可用",
+            _ => string.Empty,
+        };
     }
 
     private static string FormatUsd(decimal value) =>

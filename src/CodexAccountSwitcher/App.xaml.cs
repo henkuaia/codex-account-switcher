@@ -322,7 +322,9 @@ internal sealed class AccountDialogService(
                 await firstRender;
             },
             appendAsync: (line, token) => new ValueTask(_dispatcher.InvokeAsync(
-                () => window!.AppendLine(line),
+                () => window!.AppendLine(new ProcessOutputLine(
+                    line.Stream,
+                    AddAccountOutputFormatter.Format(line.Text))),
                 token)),
             completeAsync: result => _dispatcher.InvokeAsync(
                 () => window!.Complete(result),

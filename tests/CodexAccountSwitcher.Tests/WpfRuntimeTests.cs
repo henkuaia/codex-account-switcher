@@ -40,6 +40,7 @@ public sealed class WpfRuntimeTests
             MainWindow? mainWindow = null;
             OperationWindow? operationWindow = null;
             OperationWindow? preflightWindow = null;
+            OperationWindow? localizedWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
             try
             {
@@ -157,6 +158,40 @@ public sealed class WpfRuntimeTests
                 Assert.Equal("Close", AutomationProperties.GetName(confirmationClose));
                 confirmationWindow.Close();
 
+                localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                var localizedFirstRender = localizedWindow.ShowAndWaitForFirstRenderAsync(CancellationToken.None);
+                Assert.False(localizedFirstRender.IsCompleted);
+                await localizedFirstRender.WaitAsync(TimeSpan.FromSeconds(5));
+
+                var localizedHeading = Assert.IsType<TextBlock>(localizedWindow.FindName("HeadingText"));
+                var localizedPhase = Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText"));
+                var localizedClose = Assert.IsType<Button>(localizedWindow.FindName("CloseButton"));
+                var localizedHeaderClose = Assert.IsType<Button>(localizedWindow.FindName("HeaderCloseButton"));
+                Assert.Equal("添加账号", localizedHeading.Text);
+                Assert.Equal("等待设备登录", localizedPhase.Text);
+                Assert.Equal("关闭", localizedClose.Content);
+                Assert.Equal("关闭", localizedHeaderClose.ToolTip);
+                Assert.Equal("关闭", AutomationProperties.GetName(localizedHeaderClose));
+                Assert.Equal(Visibility.Collapsed, localizedClose.Visibility);
+                Assert.Equal(Visibility.Collapsed, localizedHeaderClose.Visibility);
+                localizedWindow.Close();
+                Assert.True(localizedWindow.IsVisible);
+
+                localizedWindow.Complete(new CommandResult(0, string.Empty, string.Empty));
+                Assert.Equal("已完成", localizedPhase.Text);
+                Assert.Equal(Visibility.Visible, localizedClose.Visibility);
+                Assert.Equal(Visibility.Visible, localizedHeaderClose.Visibility);
+                localizedWindow.Close();
+                Assert.False(localizedWindow.IsVisible);
+
+                localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                localizedWindow.Complete(new CommandResult(7, string.Empty, string.Empty));
+                Assert.Equal("失败（退出代码 7）", Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText")).Text);
+
+                localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                localizedWindow.Fail();
+                Assert.Equal("操作失败", Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText")).Text);
+
                 operationWindow = new OperationWindow("Add account", "Waiting for device login");
                 var firstRender = operationWindow.ShowAndWaitForFirstRenderAsync(CancellationToken.None);
                 Assert.False(firstRender.IsCompleted);
@@ -164,8 +199,13 @@ public sealed class WpfRuntimeTests
 
                 var operationClose = Assert.IsType<Button>(operationWindow.FindName("CloseButton"));
                 var operationHeaderClose = Assert.IsType<Button>(operationWindow.FindName("HeaderCloseButton"));
+                Assert.Equal("Add account", Assert.IsType<TextBlock>(operationWindow.FindName("HeadingText")).Text);
+                Assert.Equal("Waiting for device login", Assert.IsType<TextBlock>(operationWindow.FindName("PhaseText")).Text);
+                Assert.Equal("Close", operationClose.Content);
+                Assert.Equal("Close", operationHeaderClose.ToolTip);
                 Assert.Equal("Close", AutomationProperties.GetName(operationHeaderClose));
                 Assert.Equal(Visibility.Collapsed, operationClose.Visibility);
+                Assert.Equal(Visibility.Collapsed, operationHeaderClose.Visibility);
                 operationWindow.Close();
                 Assert.True(operationWindow.IsVisible);
 
@@ -173,9 +213,10 @@ public sealed class WpfRuntimeTests
                     ProcessOutputStream.StandardError,
                     "login failed"));
                 operationWindow.Complete(new CommandResult(
-                    1,
+                    7,
                     string.Empty,
                     "login failed"));
+                Assert.Equal("Failed (exit code 7)", Assert.IsType<TextBlock>(operationWindow.FindName("PhaseText")).Text);
                 var streamedOutput = Assert.IsType<TextBox>(
                     operationWindow.FindName("OutputTextBox")).Text;
                 Assert.Equal(1, CountOccurrences(streamedOutput, "login failed"));
@@ -188,13 +229,26 @@ public sealed class WpfRuntimeTests
                     1,
                     string.Empty,
                     "Authorization: Bearer secret-value"));
+                Assert.Equal("Failed (exit code 1)", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
                 var output = Assert.IsType<TextBox>(preflightWindow.FindName("OutputTextBox")).Text;
                 Assert.Contains("[REDACTED]", output, StringComparison.Ordinal);
                 Assert.DoesNotContain("secret-value", output, StringComparison.Ordinal);
+
+                preflightWindow = new OperationWindow("Remove account", "Waiting for account picker");
+                preflightWindow.Complete(new CommandResult(0, string.Empty, string.Empty));
+                Assert.Equal("Completed", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
+                preflightWindow.Fail();
+                Assert.Equal("Operation failed", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
             }
             finally
             {
                 confirmationWindow?.Close();
+                if (localizedWindow?.IsVisible == true)
+                {
+                    localizedWindow.Fail();
+                    localizedWindow.Close();
+                }
+
                 if (preflightWindow?.IsVisible == true)
                 {
                     preflightWindow.Close();

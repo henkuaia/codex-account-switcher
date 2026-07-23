@@ -315,7 +315,10 @@ internal sealed class AccountDialogService(
                 await _dispatcher.InvokeAsync(
                     () =>
                     {
-                        window = CreateOperationWindow("Add account", "Waiting for device login");
+                        window = new OperationWindow(OperationWindowText.AddAccount)
+                        {
+                            Owner = _ownerProvider(),
+                        };
                         firstRender = window.ShowAndWaitForFirstRenderAsync(cancellationToken);
                     },
                     cancellationToken);

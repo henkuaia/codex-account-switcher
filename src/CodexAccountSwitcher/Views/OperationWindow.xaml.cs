@@ -1,5 +1,7 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Input;
 using CodexAccountSwitcher.Security;
 using CodexAccountSwitcher.Services;
@@ -9,18 +11,27 @@ namespace CodexAccountSwitcher.Views;
 
 public partial class OperationWindow : Window
 {
+    private readonly OperationWindowText _text;
     private bool _canClose;
     private bool _hasStreamedOutput;
     private readonly TaskCompletionSource _firstRender =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public OperationWindow(string heading, string phase)
+        : this(OperationWindowText.English(heading, phase))
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(heading);
-        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
+    }
+
+    internal OperationWindow(OperationWindowText text)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        _text = text;
         InitializeComponent();
-        HeadingText.Text = heading;
-        PhaseText.Text = phase;
+        HeadingText.Text = text.Heading;
+        PhaseText.Text = text.Phase;
+        CloseButton.Content = text.Close;
+        HeaderCloseButton.ToolTip = text.Close;
+        AutomationProperties.SetName(HeaderCloseButton, text.Close);
         ContentRendered += OnContentRendered;
     }
 
@@ -47,8 +58,8 @@ public partial class OperationWindow : Window
     {
         ArgumentNullException.ThrowIfNull(result);
         PhaseText.Text = result.Succeeded
-            ? "Completed"
-            : $"Failed (exit code {result.ExitCode})";
+            ? _text.Completed
+            : string.Format(CultureInfo.InvariantCulture, _text.Failed, result.ExitCode);
         if (!result.Succeeded && !_hasStreamedOutput)
         {
             AppendSanitizedFailure(result);
@@ -59,7 +70,7 @@ public partial class OperationWindow : Window
 
     public void Fail()
     {
-        PhaseText.Text = "Operation failed";
+        PhaseText.Text = _text.OperationFailed;
         EnableClose();
     }
 
@@ -108,6 +119,36 @@ public partial class OperationWindow : Window
         {
             DragMove();
         }
+    }
+}
+
+internal sealed record OperationWindowText(
+    string Heading,
+    string Phase,
+    string Completed,
+    string Failed,
+    string OperationFailed,
+    string Close)
+{
+    public static OperationWindowText AddAccount { get; } = new(
+        "添加账号",
+        "等待设备登录",
+        "已完成",
+        "失败（退出代码 {0}）",
+        "操作失败",
+        "关闭");
+
+    public static OperationWindowText English(string heading, string phase)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(heading);
+        ArgumentException.ThrowIfNullOrWhiteSpace(phase);
+        return new OperationWindowText(
+            heading,
+            phase,
+            "Completed",
+            "Failed (exit code {0})",
+            "Operation failed",
+            "Close");
     }
 }
 

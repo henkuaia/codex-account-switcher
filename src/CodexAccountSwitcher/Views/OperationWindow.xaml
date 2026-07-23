@@ -45,8 +45,6 @@
                         Width="36"
                         Click="Close_Click"
                         Style="{StaticResource ActionButtonStyle}"
-                        ToolTip="Close"
-                        AutomationProperties.Name="Close"
                         Visibility="Collapsed">
                     <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
                 </Button>
@@ -77,7 +75,6 @@
                         Width="88"
                         HorizontalAlignment="Right"
                         Click="Close_Click"
-                        Content="Close"
                         Style="{StaticResource PrimaryButtonStyle}"
                         Visibility="Collapsed" />
             </Border>

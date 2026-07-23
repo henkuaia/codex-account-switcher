@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using CodexAccountSwitcher.Models;
 
@@ -23,7 +24,12 @@ public static class QuotaResponseParser
             }
 
             var display = candidates.MinBy(candidate => candidate.RemainingPercent)!;
-            return QuotaParseResult.Success(display with { Tooltip = BuildTooltip(candidates) });
+            return QuotaParseResult.Success(display with
+            {
+                Tooltip = BuildTooltip(candidates),
+                AvailableResetCount = ReadAvailableResetCount(document.RootElement),
+                IndividualLimitUsd = ReadIndividualLimit(document.RootElement),
+            });
         }
         catch (JsonException)
         {
@@ -99,6 +105,49 @@ public static class QuotaResponseParser
         }
 
         return true;
+    }
+
+    private static int? ReadAvailableResetCount(JsonElement root)
+    {
+        if (!root.TryGetProperty("rate_limit_reset_credits", out var resetCredits) ||
+            resetCredits.ValueKind != JsonValueKind.Object ||
+            !resetCredits.TryGetProperty("available_count", out var count))
+        {
+            return null;
+        }
+
+        if (count.ValueKind == JsonValueKind.Number &&
+            count.TryGetInt32(out var numericCount) &&
+            numericCount >= 0)
+        {
+            return numericCount;
+        }
+
+        if (count.ValueKind == JsonValueKind.String &&
+            int.TryParse(
+                count.GetString(),
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out var textCount) &&
+            textCount >= 0)
+        {
+            return textCount;
+        }
+
+        return null;
+    }
+
+    private static decimal? ReadIndividualLimit(JsonElement root)
+    {
+        if (!root.TryGetProperty("individual_limit", out var limit) ||
+            limit.ValueKind != JsonValueKind.Number ||
+            !limit.TryGetDecimal(out var value) ||
+            value < 0)
+        {
+            return null;
+        }
+
+        return value;
     }
 
     private static int RemainingPercent(double usedPercent)

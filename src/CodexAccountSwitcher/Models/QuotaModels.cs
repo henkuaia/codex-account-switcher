@@ -12,7 +12,12 @@ public sealed record QuotaDisplay(
     int RemainingPercent,
     DateTimeOffset? ResetsAt,
     TimeSpan WindowDuration,
-    string Tooltip);
+    string Tooltip)
+{
+    public int? AvailableResetCount { get; init; }
+
+    public decimal? IndividualLimitUsd { get; init; }
+}
 
 public sealed record QuotaParseResult(QuotaDisplay? Display, string? Error)
 {

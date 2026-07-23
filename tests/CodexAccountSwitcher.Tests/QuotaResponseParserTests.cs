@@ -95,6 +95,75 @@ public sealed class QuotaResponseParserTests
         Assert.Contains("Monthly", display.Tooltip);
     }
 
+    [Theory]
+    [InlineData("2", 2)]
+    [InlineData("\"3\"", 3)]
+    public void Reads_available_reset_count_from_usage_snapshot(string value, int expected)
+    {
+        var json =
+            "{\"rate_limit\":{\"primary_window\":{\"used_percent\":20," +
+            "\"limit_window_seconds\":604800}}," +
+            "\"rate_limit_reset_credits\":{\"available_count\":" + value + "}}";
+
+        var display = QuotaResponseParser.Parse(json).Display!;
+
+        Assert.Equal(expected, display.AvailableResetCount);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1.5")]
+    [InlineData("\"invalid\"")]
+    public void Invalid_available_reset_count_remains_unknown(string value)
+    {
+        var json =
+            "{\"rate_limit\":{\"primary_window\":{\"used_percent\":20," +
+            "\"limit_window_seconds\":604800}}," +
+            "\"rate_limit_reset_credits\":{\"available_count\":" + value + "}}";
+
+        Assert.Null(QuotaResponseParser.Parse(json).Display!.AvailableResetCount);
+    }
+
+    [Fact]
+    public void Reads_official_monthly_limit_without_treating_credit_balance_as_period_quota()
+    {
+        const string json = """
+        {
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 20,
+              "limit_window_seconds": 604800
+            }
+          },
+          "rate_limit_reset_credits": { "available_count": 2 },
+          "individual_limit": 200,
+          "credits": { "balance": "9000" }
+        }
+        """;
+
+        var display = QuotaResponseParser.Parse(json).Display!;
+
+        Assert.Equal(200m, display.IndividualLimitUsd);
+    }
+
+    [Fact]
+    public void Credit_balance_alone_does_not_populate_official_monthly_limit()
+    {
+        const string json = """
+        {
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 20,
+              "limit_window_seconds": 604800
+            }
+          },
+          "credits": { "balance": "9000" }
+        }
+        """;
+
+        Assert.Null(QuotaResponseParser.Parse(json).Display!.IndividualLimitUsd);
+    }
+
     [Fact]
     public void Ignores_unrecognized_window_properties()
     {

@@ -221,7 +221,8 @@ public sealed class AccountRowViewModel : ObservableObject
             ? $"官方月度上限 US${FormatUsd(limit)}"
             : string.Empty;
 
-        HasEstimatedPeriodQuotaText = QuotaDisplay?.Period == QuotaPeriod.Weekly;
+        HasEstimatedPeriodQuotaText =
+            QuotaDisplay?.Period is QuotaPeriod.Weekly or QuotaPeriod.Monthly;
         EstimatedPeriodQuotaText = QuotaDisplay switch
         {
             { Period: QuotaPeriod.Weekly, EstimatedPeriodQuotaLowerUsd: { } lower,
@@ -234,6 +235,16 @@ public sealed class AccountRowViewModel : ObservableObject
                 "估算单次周额度：产生用量后可计算",
             { Period: QuotaPeriod.Weekly } =>
                 "估算单次周额度：暂不可用",
+            { Period: QuotaPeriod.Monthly, EstimatedPeriodQuotaLowerUsd: { } lower,
+                EstimatedPeriodQuotaUpperUsd: { } upper } when lower == upper =>
+                $"估算单次月额度 US${FormatUsd(lower)}",
+            { Period: QuotaPeriod.Monthly, EstimatedPeriodQuotaLowerUsd: { } lower,
+                EstimatedPeriodQuotaUpperUsd: { } upper } =>
+                $"估算单次月额度 US${FormatUsd(lower)}–{FormatUsd(upper)}",
+            { Period: QuotaPeriod.Monthly, UsedPercent: <= 0 } =>
+                "估算单次月额度：产生用量后可计算",
+            { Period: QuotaPeriod.Monthly } =>
+                "估算单次月额度：暂不可用",
             _ => string.Empty,
         };
     }

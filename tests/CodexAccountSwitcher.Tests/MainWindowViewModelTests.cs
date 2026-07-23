@@ -1239,6 +1239,116 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Monthly_estimate_is_shown_as_a_separate_range()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyMetadata(new AccountMetadata(220m, 2));
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                50,
+                null,
+                TimeSpan.FromDays(30),
+                "monthly")
+            {
+                UsedPercent = 50,
+                EstimatedPeriodQuotaLowerUsd = 160m,
+                EstimatedPeriodQuotaUpperUsd = 200m,
+            },
+            null));
+
+        Assert.Equal("单次月额度 US$220", row.PeriodQuotaText);
+        Assert.Equal("估算单次月额度 US$160–200", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
+    public void Monthly_equal_estimate_bounds_are_shown_as_one_value()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                50,
+                null,
+                TimeSpan.FromDays(30),
+                "monthly")
+            {
+                UsedPercent = 50,
+                EstimatedPeriodQuotaLowerUsd = 180m,
+                EstimatedPeriodQuotaUpperUsd = 180m,
+            },
+            null));
+
+        Assert.Equal("估算单次月额度 US$180", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
+    public void Unused_monthly_window_explains_why_estimate_is_missing()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                100,
+                null,
+                TimeSpan.FromDays(30),
+                "monthly")
+            {
+                UsedPercent = 0,
+            },
+            null));
+
+        Assert.Equal("估算单次月额度：产生用量后可计算", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
+    public void Monthly_window_without_a_reliable_estimate_is_marked_unavailable()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                88,
+                null,
+                TimeSpan.FromDays(30),
+                "monthly")
+            {
+                UsedPercent = 12,
+            },
+            null));
+
+        Assert.Equal("估算单次月额度：暂不可用", row.EstimatedPeriodQuotaText);
+        Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
     public async Task Metadata_load_and_edit_are_isolated_by_account_key_and_saved_before_display()
     {
         var first = Accounts.Record("first-key", "first@example.com");

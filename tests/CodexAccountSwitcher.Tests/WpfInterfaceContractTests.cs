@@ -46,14 +46,14 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
-    public void Add_confirmation_discloses_close_activation_and_restart_before_login()
+    public void Add_confirmation_discloses_close_browser_login_save_and_restart()
     {
         var source = File.ReadAllText(Path.Combine(
             FindDirectory("src", "CodexAccountSwitcher"),
             "App.xaml.cs"));
 
         Assert.Contains(
-            "Codex will close during device login. The authenticated account will become active, then Codex will restart.",
+            "添加账号时 Codex 会暂时关闭，并打开普通浏览器登录。登录成功后账号会保存，Codex 随后重启。",
             source,
             StringComparison.Ordinal);
     }

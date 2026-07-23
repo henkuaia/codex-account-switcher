@@ -1,6 +1,16 @@
+<div align="center">
+
 # Codex Account Switcher
 
-Windows 上的 Codex 账号切换工具。发布目录中的 `CodexAccountSwitcher.exe` 依赖已安装的 **.NET 9 Desktop Runtime (x64)**。
+**Windows 上的 Codex 多账号安全切换器，支持额度查看、设备登录和托盘运行**
+
+![platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4?style=flat)
+[![built with](https://img.shields.io/badge/built%20with-.NET%209%20%C2%B7%20WPF-512BD4?style=flat)](https://learn.microsoft.com/dotnet/desktop/wpf/)
+[![helper](https://img.shields.io/badge/helper-codex--auth%200.2.10-2EA44F?style=flat)](https://github.com/Loongphy/codex-auth/releases/tag/v0.2.10)
+
+</div>
+
+发布目录中的 `CodexAccountSwitcher.exe` 依赖已安装的 **.NET 9 Desktop Runtime (x64)**。
 
 本项目采用 [MIT License](LICENSE)。内置第三方组件及其来源见
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

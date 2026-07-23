@@ -2,6 +2,9 @@
 
 Windows 上的 Codex 账号切换工具。发布目录中的 `CodexAccountSwitcher.exe` 依赖已安装的 **.NET 9 Desktop Runtime (x64)**。
 
+本项目采用 [MIT License](LICENSE)。内置第三方组件及其来源见
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 ## 使用
 
 1. 运行 `CodexAccountSwitcher.exe`，选择 **Add account** 并确认。工具会先安全关闭 Codex，再启动普通浏览器登录；认证成功的新账号会立即成为活动账号，随后工具重新启动 Codex。登录过程中可以安全取消并恢复此前账号。

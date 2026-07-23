@@ -42,6 +42,7 @@ public sealed class WpfRuntimeTests
             OperationWindow? preflightWindow = null;
             OperationWindow? localizedWindow = null;
             OperationWindow? dialogLoginWindow = null;
+            OperationWindow? canceledLoginWindow = null;
             OperationWindow? dialogRemoveWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
             try
@@ -170,7 +171,7 @@ public sealed class WpfRuntimeTests
                 var localizedClose = Assert.IsType<Button>(localizedWindow.FindName("CloseButton"));
                 var localizedHeaderClose = Assert.IsType<Button>(localizedWindow.FindName("HeaderCloseButton"));
                 Assert.Equal("添加账号", localizedHeading.Text);
-                Assert.Equal("等待设备登录", localizedPhase.Text);
+                Assert.Equal("等待浏览器登录", localizedPhase.Text);
                 Assert.Equal("关闭", localizedClose.Content);
                 Assert.Equal("关闭", localizedHeaderClose.ToolTip);
                 Assert.Equal("关闭", AutomationProperties.GetName(localizedHeaderClose));
@@ -242,9 +243,15 @@ public sealed class WpfRuntimeTests
                 preflightWindow.Fail();
                 Assert.Equal("Operation failed", Assert.IsType<TextBlock>(preflightWindow.FindName("PhaseText")).Text);
 
+                var cancelConfirmations = 0;
                 var dialog = new AccountDialogService(
                     () => null,
-                    new WpfUiDispatcher(Dispatcher.CurrentDispatcher));
+                    new WpfUiDispatcher(Dispatcher.CurrentDispatcher),
+                    _ =>
+                    {
+                        cancelConfirmations++;
+                        return true;
+                    });
                 const string url = "https://auth.openai.com/codex/device";
                 const string deviceCode = "ABCD-EFGH";
                 var windowsBeforeLogin = Application.Current.Windows.OfType<OperationWindow>().ToHashSet();
@@ -296,6 +303,51 @@ public sealed class WpfRuntimeTests
                     Application.Current.Windows.OfType<OperationWindow>(),
                     window => !windowsBeforeLogin.Contains(window));
 
+                var windowsBeforeCancel = Application.Current.Windows.OfType<OperationWindow>().ToHashSet();
+                var operationStarted = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var operationCanceled = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var canceledDialogTask = dialog.RunLoginAsync(
+                    async (_, cancellationToken) =>
+                    {
+                        canceledLoginWindow = Assert.Single(
+                            Application.Current.Windows.OfType<OperationWindow>(),
+                            window => !windowsBeforeCancel.Contains(window));
+                        operationStarted.TrySetResult();
+                        try
+                        {
+                            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                        }
+                        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                        {
+                            operationCanceled.TrySetResult();
+                        }
+
+                        return CommandResult.Failed("Canceled.");
+                    },
+                    CancellationToken.None);
+
+                await operationStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.NotNull(canceledLoginWindow);
+                var cancelButton = Assert.IsType<Button>(canceledLoginWindow.FindName("CloseButton"));
+                var cancelHeader = Assert.IsType<Button>(canceledLoginWindow.FindName("HeaderCloseButton"));
+                var cancelPhase = Assert.IsType<TextBlock>(canceledLoginWindow.FindName("PhaseText"));
+                Assert.Equal(Visibility.Visible, cancelButton.Visibility);
+                Assert.Equal(Visibility.Visible, cancelHeader.Visibility);
+                Assert.Equal("取消登录", cancelButton.Content);
+
+                cancelButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                cancelHeader.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+                await operationCanceled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                await canceledDialogTask.WaitAsync(TimeSpan.FromSeconds(5));
+                Assert.Equal(1, cancelConfirmations);
+                Assert.Equal("登录已取消", cancelPhase.Text);
+                Assert.Equal("关闭", cancelButton.Content);
+                canceledLoginWindow.Close();
+                Assert.False(canceledLoginWindow.IsVisible);
+
                 var windowsBeforeRemoval = Application.Current.Windows.OfType<OperationWindow>().ToHashSet();
                 var removeResult = await dialog.RunRemoveAsync(
                     _ =>
@@ -346,6 +398,12 @@ public sealed class WpfRuntimeTests
                 {
                     dialogLoginWindow.Complete(new CommandResult(1, string.Empty, string.Empty));
                     dialogLoginWindow.Close();
+                }
+
+                if (canceledLoginWindow?.IsVisible == true)
+                {
+                    canceledLoginWindow.Fail();
+                    canceledLoginWindow.Close();
                 }
 
                 if (dialogRemoveWindow?.IsVisible == true)

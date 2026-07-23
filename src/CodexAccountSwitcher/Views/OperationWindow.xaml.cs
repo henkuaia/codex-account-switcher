@@ -12,7 +12,10 @@ namespace CodexAccountSwitcher.Views;
 public partial class OperationWindow : Window
 {
     private readonly OperationWindowText _text;
+    private readonly Action? _requestCancel;
+    private readonly Func<bool>? _confirmCancel;
     private bool _canClose;
+    private bool _cancelRequested;
     private bool _hasStreamedOutput;
     private readonly TaskCompletionSource _firstRender =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -23,9 +26,19 @@ public partial class OperationWindow : Window
     }
 
     internal OperationWindow(OperationWindowText text)
+        : this(text, requestCancel: null, confirmCancel: null)
+    {
+    }
+
+    internal OperationWindow(
+        OperationWindowText text,
+        Action? requestCancel,
+        Func<bool>? confirmCancel)
     {
         ArgumentNullException.ThrowIfNull(text);
         _text = text;
+        _requestCancel = requestCancel;
+        _confirmCancel = confirmCancel;
         InitializeComponent();
         Title = text.Heading;
         HeadingText.Text = text.Heading;
@@ -33,6 +46,15 @@ public partial class OperationWindow : Window
         CloseButton.Content = text.Close;
         HeaderCloseButton.ToolTip = text.Close;
         AutomationProperties.SetName(HeaderCloseButton, text.Close);
+        if (_requestCancel is not null)
+        {
+            CloseButton.Content = text.Cancel;
+            HeaderCloseButton.ToolTip = text.Cancel;
+            AutomationProperties.SetName(HeaderCloseButton, text.Cancel);
+            CloseButton.Visibility = Visibility.Visible;
+            HeaderCloseButton.Visibility = Visibility.Visible;
+        }
+
         ContentRendered += OnContentRendered;
     }
 
@@ -75,9 +97,20 @@ public partial class OperationWindow : Window
         EnableClose();
     }
 
+    public void Cancelled()
+    {
+        PhaseText.Text = _text.Cancelled;
+        EnableClose();
+    }
+
     private void EnableClose()
     {
         _canClose = true;
+        CloseButton.IsEnabled = true;
+        HeaderCloseButton.IsEnabled = true;
+        CloseButton.Content = _text.Close;
+        HeaderCloseButton.ToolTip = _text.Close;
+        AutomationProperties.SetName(HeaderCloseButton, _text.Close);
         HeaderCloseButton.Visibility = Visibility.Visible;
         CloseButton.Visibility = Visibility.Visible;
     }
@@ -109,10 +142,36 @@ public partial class OperationWindow : Window
         if (!_canClose)
         {
             e.Cancel = true;
+            RequestCancel();
         }
     }
 
-    private void Close_Click(object sender, RoutedEventArgs e) => Close();
+    private void Close_Click(object sender, RoutedEventArgs e)
+    {
+        if (_canClose)
+        {
+            Close();
+            return;
+        }
+
+        RequestCancel();
+    }
+
+    private void RequestCancel()
+    {
+        if (_requestCancel is null ||
+            _cancelRequested ||
+            _confirmCancel?.Invoke() != true)
+        {
+            return;
+        }
+
+        _cancelRequested = true;
+        PhaseText.Text = _text.Cancelling;
+        CloseButton.IsEnabled = false;
+        HeaderCloseButton.IsEnabled = false;
+        _requestCancel();
+    }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
@@ -129,15 +188,21 @@ internal sealed record OperationWindowText(
     string Completed,
     string Failed,
     string OperationFailed,
-    string Close)
+    string Close,
+    string Cancel,
+    string Cancelling,
+    string Cancelled)
 {
     public static OperationWindowText AddAccount { get; } = new(
         "添加账号",
-        "等待设备登录",
+        "等待浏览器登录",
         "已完成",
         "失败（退出代码 {0}）",
         "操作失败",
-        "关闭");
+        "关闭",
+        "取消登录",
+        "正在取消登录…",
+        "登录已取消");
 
     public static OperationWindowText English(string heading, string phase)
     {
@@ -149,7 +214,10 @@ internal sealed record OperationWindowText(
             "Completed",
             "Failed (exit code {0})",
             "Operation failed",
-            "Close");
+            "Close",
+            "Cancel",
+            "Canceling...",
+            "Login canceled");
     }
 }
 

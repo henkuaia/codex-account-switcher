@@ -240,12 +240,20 @@ internal sealed class WpfUiDispatcher(Dispatcher dispatcher) : IUiDispatcher
 
 internal sealed class AccountDialogService(
     Func<Window?> ownerProvider,
-    IUiDispatcher dispatcher) : IAccountDialogService
+    IUiDispatcher dispatcher,
+    Func<Window, bool>? confirmCancel = null) : IAccountDialogService
 {
     private readonly Func<Window?> _ownerProvider = ownerProvider
         ?? throw new ArgumentNullException(nameof(ownerProvider));
     private readonly IUiDispatcher _dispatcher = dispatcher
         ?? throw new ArgumentNullException(nameof(dispatcher));
+    private readonly Func<Window, bool> _confirmCancel = confirmCancel
+        ?? (window => System.Windows.MessageBox.Show(
+            window,
+            "确定要取消当前登录吗？取消后将恢复此前账号。",
+            "取消登录",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question) == MessageBoxResult.Yes);
 
     public async Task<bool> ConfirmAddAsync(CancellationToken cancellationToken)
     {
@@ -253,8 +261,8 @@ internal sealed class AccountDialogService(
         await _dispatcher.InvokeAsync(
             () => confirmed = System.Windows.MessageBox.Show(
                 _ownerProvider(),
-                "Codex will close during device login. The authenticated account will become active, then Codex will restart.",
-                "Add account",
+                "添加账号时 Codex 会暂时关闭，并打开普通浏览器登录。登录成功后账号会保存，Codex 随后重启。",
+                "添加账号",
                 MessageBoxButton.OKCancel,
                 MessageBoxImage.Warning) == MessageBoxResult.OK,
             cancellationToken);
@@ -302,26 +310,32 @@ internal sealed class AccountDialogService(
         return confirmed;
     }
 
-    public Task<CommandResult> RunLoginAsync(
+    public async Task<CommandResult> RunLoginAsync(
         Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> operation,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(operation);
+        using var loginCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         OperationWindow? window = null;
-        return DialogOperationRunner.RunLoginAsync(
+        return await DialogOperationRunner.RunLoginAsync(
             showAsync: async () =>
             {
                 Task firstRender = Task.CompletedTask;
                 await _dispatcher.InvokeAsync(
                     () =>
                     {
-                        window = new OperationWindow(OperationWindowText.AddAccount)
+                        window = new OperationWindow(
+                            OperationWindowText.AddAccount,
+                            loginCancellation.Cancel,
+                            () => _confirmCancel(window!))
                         {
                             Owner = _ownerProvider(),
                         };
-                        firstRender = window.ShowAndWaitForFirstRenderAsync(cancellationToken);
+                        firstRender = window.ShowAndWaitForFirstRenderAsync(
+                            loginCancellation.Token);
                     },
-                    cancellationToken);
+                    loginCancellation.Token);
                 await firstRender;
             },
             appendAsync: (line, token) => new ValueTask(_dispatcher.InvokeAsync(
@@ -330,13 +344,33 @@ internal sealed class AccountDialogService(
                     AddAccountOutputFormatter.Format(line.Text))),
                 token)),
             completeAsync: result => _dispatcher.InvokeAsync(
-                () => window!.Complete(result),
+                () =>
+                {
+                    if (loginCancellation.IsCancellationRequested)
+                    {
+                        window!.Cancelled();
+                    }
+                    else
+                    {
+                        window!.Complete(result);
+                    }
+                },
                 CancellationToken.None),
             failAsync: _ => _dispatcher.InvokeAsync(
-                () => window?.Fail(),
+                () =>
+                {
+                    if (loginCancellation.IsCancellationRequested)
+                    {
+                        window?.Cancelled();
+                    }
+                    else
+                    {
+                        window?.Fail();
+                    }
+                },
                 CancellationToken.None),
             operation,
-            cancellationToken);
+            loginCancellation.Token);
     }
 
     public Task<CommandResult> RunRemoveAsync(

@@ -92,4 +92,19 @@ public sealed class AccountMetadataServiceTests
             () => service.SaveAsync(new Dictionary<string, AccountMetadata>(), default));
         Assert.Equal(unsupported, await File.ReadAllTextAsync(path));
     }
+
+    [Fact]
+    public async Task Locked_file_is_reported_instead_of_breaking_account_loading()
+    {
+        using var directory = new TemporaryDirectory();
+        directory.Write("metadata.json", """{"schemaVersion":1,"accounts":{}}""");
+        var path = System.IO.Path.Combine(directory.Path, "metadata.json");
+        var service = new AccountMetadataService(path);
+        using var lockStream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.None);
+
+        var result = await service.LoadAsync(default);
+
+        Assert.Empty(result.Accounts);
+        Assert.Equal("账号额度记录暂时无法读取，原文件已保留。", result.Error);
+    }
 }

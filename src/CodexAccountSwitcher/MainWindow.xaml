@@ -163,6 +163,7 @@
                                                         <RowDefinition Height="Auto" />
                                                         <RowDefinition Height="Auto" />
                                                         <RowDefinition Height="Auto" />
+                                                        <RowDefinition Height="Auto" />
                                                     </Grid.RowDefinitions>
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -212,6 +213,58 @@
                                                                  Value="{Binding QuotaDisplay.RemainingPercent, TargetNullValue=0}"
                                                                  Style="{StaticResource QuietProgressBarStyle}"
                                                                  ToolTip="{Binding QuotaToolTip}" />
+                                                    <Grid Grid.Row="3"
+                                                          Grid.ColumnSpan="2"
+                                                          Margin="0,8,0,0">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="Auto" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <StackPanel>
+                                                            <WrapPanel>
+                                                                <TextBlock Margin="0,0,12,0"
+                                                                           FontSize="11"
+                                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                                           Text="{Binding AvailableResetText}" />
+                                                                <TextBlock FontSize="11"
+                                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                                           Text="{Binding UsedResetText}" />
+                                                            </WrapPanel>
+                                                            <WrapPanel Margin="0,3,0,0">
+                                                                <TextBlock Margin="0,0,12,0"
+                                                                           FontSize="11"
+                                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                                           Text="{Binding PeriodQuotaText}" />
+                                                                <TextBlock FontSize="11"
+                                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                                           Text="{Binding OfficialMonthlyLimitText}">
+                                                                    <TextBlock.Style>
+                                                                        <Style TargetType="TextBlock">
+                                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                                            <Style.Triggers>
+                                                                                <DataTrigger Binding="{Binding HasOfficialMonthlyLimit}" Value="True">
+                                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                                </DataTrigger>
+                                                                            </Style.Triggers>
+                                                                        </Style>
+                                                                    </TextBlock.Style>
+                                                                </TextBlock>
+                                                            </WrapPanel>
+                                                        </StackPanel>
+                                                        <Button x:Name="EditMetadataButton"
+                                                                Grid.Column="1"
+                                                                Width="28"
+                                                                Height="28"
+                                                                Margin="8,0,0,0"
+                                                                VerticalAlignment="Center"
+                                                                Command="{Binding DataContext.EditMetadataCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                CommandParameter="{Binding}"
+                                                                Style="{StaticResource ActionButtonStyle}"
+                                                                ToolTip="编辑额度记录"
+                                                                AutomationProperties.Name="编辑额度记录">
+                                                            <TextBlock FontFamily="Segoe Fluent Icons" FontSize="13" Text="&#xE70F;" />
+                                                        </Button>
+                                                    </Grid>
                                                 </Grid>
                                             </Grid>
                                         </Border>

@@ -81,6 +81,14 @@ public sealed class AccountMetadataService
         {
             return Blocked("账号额度记录文件无效，原文件已保留。");
         }
+        catch (IOException)
+        {
+            return Blocked("账号额度记录暂时无法读取，原文件已保留。");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Blocked("账号额度记录暂时无法读取，原文件已保留。");
+        }
     }
 
     public async Task SaveAsync(

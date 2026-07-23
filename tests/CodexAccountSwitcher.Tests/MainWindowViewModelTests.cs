@@ -1149,6 +1149,103 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("quota failed (HTTP 403).", RequiredProperty<string>(row, "QuotaToolTip"));
     }
 
+    [Fact]
+    public void Account_row_formats_server_reset_snapshot_and_local_metadata_separately()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyMetadata(new AccountMetadata(40m, 3));
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Weekly,
+                73,
+                null,
+                TimeSpan.FromDays(7),
+                "weekly")
+            {
+                AvailableResetCount = 2,
+                IndividualLimitUsd = 200m,
+            },
+            null));
+
+        Assert.Equal("可用重置 2", row.AvailableResetText);
+        Assert.Equal("已用重置 3（本机）", row.UsedResetText);
+        Assert.Equal("单次周额度 US$40", row.PeriodQuotaText);
+        Assert.Equal("官方月度上限 US$200", row.OfficialMonthlyLimitText);
+        Assert.True(row.HasOfficialMonthlyLimit);
+    }
+
+    [Fact]
+    public void Missing_server_and_local_values_are_not_presented_as_zero()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyMetadata(new AccountMetadata(null, 0));
+
+        Assert.Equal("可用重置 —", row.AvailableResetText);
+        Assert.Equal("已用重置 0（本机）", row.UsedResetText);
+        Assert.Equal("单次额度 —", row.PeriodQuotaText);
+        Assert.False(row.HasOfficialMonthlyLimit);
+    }
+
+    [Fact]
+    public async Task Metadata_load_and_edit_are_isolated_by_account_key_and_saved_before_display()
+    {
+        var first = Accounts.Record("first-key", "first@example.com");
+        var second = Accounts.Record("second-key", "second@example.com");
+        var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
+        var dialog = new FakeDialogService
+        {
+            MetadataResult = new AccountMetadata(60m, 4),
+        };
+        IReadOnlyDictionary<string, AccountMetadata>? saved = null;
+        var viewModel = new MainWindowViewModel(
+            _ => Task.FromResult(registry),
+            (_, _, _) => Task.CompletedTask,
+            (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
+            (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+            (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
+            _ => Task.FromResult(true),
+            () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            dialog,
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+            _ => Task.FromResult(new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>
+                {
+                    [second.AccountKey] = new AccountMetadata(40m, 3),
+                },
+                null)),
+            (metadata, _) =>
+            {
+                saved = new Dictionary<string, AccountMetadata>(metadata);
+                return Task.CompletedTask;
+            });
+
+        await viewModel.LoadAsync();
+        var firstRow = Assert.Single(viewModel.Accounts, row => row.Account.AccountKey == first.AccountKey);
+        var secondRow = Assert.Single(viewModel.Accounts, row => row.Account.AccountKey == second.AccountKey);
+        Assert.Equal("单次额度 —", firstRow.PeriodQuotaText);
+        Assert.Equal("单次额度 US$40", secondRow.PeriodQuotaText);
+
+        await viewModel.EditMetadataCommand.ExecuteAsync(secondRow);
+
+        Assert.NotNull(saved);
+        Assert.Equal(new AccountMetadata(60m, 4), saved[second.AccountKey]);
+        Assert.Equal("单次额度 US$60", secondRow.PeriodQuotaText);
+        Assert.Equal("已用重置 4（本机）", secondRow.UsedResetText);
+        Assert.Equal("额度记录已保存。", viewModel.StatusText);
+    }
+
     [Theory]
     [InlineData("success", "Codex launched.", false)]
     [InlineData("failure", "Codex launch retry failed.", true)]
@@ -1633,6 +1730,14 @@ public sealed class MainWindowViewModelTests
             return Task.FromResult(accounts.FirstOrDefault(account => !account.IsActive));
         }
 
+        public Task<AccountMetadata?> EditMetadataAsync(
+            AccountRowViewModel target,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult<AccountMetadata?>(null);
+        }
+
         public Task<bool> ConfirmSwitchAsync(
             AccountRowViewModel target,
             CancellationToken cancellationToken)
@@ -1666,6 +1771,8 @@ public sealed class MainWindowViewModelTests
 
         public AccountRowViewModel? RemovalTarget { get; set; }
 
+        public AccountMetadata? MetadataResult { get; set; }
+
         public bool CancelRemovalSelection { get; set; }
 
         public TaskCompletionSource LoginStarted { get; } =
@@ -1686,6 +1793,14 @@ public sealed class MainWindowViewModelTests
             return Task.FromResult(CancelRemovalSelection
                 ? null
                 : RemovalTarget ?? accounts.FirstOrDefault(account => !account.IsActive));
+        }
+
+        public Task<AccountMetadata?> EditMetadataAsync(
+            AccountRowViewModel target,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(MetadataResult);
         }
 
         public Task<bool> ConfirmSwitchAsync(

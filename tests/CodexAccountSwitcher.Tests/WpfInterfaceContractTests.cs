@@ -46,6 +46,20 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Main_window_exposes_compact_reset_quota_metadata_and_edit_command()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("Text=\"{Binding AvailableResetText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding UsedResetText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding PeriodQuotaText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"{Binding OfficialMonthlyLimitText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Command=\"{Binding DataContext.EditMetadataCommand", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Add_confirmation_discloses_close_browser_login_save_and_restart()
     {
         var source = File.ReadAllText(Path.Combine(

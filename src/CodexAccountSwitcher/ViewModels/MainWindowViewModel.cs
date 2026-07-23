@@ -21,6 +21,10 @@ public interface IAccountDialogService
 {
     Task<bool> ConfirmAddAsync(CancellationToken cancellationToken);
 
+    Task<AccountMetadata?> EditMetadataAsync(
+        AccountRowViewModel target,
+        CancellationToken cancellationToken);
+
     Task<AccountRowViewModel?> SelectRemovalTargetAsync(
         IReadOnlyList<AccountRowViewModel> accounts,
         CancellationToken cancellationToken);
@@ -60,10 +64,16 @@ public sealed class MainWindowViewModel : ObservableObject
         CancellationToken,
         Task<SwitchResult>> _switchAsync;
     private readonly Func<CancellationToken, Task<bool>> _retryLaunchAsync;
+    private readonly Func<CancellationToken, Task<AccountMetadataLoadResult>> _loadMetadataAsync;
+    private readonly Func<
+        IReadOnlyDictionary<string, AccountMetadata>,
+        CancellationToken,
+        Task> _saveMetadataAsync;
     private readonly Func<HelperAvailability> _checkHelperAvailability;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
     private readonly IOperationActivityTracker _activityTracker;
+    private Dictionary<string, AccountMetadata> _accountMetadata = new(StringComparer.Ordinal);
     private AccountRegistry _registry = AccountRegistry.Empty;
     private int _operationGate;
     private int _registryReloadPending;
@@ -83,7 +93,8 @@ public sealed class MainWindowViewModel : ObservableObject
         SafeSwitchCoordinator safeSwitchCoordinator,
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
-        IOperationActivityTracker activityTracker)
+        IOperationActivityTracker activityTracker,
+        AccountMetadataService accountMetadataService)
         : this(
             CreateLoadRegistryDelegate(codexHome, accountRegistryService),
             CreateRefreshQuotaDelegate(codexHome, quotaService),
@@ -94,7 +105,9 @@ public sealed class MainWindowViewModel : ObservableObject
             codexAuthService.CheckAvailability,
             dialogService,
             dispatcher,
-            activityTracker)
+            activityTracker,
+            CreateLoadMetadataDelegate(accountMetadataService),
+            CreateSaveMetadataDelegate(accountMetadataService))
     {
     }
 
@@ -166,6 +179,50 @@ public sealed class MainWindowViewModel : ObservableObject
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
         IOperationActivityTracker activityTracker)
+        : this(
+            loadRegistryAsync,
+            refreshQuotaAsync,
+            loginAsync,
+            removeAsync,
+            switchAsync,
+            retryLaunchAsync,
+            checkHelperAvailability,
+            dialogService,
+            dispatcher,
+            activityTracker,
+            null,
+            null)
+    {
+    }
+
+    internal MainWindowViewModel(
+        Func<CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
+        Func<
+            IReadOnlyList<AccountRecord>,
+            IProgress<QuotaUpdate>,
+            CancellationToken,
+            Task> refreshQuotaAsync,
+        Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> loginAsync,
+        Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<RemovalResult>> removeAsync,
+        Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<SwitchResult>> switchAsync,
+        Func<CancellationToken, Task<bool>> retryLaunchAsync,
+        Func<HelperAvailability> checkHelperAvailability,
+        IAccountDialogService dialogService,
+        IUiDispatcher dispatcher,
+        IOperationActivityTracker activityTracker,
+        Func<CancellationToken, Task<AccountMetadataLoadResult>>? loadMetadataAsync,
+        Func<
+            IReadOnlyDictionary<string, AccountMetadata>,
+            CancellationToken,
+            Task>? saveMetadataAsync)
     {
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _refreshQuotaAsync = refreshQuotaAsync ?? throw new ArgumentNullException(nameof(refreshQuotaAsync));
@@ -178,6 +235,11 @@ public sealed class MainWindowViewModel : ObservableObject
         _dialogService = dialogService ?? throw new ArgumentNullException(nameof(dialogService));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _activityTracker = activityTracker ?? throw new ArgumentNullException(nameof(activityTracker));
+        _loadMetadataAsync = loadMetadataAsync ?? (_ => Task.FromResult(
+            new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>(StringComparer.Ordinal),
+                null)));
+        _saveMetadataAsync = saveMetadataAsync ?? ((_, _) => Task.CompletedTask);
 
         var availability = _checkHelperAvailability();
         _isHelperAvailable = availability.IsAvailable;
@@ -203,6 +265,13 @@ public sealed class MainWindowViewModel : ObservableObject
             SwitchAccountAsync,
             parameter => !IsBusy && IsHelperAvailable && parameter is AccountRowViewModel { CanSwitch: true },
             HandleCommandErrorAsync);
+        EditMetadataCommand = new AsyncCommand(
+            _dispatcher,
+            (parameter, cancellationToken) => RunBusyAsync(
+                token => EditMetadataAsync(parameter, token),
+                cancellationToken),
+            parameter => !IsBusy && parameter is AccountRowViewModel,
+            HandleCommandErrorAsync);
         RetryLaunchCommand = new AsyncCommand(
             _dispatcher,
             (_, cancellationToken) => RunBusyAsync(RetryLaunchAsync, cancellationToken),
@@ -219,6 +288,8 @@ public sealed class MainWindowViewModel : ObservableObject
     public AsyncCommand RemoveCommand { get; }
 
     public AsyncCommand SwitchCommand { get; }
+
+    public AsyncCommand EditMetadataCommand { get; }
 
     public AsyncCommand RetryLaunchCommand { get; }
 
@@ -265,12 +336,20 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         var availability = _checkHelperAvailability();
         var registry = await LoadRegistryOrEmptyAsync(cancellationToken);
+        var metadataResult = await _loadMetadataAsync(cancellationToken);
 
         await _dispatcher.InvokeAsync(
             () =>
             {
+                _accountMetadata = new Dictionary<string, AccountMetadata>(
+                    metadataResult.Accounts,
+                    StringComparer.Ordinal);
                 ApplyRegistry(registry);
                 ApplyHelperAvailability(availability);
+                if (metadataResult.Error is not null && availability.IsAvailable)
+                {
+                    StatusText = metadataResult.Error;
+                }
             },
             cancellationToken);
     }
@@ -385,6 +464,40 @@ public sealed class MainWindowViewModel : ObservableObject
         {
             return;
         }
+    }
+
+    private async Task EditMetadataAsync(object? parameter, CancellationToken cancellationToken)
+    {
+        if (parameter is not AccountRowViewModel target)
+        {
+            throw new ArgumentException("An account row is required.", nameof(parameter));
+        }
+
+        var edited = await _dialogService.EditMetadataAsync(target, cancellationToken);
+        if (edited is null)
+        {
+            return;
+        }
+
+        var updated = new Dictionary<string, AccountMetadata>(
+            _accountMetadata,
+            StringComparer.Ordinal)
+        {
+            [target.Account.AccountKey] = edited,
+        };
+        await _saveMetadataAsync(updated, cancellationToken);
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                _accountMetadata = updated;
+                Accounts.FirstOrDefault(row => string.Equals(
+                        row.Account.AccountKey,
+                        target.Account.AccountKey,
+                        StringComparison.Ordinal))
+                    ?.ApplyMetadata(edited);
+                StatusText = "额度记录已保存。";
+            },
+            cancellationToken);
     }
 
     private Task SwitchAccountAsync(object? parameter, CancellationToken cancellationToken)
@@ -587,15 +700,18 @@ public sealed class MainWindowViewModel : ObservableObject
             if (priorRows.TryGetValue(account.AccountKey, out var priorRow))
             {
                 priorRow.ApplyAccountState(account, isActive, canSwitch, unavailableReason);
+                priorRow.ApplyMetadata(ResolveMetadata(account.AccountKey));
                 Accounts.Add(priorRow);
             }
             else
             {
-                Accounts.Add(new AccountRowViewModel(
+                var row = new AccountRowViewModel(
                     account,
                     isActive,
                     canSwitch,
-                    unavailableReason));
+                    unavailableReason);
+                row.ApplyMetadata(ResolveMetadata(account.AccountKey));
+                Accounts.Add(row);
             }
         }
 
@@ -633,8 +749,14 @@ public sealed class MainWindowViewModel : ObservableObject
         AddCommand.NotifyCanExecuteChanged();
         RemoveCommand.NotifyCanExecuteChanged();
         SwitchCommand.NotifyCanExecuteChanged();
+        EditMetadataCommand.NotifyCanExecuteChanged();
         RetryLaunchCommand.NotifyCanExecuteChanged();
     }
+
+    private AccountMetadata ResolveMetadata(string accountKey) =>
+        _accountMetadata.TryGetValue(accountKey, out var metadata)
+            ? metadata
+            : new AccountMetadata(null, 0);
 
     private static Func<CancellationToken, Task<AccountRegistry>> CreateLoadRegistryDelegate(
         string codexHome,
@@ -664,6 +786,22 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(safeLoginCoordinator);
         return safeLoginCoordinator.LoginAsync;
+    }
+
+    private static Func<CancellationToken, Task<AccountMetadataLoadResult>> CreateLoadMetadataDelegate(
+        AccountMetadataService accountMetadataService)
+    {
+        ArgumentNullException.ThrowIfNull(accountMetadataService);
+        return accountMetadataService.LoadAsync;
+    }
+
+    private static Func<
+        IReadOnlyDictionary<string, AccountMetadata>,
+        CancellationToken,
+        Task> CreateSaveMetadataDelegate(AccountMetadataService accountMetadataService)
+    {
+        ArgumentNullException.ThrowIfNull(accountMetadataService);
+        return accountMetadataService.SaveAsync;
     }
 
     private static Func<

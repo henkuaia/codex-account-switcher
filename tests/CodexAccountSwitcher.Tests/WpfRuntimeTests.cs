@@ -540,6 +540,11 @@ public sealed class WpfRuntimeTests
         public Task<bool> ConfirmAddAsync(CancellationToken cancellationToken) =>
             Task.FromResult(false);
 
+        public Task<AccountMetadata?> EditMetadataAsync(
+            AccountRowViewModel target,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<AccountMetadata?>(null);
+
         public Task<AccountRowViewModel?> SelectRemovalTargetAsync(
             IReadOnlyList<AccountRowViewModel> accounts,
             CancellationToken cancellationToken) =>

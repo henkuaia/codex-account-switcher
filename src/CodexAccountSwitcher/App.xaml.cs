@@ -2,6 +2,7 @@ using System.IO;
 using System.Net.Http;
 using System.Windows;
 using System.Windows.Threading;
+using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
 using CodexAccountSwitcher.Tray;
 using CodexAccountSwitcher.ViewModels;
@@ -53,6 +54,7 @@ public partial class App : System.Windows.Application
             var registryService = new AccountRegistryService();
             _httpClient = new HttpClient();
             var quotaService = new QuotaService(_httpClient);
+            var metadataService = AccountMetadataService.CreateDefault();
             var processController = new CodexProcessController();
             var loginCoordinator = new SafeLoginCoordinator(
                 package,
@@ -85,7 +87,8 @@ public partial class App : System.Windows.Application
                 switchCoordinator,
                 dialogService,
                 uiDispatcher,
-                activityTracker);
+                activityTracker,
+                metadataService);
 
             _mainWindow = new MainWindow(viewModel);
             MainWindow = _mainWindow;
@@ -289,6 +292,28 @@ internal sealed class AccountDialogService(
             },
             cancellationToken);
         return selected;
+    }
+
+    public async Task<AccountMetadata?> EditMetadataAsync(
+        AccountRowViewModel target,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        AccountMetadata? edited = null;
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                var window = new EditAccountMetadataWindow(target.Metadata)
+                {
+                    Owner = _ownerProvider(),
+                };
+                if (window.ShowDialog() == true)
+                {
+                    edited = window.Result;
+                }
+            },
+            cancellationToken);
+        return edited;
     }
 
     public async Task<bool> ConfirmSwitchAsync(

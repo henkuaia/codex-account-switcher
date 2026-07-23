@@ -1,3 +1,4 @@
+using System.Globalization;
 using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.ViewModels;
@@ -9,8 +10,14 @@ public sealed class AccountRowViewModel : ObservableObject
     private bool _canSwitch;
     private string _displayIdentity;
     private bool _hasQuotaStatus;
+    private bool _hasOfficialMonthlyLimit;
     private string? _switchUnavailableReason;
     private QuotaDisplay? _quotaDisplay;
+    private AccountMetadata _metadata = new(null, 0);
+    private string _availableResetText = "可用重置 —";
+    private string _usedResetText = "已用重置 0（本机）";
+    private string _periodQuotaText = "单次额度 —";
+    private string _officialMonthlyLimitText = string.Empty;
     private string _quotaLabel = "Not queried";
     private string? _quotaError;
     private string _quotaStatusText = string.Empty;
@@ -87,6 +94,38 @@ public sealed class AccountRowViewModel : ObservableObject
         private set => SetProperty(ref _hasQuotaStatus, value);
     }
 
+    public AccountMetadata Metadata => _metadata;
+
+    public string AvailableResetText
+    {
+        get => _availableResetText;
+        private set => SetProperty(ref _availableResetText, value);
+    }
+
+    public string UsedResetText
+    {
+        get => _usedResetText;
+        private set => SetProperty(ref _usedResetText, value);
+    }
+
+    public string PeriodQuotaText
+    {
+        get => _periodQuotaText;
+        private set => SetProperty(ref _periodQuotaText, value);
+    }
+
+    public string OfficialMonthlyLimitText
+    {
+        get => _officialMonthlyLimitText;
+        private set => SetProperty(ref _officialMonthlyLimitText, value);
+    }
+
+    public bool HasOfficialMonthlyLimit
+    {
+        get => _hasOfficialMonthlyLimit;
+        private set => SetProperty(ref _hasOfficialMonthlyLimit, value);
+    }
+
     internal void ApplyAccountState(
         AccountRecord account,
         bool isActive,
@@ -122,6 +161,19 @@ public sealed class AccountRowViewModel : ObservableObject
         QuotaStatusText = update.Error ?? FormatReset(update.Display?.ResetsAt);
         QuotaToolTip = update.Error ?? update.Display?.Tooltip ?? string.Empty;
         HasQuotaStatus = !string.IsNullOrEmpty(QuotaStatusText);
+        UpdateMetadataDisplay();
+    }
+
+    internal void ApplyMetadata(AccountMetadata metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        if (metadata.PeriodQuotaUsd is < 0 || metadata.UsedResetCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(metadata));
+        }
+
+        SetProperty(ref _metadata, metadata, nameof(Metadata));
+        UpdateMetadataDisplay();
     }
 
     private static string ResolveDisplayIdentity(AccountRecord account) =>
@@ -132,4 +184,30 @@ public sealed class AccountRowViewModel : ObservableObject
     private static string FormatReset(DateTimeOffset? resetsAt) => resetsAt is { } value
         ? $"Resets {value.UtcDateTime:yyyy-MM-dd HH:mm 'UTC'}"
         : string.Empty;
+
+    private void UpdateMetadataDisplay()
+    {
+        AvailableResetText = QuotaDisplay?.AvailableResetCount is { } available
+            ? $"可用重置 {available}"
+            : "可用重置 —";
+        UsedResetText = $"已用重置 {Metadata.UsedResetCount}（本机）";
+
+        var period = QuotaDisplay?.Period switch
+        {
+            QuotaPeriod.Weekly => "周",
+            QuotaPeriod.Monthly => "月",
+            _ => string.Empty,
+        };
+        PeriodQuotaText = Metadata.PeriodQuotaUsd is { } quota
+            ? $"单次{period}额度 US${FormatUsd(quota)}"
+            : $"单次{period}额度 —";
+
+        HasOfficialMonthlyLimit = QuotaDisplay?.IndividualLimitUsd is not null;
+        OfficialMonthlyLimitText = QuotaDisplay?.IndividualLimitUsd is { } limit
+            ? $"官方月度上限 US${FormatUsd(limit)}"
+            : string.Empty;
+    }
+
+    private static string FormatUsd(decimal value) =>
+        value.ToString("0.##", CultureInfo.InvariantCulture);
 }

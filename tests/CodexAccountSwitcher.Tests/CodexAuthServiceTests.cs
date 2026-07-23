@@ -30,7 +30,7 @@ public sealed class CodexAuthServiceTests
 
         await service.LoginAsync(default);
 
-        Assert.Equal(["login", "--device-auth"], runner.LastRequest!.Arguments);
+        Assert.Equal(["login"], runner.LastRequest!.Arguments);
         Assert.False(runner.LastRequest.Visible);
         Assert.Equal(1, runner.CapturedCallCount);
         Assert.Equal(0, runner.StreamingCallCount);
@@ -47,7 +47,7 @@ public sealed class CodexAuthServiceTests
 
         await service.LoginAsync(outputHandler, default);
 
-        Assert.Equal(["login", "--device-auth"], runner.LastRequest!.Arguments);
+        Assert.Equal(["login"], runner.LastRequest!.Arguments);
         Assert.False(runner.LastRequest.Visible);
         Assert.Equal(0, runner.CapturedCallCount);
         Assert.Equal(1, runner.StreamingCallCount);

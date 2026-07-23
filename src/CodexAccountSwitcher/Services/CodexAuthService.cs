@@ -111,9 +111,9 @@ public sealed class CodexAuthService
         var environment = CreateMutationEnvironment(childPath);
 
         return outputHandler is null
-            ? await RunCapturedAsync(["login", "--device-auth"], environment, cancellationToken)
+            ? await RunCapturedAsync(["login"], environment, cancellationToken)
             : await RunCapturedAsync(
-                ["login", "--device-auth"],
+                ["login"],
                 environment,
                 outputHandler,
                 cancellationToken);

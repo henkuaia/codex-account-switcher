@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Runtime.ExceptionServices;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
@@ -67,11 +68,17 @@ public sealed class MainWindowViewModel : ObservableObject
         IReadOnlyDictionary<string, AccountMetadata>,
         CancellationToken,
         Task> _saveMetadataAsync;
+    private readonly Func<CancellationToken, Task<QuotaCacheLoadResult>> _loadQuotaCacheAsync;
+    private readonly Func<
+        IReadOnlyDictionary<string, QuotaCacheEntry>,
+        CancellationToken,
+        Task> _saveQuotaCacheAsync;
     private readonly Func<HelperAvailability> _checkHelperAvailability;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
     private readonly IOperationActivityTracker _activityTracker;
     private Dictionary<string, AccountMetadata> _accountMetadata = new(StringComparer.Ordinal);
+    private Dictionary<string, QuotaCacheEntry> _quotaCache = new(StringComparer.Ordinal);
     private AccountRegistry _registry = AccountRegistry.Empty;
     private int _operationGate;
     private int _registryReloadPending;
@@ -220,7 +227,12 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<
             IReadOnlyDictionary<string, AccountMetadata>,
             CancellationToken,
-            Task>? saveMetadataAsync)
+            Task>? saveMetadataAsync,
+        Func<CancellationToken, Task<QuotaCacheLoadResult>>? loadQuotaCacheAsync = null,
+        Func<
+            IReadOnlyDictionary<string, QuotaCacheEntry>,
+            CancellationToken,
+            Task>? saveQuotaCacheAsync = null)
     {
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _refreshQuotaAsync = refreshQuotaAsync ?? throw new ArgumentNullException(nameof(refreshQuotaAsync));
@@ -238,6 +250,11 @@ public sealed class MainWindowViewModel : ObservableObject
                 new Dictionary<string, AccountMetadata>(StringComparer.Ordinal),
                 null)));
         _saveMetadataAsync = saveMetadataAsync ?? ((_, _) => Task.CompletedTask);
+        _loadQuotaCacheAsync = loadQuotaCacheAsync ?? (_ => Task.FromResult(
+            new QuotaCacheLoadResult(
+                new Dictionary<string, QuotaCacheEntry>(StringComparer.Ordinal),
+                null)));
+        _saveQuotaCacheAsync = saveQuotaCacheAsync ?? ((_, _) => Task.CompletedTask);
 
         var availability = _checkHelperAvailability();
         _isHelperAvailable = availability.IsAvailable;
@@ -335,6 +352,7 @@ public sealed class MainWindowViewModel : ObservableObject
         var availability = _checkHelperAvailability();
         var registry = await LoadRegistryOrEmptyAsync(cancellationToken);
         var metadataResult = await _loadMetadataAsync(cancellationToken);
+        var quotaCacheResult = await _loadQuotaCacheAsync(cancellationToken);
 
         await _dispatcher.InvokeAsync(
             () =>
@@ -342,11 +360,15 @@ public sealed class MainWindowViewModel : ObservableObject
                 _accountMetadata = new Dictionary<string, AccountMetadata>(
                     metadataResult.Accounts,
                     StringComparer.Ordinal);
+                _quotaCache = new Dictionary<string, QuotaCacheEntry>(
+                    quotaCacheResult.Accounts,
+                    StringComparer.Ordinal);
                 ApplyRegistry(registry);
                 ApplyHelperAvailability(availability);
-                if (metadataResult.Error is not null && availability.IsAvailable)
+                if (availability.IsAvailable &&
+                    (metadataResult.Error ?? quotaCacheResult.Error) is { } loadError)
                 {
-                    StatusText = metadataResult.Error;
+                    StatusText = loadError;
                 }
             },
             cancellationToken);
@@ -378,6 +400,38 @@ public sealed class MainWindowViewModel : ObservableObject
                 StatusText = "额度刷新完成。";
             },
             cancellationToken);
+
+        var refreshedAt = DateTimeOffset.UtcNow;
+        var mergedCache = new Dictionary<string, QuotaCacheEntry>(
+            _quotaCache,
+            StringComparer.Ordinal);
+        var hasSuccessfulUpdate = false;
+        foreach (var update in updates)
+        {
+            if (update.Error is null && update.Display is { } display)
+            {
+                mergedCache[update.AccountKey] = new QuotaCacheEntry(display, refreshedAt);
+                hasSuccessfulUpdate = true;
+            }
+        }
+
+        if (!hasSuccessfulUpdate)
+        {
+            return;
+        }
+
+        try
+        {
+            await _saveQuotaCacheAsync(mergedCache, cancellationToken);
+            _quotaCache = mergedCache;
+        }
+        catch (Exception exception) when (
+            exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            await _dispatcher.InvokeAsync(
+                () => StatusText = "额度刷新完成，但本地缓存失败。",
+                CancellationToken.None);
+        }
     }
 
     private async Task LoginAsync(CancellationToken cancellationToken)
@@ -679,6 +733,7 @@ public sealed class MainWindowViewModel : ObservableObject
         var priorRows = Accounts.ToDictionary(
             row => row.Account.AccountKey,
             StringComparer.Ordinal);
+        var now = DateTimeOffset.UtcNow;
         _registry = registry;
         Accounts.Clear();
         foreach (var account in registry.Accounts)
@@ -694,6 +749,11 @@ public sealed class MainWindowViewModel : ObservableObject
             {
                 priorRow.ApplyAccountState(account, isActive, canSwitch, unavailableReason);
                 priorRow.ApplyMetadata(ResolveMetadata(account.AccountKey));
+                if (priorRow.QuotaDisplay is null &&
+                    _quotaCache.TryGetValue(account.AccountKey, out var cached))
+                {
+                    priorRow.ApplyCachedQuota(cached, now);
+                }
                 Accounts.Add(priorRow);
             }
             else
@@ -704,6 +764,10 @@ public sealed class MainWindowViewModel : ObservableObject
                     canSwitch,
                     unavailableReason);
                 row.ApplyMetadata(ResolveMetadata(account.AccountKey));
+                if (_quotaCache.TryGetValue(account.AccountKey, out var cached))
+                {
+                    row.ApplyCachedQuota(cached, now);
+                }
                 Accounts.Add(row);
             }
         }

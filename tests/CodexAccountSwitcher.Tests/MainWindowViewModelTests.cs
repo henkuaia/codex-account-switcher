@@ -1464,6 +1464,198 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("额度记录已保存。", viewModel.StatusText);
     }
 
+    [Fact]
+    public async Task Startup_restores_cached_quota_without_calling_refresh_and_rename_keeps_it()
+    {
+        var account = Accounts.Record("stable-key", "first@example.com", "Before");
+        var renamed = account with { Alias = "After" };
+        var loadCount = 0;
+        var refreshCalls = 0;
+        var cached = CreateQuotaCacheEntry(64, "2026-07-24T12:00:00Z", "2100-08-01T00:00:00Z");
+        var viewModel = new MainWindowViewModel(
+            _ =>
+            {
+                loadCount++;
+                return Task.FromResult(new AccountRegistry(
+                    3,
+                    account.AccountKey,
+                    [loadCount == 1 ? account : renamed]));
+            },
+            (_, _, _) =>
+            {
+                refreshCalls++;
+                return Task.CompletedTask;
+            },
+            (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
+            (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+            (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
+            _ => Task.FromResult(true),
+            () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            new FakeDialogService(),
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+            _ => Task.FromResult(new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>(),
+                null)),
+            (_, _) => Task.CompletedTask,
+            _ => Task.FromResult(new QuotaCacheLoadResult(
+                new Dictionary<string, QuotaCacheEntry>
+                {
+                    [account.AccountKey] = cached,
+                },
+                null)),
+            (_, _) => Task.CompletedTask);
+
+        await viewModel.LoadAsync();
+
+        var row = Assert.Single(viewModel.Accounts);
+        Assert.Equal(0, refreshCalls);
+        Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
+        Assert.Contains("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
+
+        await viewModel.LoadAsync();
+
+        row = Assert.Single(viewModel.Accounts);
+        Assert.Equal("After", row.DisplayIdentity);
+        Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
+        Assert.Equal(0, refreshCalls);
+    }
+
+    [Fact]
+    public async Task Manual_refresh_saves_successes_and_preserves_failed_account_cache()
+    {
+        var first = Accounts.Record("first-key", "first@example.com");
+        var second = Accounts.Record("second-key", "second@example.com");
+        var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
+        var oldFirst = CreateQuotaCacheEntry(80, "2026-07-23T12:00:00Z", "2100-08-01T00:00:00Z");
+        var oldSecond = CreateQuotaCacheEntry(70, "2026-07-23T12:00:00Z", "2100-08-01T00:00:00Z");
+        var liveDisplay = oldFirst.Display with { RemainingPercent = 50 };
+        IReadOnlyDictionary<string, QuotaCacheEntry>? saved = null;
+        var viewModel = new MainWindowViewModel(
+            _ => Task.FromResult(registry),
+            (_, progress, _) =>
+            {
+                progress.Report(new QuotaUpdate(first.AccountKey, liveDisplay, null));
+                progress.Report(new QuotaUpdate(second.AccountKey, null, "quota failed"));
+                return Task.CompletedTask;
+            },
+            (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
+            (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+            (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
+            _ => Task.FromResult(true),
+            () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            new FakeDialogService(),
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+            _ => Task.FromResult(new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>(),
+                null)),
+            (_, _) => Task.CompletedTask,
+            _ => Task.FromResult(new QuotaCacheLoadResult(
+                new Dictionary<string, QuotaCacheEntry>
+                {
+                    [first.AccountKey] = oldFirst,
+                    [second.AccountKey] = oldSecond,
+                },
+                null)),
+            (cache, _) =>
+            {
+                saved = new Dictionary<string, QuotaCacheEntry>(cache);
+                return Task.CompletedTask;
+            });
+
+        await viewModel.LoadAsync();
+        await viewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.NotNull(saved);
+        Assert.Equal(liveDisplay, saved[first.AccountKey].Display);
+        Assert.True(saved[first.AccountKey].RefreshedAt > oldFirst.RefreshedAt);
+        Assert.Equal(oldSecond, saved[second.AccountKey]);
+    }
+
+    [Fact]
+    public async Task Cache_write_failure_keeps_live_quota_visible_and_reports_warning()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var registry = new AccountRegistry(3, account.AccountKey, [account]);
+        var liveDisplay = CreateQuotaCacheEntry(
+            55,
+            "2026-07-24T12:00:00Z",
+            "2100-08-01T00:00:00Z").Display;
+        var viewModel = new MainWindowViewModel(
+            _ => Task.FromResult(registry),
+            (_, progress, _) =>
+            {
+                progress.Report(new QuotaUpdate(account.AccountKey, liveDisplay, null));
+                return Task.CompletedTask;
+            },
+            (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
+            (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+            (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
+            _ => Task.FromResult(true),
+            () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            new FakeDialogService(),
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+            _ => Task.FromResult(new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>(),
+                null)),
+            (_, _) => Task.CompletedTask,
+            _ => Task.FromResult(new QuotaCacheLoadResult(
+                new Dictionary<string, QuotaCacheEntry>(),
+                null)),
+            (_, _) => Task.FromException(new IOException("disk unavailable")));
+
+        await viewModel.LoadAsync();
+        await viewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.Equal(liveDisplay, Assert.Single(viewModel.Accounts).QuotaDisplay);
+        Assert.Equal("额度刷新完成，但本地缓存失败。", viewModel.StatusText);
+    }
+
+    [Fact]
+    public async Task Registry_reload_does_not_replace_newer_live_quota_with_older_cache()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var registry = new AccountRegistry(3, account.AccountKey, [account]);
+        var cached = CreateQuotaCacheEntry(64, "2026-07-23T12:00:00Z", "2100-08-01T00:00:00Z");
+        var liveDisplay = cached.Display with { RemainingPercent = 40 };
+        var viewModel = new MainWindowViewModel(
+            _ => Task.FromResult(registry),
+            (_, progress, _) =>
+            {
+                progress.Report(new QuotaUpdate(account.AccountKey, liveDisplay, null));
+                return Task.CompletedTask;
+            },
+            (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
+            (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+            (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
+            _ => Task.FromResult(true),
+            () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+            new FakeDialogService(),
+            new ImmediateDispatcher(),
+            new ActiveOperationTracker(),
+            _ => Task.FromResult(new AccountMetadataLoadResult(
+                new Dictionary<string, AccountMetadata>(),
+                null)),
+            (_, _) => Task.CompletedTask,
+            _ => Task.FromResult(new QuotaCacheLoadResult(
+                new Dictionary<string, QuotaCacheEntry>
+                {
+                    [account.AccountKey] = cached,
+                },
+                null)),
+            (_, _) => Task.CompletedTask);
+
+        await viewModel.LoadAsync();
+        await viewModel.RefreshCommand.ExecuteAsync();
+        await viewModel.LoadAsync();
+
+        var row = Assert.Single(viewModel.Accounts);
+        Assert.Equal(40, row.QuotaDisplay!.RemainingPercent);
+        Assert.DoesNotContain("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
+    }
+
     [Theory]
     [InlineData("success", "Codex launched.", false)]
     [InlineData("failure", "Codex launch retry failed.", true)]
@@ -1620,6 +1812,22 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("internal operation canceled", fixture.ViewModel.StatusText);
         Assert.False(fixture.ViewModel.IsBusy);
     }
+
+    private static QuotaCacheEntry CreateQuotaCacheEntry(
+        int remainingPercent,
+        string refreshedAt,
+        string resetsAt) => new(
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                remainingPercent,
+                DateTimeOffset.Parse(resetsAt),
+                TimeSpan.FromDays(30),
+                $"Monthly: {remainingPercent}% remaining")
+            {
+                UsedPercent = 100 - remainingPercent,
+                ServerNow = DateTimeOffset.Parse(refreshedAt),
+            },
+            DateTimeOffset.Parse(refreshedAt));
 
     private static CommandResult Succeeded() => new(0, string.Empty, string.Empty);
 

@@ -377,39 +377,37 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(progress);
 
         var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
-        QuotaUpdate? pendingUpdate = null;
+        var completedUpdates = new List<QuotaUpdate>(accounts.Count);
         try
         {
             foreach (var account in accounts)
             {
-                if (pendingUpdate is not null)
-                {
-                    var updateToReport = pendingUpdate;
-                    pendingUpdate = null;
-                    progress.Report(updateToReport);
-                }
-
-                pendingUpdate = await RefreshAccountCoreAsync(
+                completedUpdates.Add(await RefreshAccountCoreAsync(
                     account,
                     codexHome,
                     hybridContext,
-                    cancellationToken);
+                    cancellationToken));
             }
         }
         catch
         {
-            await TryCompleteHybridRefreshAsync(
+            var completionWarning = await TryCompleteHybridRefreshAsync(
                 hybridContext,
                 CancellationToken.None);
+            foreach (var update in completedUpdates)
+            {
+                progress.Report(WithWarning(update, completionWarning));
+            }
+
             throw;
         }
 
         var warning = await TryCompleteHybridRefreshAsync(
             hybridContext,
             CancellationToken.None);
-        if (pendingUpdate is not null)
+        foreach (var update in completedUpdates)
         {
-            progress.Report(WithWarning(pendingUpdate, warning));
+            progress.Report(WithWarning(update, warning));
         }
     }
 

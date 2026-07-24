@@ -123,6 +123,45 @@ public sealed class QuotaEstimateLedgerServiceTests
     }
 
     [Fact]
+    public async Task Schema_two_null_checkpoint_is_rejected_and_preserved()
+    {
+        var original = JsonSerializer.Serialize(
+            new
+            {
+                SchemaVersion = 2,
+                Accounts = new Dictionary<string, AccountQuotaEstimateLedger>(),
+                FileCheckpoints =
+                    new Dictionary<string, LocalUsageFileCheckpoint?>
+                    {
+                        ["2026/07/session.jsonl"] = null,
+                    },
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        await AssertInvalidSchemaTwoFileIsPreservedAsync(original);
+    }
+
+    [Fact]
+    public async Task Schema_two_null_aggregates_are_rejected_and_preserved()
+    {
+        var checkpoint = CreateCheckpoint() with { Aggregates = null! };
+        var original = JsonSerializer.Serialize(
+            new
+            {
+                SchemaVersion = 2,
+                Accounts = new Dictionary<string, AccountQuotaEstimateLedger>(),
+                FileCheckpoints =
+                    new Dictionary<string, LocalUsageFileCheckpoint>
+                    {
+                        [checkpoint.RelativePath] = checkpoint,
+                    },
+            },
+            new JsonSerializerOptions(JsonSerializerDefaults.Web));
+
+        await AssertInvalidSchemaTwoFileIsPreservedAsync(original);
+    }
+
+    [Fact]
     public async Task Serialized_document_excludes_sensitive_property_names()
     {
         using var directory = new TemporaryDirectory();
@@ -686,6 +725,24 @@ public sealed class QuotaEstimateLedgerServiceTests
             JsonSerializer.Serialize(
                 document,
                 new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+    }
+
+    private static async Task AssertInvalidSchemaTwoFileIsPreservedAsync(
+        string original)
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "quota-estimate-ledger.json");
+        await File.WriteAllTextAsync(path, original);
+        var service = new QuotaEstimateLedgerService(path);
+
+        var loaded = await service.LoadAsync(default);
+
+        Assert.Equal("本地额度估算账本无效，原文件已保留。", loaded.Error);
+        Assert.Empty(loaded.State.Accounts);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.SaveAsync(QuotaEstimateLedgerState.Empty, default));
+        Assert.Equal(original, await File.ReadAllTextAsync(path));
+        Assert.Empty(Directory.GetFiles(directory.Path, "*.tmp"));
     }
 
     private static IEnumerable<string> EnumeratePropertyNames(JsonElement element)

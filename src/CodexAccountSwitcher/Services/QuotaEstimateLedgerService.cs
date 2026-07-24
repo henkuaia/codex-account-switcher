@@ -80,6 +80,12 @@ public sealed class QuotaEstimateLedgerService
                 return Blocked(InvalidFileError);
             }
 
+            if (document.SchemaVersion == CheckpointAggregateSchemaVersion &&
+                !AreValidLegacyCheckpoints(document.FileCheckpoints!))
+            {
+                return Blocked(InvalidFileError);
+            }
+
             var accounts = new Dictionary<string, AccountQuotaEstimateLedger>(
                 StringComparer.Ordinal);
             foreach (var (accountKey, ledger) in document.Accounts)
@@ -489,6 +495,51 @@ public sealed class QuotaEstimateLedgerService
                 checkpoint.Buckets.Any(bucket =>
                     !IsValidBucket(bucket) ||
                     bucket.LastEventAtUtc > checkpoint.RelevantThroughUtc))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool AreValidLegacyCheckpoints(
+        IReadOnlyDictionary<string, LocalUsageFileCheckpoint> checkpoints)
+    {
+        foreach (var (relativePath, checkpoint) in checkpoints)
+        {
+            if (checkpoint is null ||
+                !string.Equals(
+                    relativePath,
+                    checkpoint.RelativePath,
+                    StringComparison.Ordinal) ||
+                !IsSafeRelativePath(relativePath) ||
+                checkpoint.CompletedLineByteOffset < 0 ||
+                checkpoint.LastKnownLength < checkpoint.CompletedLineByteOffset ||
+                !IsUtcTimestamp(checkpoint.CreationTimeUtc) ||
+                !IsUtcTimestamp(checkpoint.LastWriteTimeUtc) ||
+                checkpoint.PrefixLength < 0 ||
+                checkpoint.PrefixLength > checkpoint.LastKnownLength ||
+                checkpoint.PrefixSha256 is null ||
+                checkpoint.PrefixSha256.Length != 64 ||
+                checkpoint.PrefixSha256.Any(character => !Uri.IsHexDigit(character)) ||
+                checkpoint.CompletedTailLength < 0 ||
+                checkpoint.CompletedTailLength > checkpoint.CompletedLineByteOffset ||
+                checkpoint.CompletedTailSha256 is null ||
+                checkpoint.CompletedTailSha256.Length != 64 ||
+                checkpoint.CompletedTailSha256.Any(character => !Uri.IsHexDigit(character)) ||
+                checkpoint.Model is null ||
+                checkpoint.ServiceTier is null ||
+                checkpoint.Aggregates is null ||
+                checkpoint.InvalidLineCount < 0 ||
+                string.IsNullOrWhiteSpace(checkpoint.RateCardVersion) ||
+                checkpoint.Aggregates.Any(aggregate =>
+                    aggregate is null ||
+                    !IsUtcTimestamp(aggregate.Timestamp) ||
+                    aggregate.Credits < 0 ||
+                    !Enum.IsDefined(aggregate.FailureReason) ||
+                    aggregate.FailureReason != CreditPricingFailureReason.None &&
+                    aggregate.Credits != 0))
             {
                 return false;
             }

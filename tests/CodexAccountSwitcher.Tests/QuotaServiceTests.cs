@@ -951,6 +951,80 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Refresh_all_save_failure_reports_shared_warning_once_to_every_account_in_order()
+    {
+        using var home = new TemporaryDirectory();
+        var accounts = new[]
+        {
+            Accounts.Record(
+                "user-1::acct-1",
+                "first@example.com",
+                accountId: "acct-1"),
+            Accounts.Record(
+                "user-2::acct-2",
+                "second@example.com",
+                accountId: "acct-2"),
+        };
+        foreach (var account in accounts)
+        {
+            WriteSnapshot(
+                home,
+                account,
+                $"access-{account.ChatGptAccountId}",
+                account.ChatGptAccountId);
+        }
+
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult([], 0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                QuotaEstimateLedgerState.Empty,
+                null)),
+            (_, _) => Task.FromException(new IOException("ledger-save-failure")),
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+        var progress = new CollectingProgress<QuotaUpdate>();
+
+        await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAllAsync(
+                accounts,
+                home.Path,
+                progress,
+                default);
+
+        Assert.Collection(
+            progress.Values,
+            update =>
+            {
+                Assert.Equal(accounts[0].AccountKey, update.AccountKey);
+                Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
+                Assert.Contains(
+                    "未保存",
+                    update.Display!.EstimateStatus,
+                    StringComparison.Ordinal);
+            },
+            update =>
+            {
+                Assert.Equal(accounts[1].AccountKey, update.AccountKey);
+                Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
+                Assert.Contains(
+                    "未保存",
+                    update.Display!.EstimateStatus,
+                    StringComparison.Ordinal);
+            });
+    }
+
+    [Fact]
     public async Task Estimator_propagates_user_cancellation()
     {
         using var home = new TemporaryDirectory();
@@ -1021,17 +1095,28 @@ public sealed class QuotaServiceTests
                 return Task.FromException(new IOException("ledger-save-failure"));
             },
             new CodexCreditRateCard());
-        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
-            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
-                ? UsageResponse(
-                    segmentStart.AddDays(7),
-                    serverNow,
-                    TimeSpan.FromDays(7),
-                    usedPercent: 25)
-                : JsonResponse("""{"data":[]}""")));
-        using var client = new HttpClient(handler);
         using var cancellation = new CancellationTokenSource();
-        var progress = new CancelAfterFirstProgress<QuotaUpdate>(cancellation);
+        var requestCount = 0;
+        using var handler = new RecordingHttpMessageHandler((request, _) =>
+        {
+            requestCount++;
+            if (requestCount == 3)
+            {
+                cancellation.Cancel();
+                return Task.FromCanceled<HttpResponseMessage>(cancellation.Token);
+            }
+
+            return Task.FromResult(
+                request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                    ? UsageResponse(
+                        segmentStart.AddDays(7),
+                        serverNow,
+                        TimeSpan.FromDays(7),
+                        usedPercent: 25)
+                    : JsonResponse("""{"data":[]}"""));
+        });
+        using var client = new HttpClient(handler);
+        var progress = new CollectingProgress<QuotaUpdate>();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             new QuotaService(
@@ -1042,10 +1127,12 @@ public sealed class QuotaServiceTests
                     progress,
                     cancellation.Token));
 
-        Assert.Single(progress.Values);
+        var update = Assert.Single(progress.Values);
+        Assert.Equal(accounts[0].AccountKey, update.AccountKey);
+        Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
         Assert.Equal(1, saveCount);
         Assert.Single(attemptedSave!.Accounts[accounts[0].AccountKey].Observations);
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(3, handler.Requests.Count);
     }
 
     private static HybridQuotaEstimateService CreateHybrid(
@@ -1126,15 +1213,4 @@ public sealed class QuotaServiceTests
         Content = new StringContent(json),
     };
 
-    private sealed class CancelAfterFirstProgress<T>(
-        CancellationTokenSource cancellation) : IProgress<T>
-    {
-        public List<T> Values { get; } = [];
-
-        public void Report(T value)
-        {
-            Values.Add(value);
-            cancellation.Cancel();
-        }
-    }
 }

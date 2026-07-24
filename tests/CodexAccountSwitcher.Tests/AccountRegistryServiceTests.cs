@@ -1,4 +1,5 @@
 using CodexAccountSwitcher.Services;
+using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.Tests;
 
@@ -54,6 +55,76 @@ public sealed class AccountRegistryServiceTests
         Assert.Null(account.AccountName);
         Assert.Equal("plus", account.Plan);
         Assert.Equal("chatgpt", account.AuthMode);
+    }
+
+    [Fact]
+    public async Task Valid_v3_registry_parses_active_account_activation_time()
+    {
+        using var home = new TemporaryDirectory();
+        home.Write("accounts/registry.json", """
+            {
+              "schema_version": 3,
+              "active_account_key": "user-1::acct-1",
+              "active_account_activated_at_ms": 1784892480313,
+              "accounts": [{
+                "account_key": "user-1::acct-1",
+                "chatgpt_account_id": "acct-1",
+                "chatgpt_user_id": "user-1",
+                "email": "first@example.com"
+              }]
+            }
+            """);
+
+        var registry = await new AccountRegistryService().LoadAsync(home.Path, default);
+
+        Assert.Equal(
+            DateTimeOffset.FromUnixTimeMilliseconds(1784892480313),
+            registry.ActiveAccountActivatedAt);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("-1")]
+    [InlineData("9223372036854775807")]
+    public async Task Missing_invalid_or_overflow_activation_timestamp_is_ignored(string? activationTimestamp)
+    {
+        using var home = new TemporaryDirectory();
+        var activationTimestampProperty = activationTimestamp is null
+            ? string.Empty
+            : $"\"active_account_activated_at_ms\": {activationTimestamp},";
+        home.Write("accounts/registry.json", $$"""
+            {
+              "schema_version": 3,
+              "active_account_key": "user-1::acct-1",
+              {{activationTimestampProperty}}
+              "accounts": [{
+                "account_key": "user-1::acct-1",
+                "chatgpt_account_id": "acct-1",
+                "chatgpt_user_id": "user-1",
+                "email": "first@example.com"
+              }]
+            }
+            """);
+
+        var registry = await new AccountRegistryService().LoadAsync(home.Path, default);
+
+        Assert.Null(registry.ActiveAccountActivatedAt);
+        Assert.Single(registry.Accounts);
+    }
+
+    [Fact]
+    public void Quota_display_estimate_fields_default_to_none()
+    {
+        var display = new QuotaDisplay(
+            QuotaPeriod.Weekly,
+            50,
+            null,
+            TimeSpan.FromDays(7),
+            "quota");
+
+        Assert.Equal(QuotaEstimateSource.None, display.EstimateSource);
+        Assert.Equal(QuotaEstimateQuality.None, display.EstimateQuality);
+        Assert.Equal(0, display.EstimateObservationCount);
     }
 
     [Fact]

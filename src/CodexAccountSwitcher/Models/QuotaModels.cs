@@ -25,6 +25,14 @@ public sealed record QuotaDisplay(
     public decimal? EstimatedPeriodQuotaLowerUsd { get; init; }
 
     public decimal? EstimatedPeriodQuotaUpperUsd { get; init; }
+
+    public QuotaEstimateSource EstimateSource { get; init; }
+
+    public QuotaEstimateQuality EstimateQuality { get; init; }
+
+    public string? EstimateStatus { get; init; }
+
+    public int EstimateObservationCount { get; init; }
 }
 
 public sealed record WeeklyQuotaEstimate(decimal LowerUsd, decimal UpperUsd);

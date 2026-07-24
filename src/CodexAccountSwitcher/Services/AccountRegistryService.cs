@@ -55,7 +55,27 @@ public sealed class AccountRegistryService
         return new AccountRegistry(
             schemaVersion,
             activeAccountKey,
-            Array.AsReadOnly(accounts.ToArray()));
+            Array.AsReadOnly(accounts.ToArray()))
+        {
+            ActiveAccountActivatedAt = ParseActivationTime(registry.ActiveAccountActivatedAtMilliseconds),
+        };
+    }
+
+    private static DateTimeOffset? ParseActivationTime(long? milliseconds)
+    {
+        if (milliseconds is null || milliseconds < 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            return DateTimeOffset.FromUnixTimeMilliseconds(milliseconds.Value);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
     }
 
     private static List<AccountRecord> LoadCurrentAccounts(IReadOnlyList<AccountDto?> registryAccounts)
@@ -248,6 +268,9 @@ public sealed class AccountRegistryService
 
         [JsonPropertyName("active_account_key")]
         public string? ActiveAccountKey { get; init; }
+
+        [JsonPropertyName("active_account_activated_at_ms")]
+        public long? ActiveAccountActivatedAtMilliseconds { get; init; }
 
         [JsonPropertyName("active_email")]
         public string? ActiveEmail { get; init; }

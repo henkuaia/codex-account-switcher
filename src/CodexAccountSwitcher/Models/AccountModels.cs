@@ -15,5 +15,7 @@ public sealed record AccountRegistry(
     string? ActiveAccountKey,
     IReadOnlyList<AccountRecord> Accounts)
 {
+    public DateTimeOffset? ActiveAccountActivatedAt { get; init; }
+
     public static AccountRegistry Empty { get; } = new(3, null, Array.Empty<AccountRecord>());
 }

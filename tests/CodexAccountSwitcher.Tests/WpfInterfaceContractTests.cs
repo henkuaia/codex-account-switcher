@@ -61,6 +61,22 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Main_window_uses_value_colored_cards_with_collapsed_details()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("x:Name=\"QuotaDetailsExpander\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Header=\"详情\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("IsExpanded=\"False\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Converter={StaticResource QuotaRemainingBrushConverter}",
+            xaml,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Add_flow_has_no_pre_confirmation_message_box()
     {
         var source = File.ReadAllText(Path.Combine(

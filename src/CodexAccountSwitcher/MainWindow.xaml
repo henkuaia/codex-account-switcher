@@ -104,7 +104,7 @@
                                                 BorderThickness="0,0,0,1" />
                                         <Border x:Name="RowBorder"
                                                 Margin="0,2"
-                                                Padding="14,12"
+                                                Padding="14,10"
                                                 Style="{StaticResource AccountRowBorderStyle}">
                                             <Grid>
                                                 <Grid.ColumnDefinitions>
@@ -112,6 +112,7 @@
                                                     <ColumnDefinition Width="84" />
                                                 </Grid.ColumnDefinitions>
                                                 <Grid.RowDefinitions>
+                                                    <RowDefinition Height="Auto" />
                                                     <RowDefinition Height="Auto" />
                                                     <RowDefinition Height="Auto" />
                                                     <RowDefinition Height="Auto" />
@@ -158,38 +159,22 @@
                                                     </Border>
                                                 </Grid>
 
-                                                <Grid Grid.Row="2" Grid.ColumnSpan="2" Margin="0,11,0,0">
-                                                    <Grid.RowDefinitions>
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                        <RowDefinition Height="Auto" />
-                                                    </Grid.RowDefinitions>
+                                                <Grid Grid.Row="1"
+                                                      Grid.ColumnSpan="2"
+                                                      Margin="0,10,0,0">
                                                     <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
                                                         <ColumnDefinition Width="*" />
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock FontSize="12"
-                                                               Foreground="{StaticResource TextSecondaryBrush}"
+                                                               FontWeight="SemiBold"
                                                                Text="{Binding QuotaLabel}" />
-                                                    <TextBlock Grid.Column="1"
-                                                               FontSize="12"
-                                                               Foreground="{StaticResource TextSecondaryBrush}"
-                                                               Text="{Binding QuotaDisplay.RemainingPercent, StringFormat={}{0}%}">
-                                                        <TextBlock.Style>
-                                                            <Style TargetType="TextBlock">
-                                                                <Style.Triggers>
-                                                                    <DataTrigger Binding="{Binding QuotaDisplay}" Value="{x:Null}">
-                                                                        <Setter Property="Visibility" Value="Collapsed" />
-                                                                    </DataTrigger>
-                                                                </Style.Triggers>
-                                                            </Style>
-                                                        </TextBlock.Style>
-                                                    </TextBlock>
                                                     <TextBlock x:Name="QuotaStatusTextBlock"
-                                                               Grid.Row="1"
-                                                               Grid.ColumnSpan="2"
-                                                               Margin="0,3,0,0"
+                                                               Grid.Column="1"
+                                                               Margin="10,0"
+                                                               HorizontalAlignment="Right"
+                                                               VerticalAlignment="Center"
                                                                FontSize="11"
                                                                Foreground="{StaticResource TextSecondaryBrush}"
                                                                Text="{Binding QuotaStatusText}"
@@ -206,16 +191,41 @@
                                                             </Style>
                                                         </TextBlock.Style>
                                                     </TextBlock>
-                                                    <ProgressBar Grid.Row="2"
-                                                                 Grid.ColumnSpan="2"
-                                                                 Margin="0,5,0,0"
-                                                                 Maximum="100"
-                                                                 Value="{Binding QuotaDisplay.RemainingPercent, TargetNullValue=0}"
-                                                                 Style="{StaticResource QuietProgressBarStyle}"
-                                                                 ToolTip="{Binding QuotaToolTip}" />
-                                                    <Grid Grid.Row="3"
+                                                    <TextBlock x:Name="RemainingPercentText"
+                                                               Grid.Column="2"
+                                                               FontSize="13"
+                                                               FontWeight="SemiBold"
+                                                               Foreground="{Binding QuotaDisplay.RemainingPercent, Converter={StaticResource QuotaRemainingBrushConverter}}"
+                                                               Text="{Binding QuotaDisplay.RemainingPercent, StringFormat={}{0}%}">
+                                                        <TextBlock.Style>
+                                                            <Style TargetType="TextBlock">
+                                                                <Style.Triggers>
+                                                                    <DataTrigger Binding="{Binding QuotaDisplay}" Value="{x:Null}">
+                                                                        <Setter Property="Visibility" Value="Collapsed" />
+                                                                    </DataTrigger>
+                                                                </Style.Triggers>
+                                                            </Style>
+                                                        </TextBlock.Style>
+                                                    </TextBlock>
+                                                </Grid>
+
+                                                <ProgressBar Grid.Row="2"
+                                                             Grid.ColumnSpan="2"
+                                                             Margin="0,6,0,0"
+                                                             Maximum="100"
+                                                             Value="{Binding QuotaDisplay.RemainingPercent, TargetNullValue=0}"
+                                                             Foreground="{Binding QuotaDisplay.RemainingPercent, Converter={StaticResource QuotaRemainingBrushConverter}}"
+                                                             Style="{StaticResource QuietProgressBarStyle}"
+                                                             ToolTip="{Binding QuotaToolTip}" />
+
+                                                <Expander x:Name="QuotaDetailsExpander"
+                                                          Grid.Row="3"
                                                           Grid.ColumnSpan="2"
-                                                          Margin="0,8,0,0">
+                                                          Margin="0,7,0,0"
+                                                          Header="详情"
+                                                          IsExpanded="False"
+                                                          Foreground="{StaticResource TextSecondaryBrush}">
+                                                    <Grid Margin="0,7,0,1">
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="*" />
                                                             <ColumnDefinition Width="Auto" />
@@ -280,7 +290,7 @@
                                                             <TextBlock FontFamily="Segoe Fluent Icons" FontSize="13" Text="&#xE70F;" />
                                                         </Button>
                                                     </Grid>
-                                                </Grid>
+                                                </Expander>
                                             </Grid>
                                         </Border>
                                     </Grid>

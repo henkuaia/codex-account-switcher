@@ -123,6 +123,18 @@ public sealed class WpfRuntimeTests
                         border.Name == "RowBorder" &&
                         border.DataContext is AccountRowViewModel { IsActive: true });
                 Assert.Equal(7, activeRow.CornerRadius.TopLeft);
+                var details = FindVisualChildren<Expander>(mainWindow)
+                    .Single(expander =>
+                        expander.Name == "QuotaDetailsExpander" &&
+                        expander.DataContext is AccountRowViewModel { IsActive: true });
+                Assert.False(details.IsExpanded);
+                Assert.Equal(Visibility.Visible, details.Visibility);
+                var unqueriedPercent = FindVisualChildren<TextBlock>(mainWindow)
+                    .Single(textBlock =>
+                        textBlock.Name == "RemainingPercentText" &&
+                        textBlock.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == second.AccountKey);
+                Assert.Equal(Visibility.Collapsed, unqueriedPercent.Visibility);
 
                 var quotaStatus = FindVisualChildren<TextBlock>(mainWindow)
                     .Single(textBlock =>

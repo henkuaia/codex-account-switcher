@@ -3,10 +3,8 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Account operation"
         Icon="../Assets/CodexAccountSwitcher.ico"
-        Width="560"
-        Height="430"
-        MinWidth="480"
-        MinHeight="360"
+        Width="420"
+        Height="230"
         WindowStartupLocation="CenterOwner"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -20,13 +18,13 @@
             CornerRadius="8">
         <Grid>
             <Grid.RowDefinitions>
-                <RowDefinition Height="58" />
+                <RowDefinition Height="52" />
                 <RowDefinition Height="*" />
-                <RowDefinition Height="66" />
+                <RowDefinition Height="56" />
             </Grid.RowDefinitions>
 
             <Grid Grid.Row="0"
-                  Margin="20,0,14,0"
+                  Margin="18,0,12,0"
                   Background="Transparent"
                   MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
                 <Grid.ColumnDefinitions>
@@ -38,42 +36,110 @@
                                FontSize="16"
                                FontWeight="SemiBold" />
                     <TextBlock x:Name="PhaseText"
-                               Margin="0,2,0,0"
-                               Foreground="{StaticResource TextSecondaryBrush}" />
+                               Visibility="Collapsed" />
                 </StackPanel>
                 <Button x:Name="HeaderCloseButton"
                         Grid.Column="1"
-                        Width="36"
+                        Width="34"
+                        Height="34"
                         Click="Close_Click"
                         Style="{StaticResource ActionButtonStyle}"
                         Visibility="Collapsed">
-                    <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE8BB;" />
+                    <TextBlock FontFamily="Segoe Fluent Icons"
+                               FontSize="14"
+                               Text="&#xE8BB;" />
                 </Button>
             </Grid>
 
-            <Border Grid.Row="1"
-                    Margin="20,8,20,16"
-                    Background="#202629"
-                    CornerRadius="6">
-                <TextBox x:Name="OutputTextBox"
-                         Padding="14,12"
-                         Background="Transparent"
-                         BorderThickness="0"
-                         FontFamily="Cascadia Mono, Consolas"
-                         FontSize="12"
-                         Foreground="#F3F6F7"
-                         IsReadOnly="True"
-                         TextWrapping="Wrap"
-                         VerticalScrollBarVisibility="Auto" />
-            </Border>
+            <Grid Grid.Row="1"
+                  Margin="18,2,18,8">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel HorizontalAlignment="Center"
+                            VerticalAlignment="Center">
+                    <Grid Width="34"
+                          Height="34"
+                          HorizontalAlignment="Center">
+                        <Grid x:Name="LoadingSpinner"
+                              Width="30"
+                              Height="30"
+                              RenderTransformOrigin="0.5,0.5">
+                            <Grid.RenderTransform>
+                                <RotateTransform x:Name="SpinnerRotation" />
+                            </Grid.RenderTransform>
+                            <Grid.Triggers>
+                                <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+                                    <BeginStoryboard>
+                                        <Storyboard>
+                                            <DoubleAnimation Storyboard.TargetName="SpinnerRotation"
+                                                             Storyboard.TargetProperty="Angle"
+                                                             From="0"
+                                                             To="360"
+                                                             Duration="0:0:0.9"
+                                                             RepeatBehavior="Forever" />
+                                        </Storyboard>
+                                    </BeginStoryboard>
+                                </EventTrigger>
+                            </Grid.Triggers>
+                            <Ellipse Stroke="{StaticResource BorderBrush}"
+                                     StrokeThickness="3" />
+                            <Path Data="M 15,1 A 14,14 0 0 1 29,15"
+                                  Stroke="{StaticResource PrimaryBrush}"
+                                  StrokeThickness="3"
+                                  StrokeStartLineCap="Round"
+                                  StrokeEndLineCap="Round" />
+                        </Grid>
+                        <TextBlock x:Name="StateIcon"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   FontFamily="Segoe Fluent Icons"
+                                   FontSize="30"
+                                   Visibility="Collapsed" />
+                    </Grid>
+                    <TextBlock x:Name="StateTitleText"
+                               Margin="0,6,0,0"
+                               HorizontalAlignment="Center"
+                               FontSize="15"
+                               FontWeight="SemiBold" />
+                    <TextBlock x:Name="StateSubtitleText"
+                               Margin="0,2,0,0"
+                               HorizontalAlignment="Center"
+                               Foreground="{StaticResource TextSecondaryBrush}" />
+                </StackPanel>
+
+                <Expander x:Name="DetailsExpander"
+                          Grid.Row="1"
+                          Header="登录信息"
+                          IsExpanded="False"
+                          Visibility="Collapsed">
+                    <Border Margin="0,4,0,0"
+                            Height="58"
+                            Background="#202629"
+                            CornerRadius="5">
+                        <TextBox x:Name="OutputTextBox"
+                                 Padding="10,8"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 FontFamily="Cascadia Mono, Consolas"
+                                 FontSize="11"
+                                 Foreground="#F3F6F7"
+                                 IsReadOnly="True"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto" />
+                    </Border>
+                </Expander>
+            </Grid>
 
             <Border Grid.Row="2"
-                    Padding="20,14"
+                    Padding="18,10"
                     Background="{StaticResource WindowBackgroundBrush}"
                     BorderBrush="{StaticResource BorderBrush}"
                     BorderThickness="0,1,0,0">
                 <Button x:Name="CloseButton"
-                        Width="88"
+                        Width="92"
                         HorizontalAlignment="Right"
                         Click="Close_Click"
                         Style="{StaticResource PrimaryButtonStyle}"

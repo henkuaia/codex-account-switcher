@@ -3,6 +3,10 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Input;
+using System.Windows.Media;
+using System.Windows.Threading;
+using Brush = System.Windows.Media.Brush;
+using Color = System.Windows.Media.Color;
 using CodexAccountSwitcher.Security;
 using CodexAccountSwitcher.Services;
 using CodexAccountSwitcher.ViewModels;
@@ -17,6 +21,7 @@ public partial class OperationWindow : Window
     private bool _canClose;
     private bool _cancelRequested;
     private bool _hasStreamedOutput;
+    private DispatcherTimer? _autoCloseTimer;
     private readonly TaskCompletionSource _firstRender =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -43,6 +48,8 @@ public partial class OperationWindow : Window
         Title = text.Heading;
         HeadingText.Text = text.Heading;
         PhaseText.Text = text.Phase;
+        StateTitleText.Text = text.Phase;
+        StateSubtitleText.Text = text.PendingSubtitle ?? string.Empty;
         CloseButton.Content = text.Close;
         HeaderCloseButton.ToolTip = text.Close;
         AutomationProperties.SetName(HeaderCloseButton, text.Close);
@@ -56,6 +63,7 @@ public partial class OperationWindow : Window
         }
 
         ContentRendered += OnContentRendered;
+        Closed += OnClosed;
     }
 
     public async Task ShowAndWaitForFirstRenderAsync(CancellationToken cancellationToken)
@@ -75,6 +83,7 @@ public partial class OperationWindow : Window
         OutputTextBox.AppendText(Environment.NewLine);
         OutputTextBox.ScrollToEnd();
         _hasStreamedOutput = true;
+        DetailsExpander.Visibility = Visibility.Visible;
     }
 
     public void Complete(CommandResult result)
@@ -88,19 +97,78 @@ public partial class OperationWindow : Window
             AppendSanitizedFailure(result);
         }
 
+        if (result.Succeeded)
+        {
+            ShowSuccess();
+        }
+        else
+        {
+            ShowFailure(PhaseText.Text);
+        }
+
         EnableClose();
+        if (result.Succeeded && _text.AutoCloseOnSuccess)
+        {
+            ScheduleAutoClose();
+        }
     }
 
     public void Fail()
     {
         PhaseText.Text = _text.OperationFailed;
+        ShowFailure(PhaseText.Text);
         EnableClose();
     }
 
     public void Cancelled()
     {
         PhaseText.Text = _text.Cancelled;
+        ShowFinishedState(
+            PhaseText.Text,
+            _text.CancelledSubtitle ?? string.Empty,
+            "\uE711",
+            (Brush)FindResource("TextSecondaryBrush"));
         EnableClose();
+    }
+
+    private void ShowSuccess()
+    {
+        DetailsExpander.IsExpanded = false;
+        DetailsExpander.Visibility = Visibility.Collapsed;
+        ShowFinishedState(
+            _text.SuccessTitle ?? _text.Completed,
+            _text.SuccessSubtitle ?? string.Empty,
+            "\uE73E",
+            (Brush)FindResource("ActiveTextBrush"));
+    }
+
+    private void ShowFailure(string title)
+    {
+        if (_hasStreamedOutput)
+        {
+            DetailsExpander.Visibility = Visibility.Visible;
+        }
+
+        ShowFinishedState(
+            title,
+            _text.FailureSubtitle ?? string.Empty,
+            "\uE711",
+            new SolidColorBrush(Color.FromRgb(0xD9, 0x53, 0x4F)));
+    }
+
+    private void ShowFinishedState(
+        string title,
+        string subtitle,
+        string icon,
+        Brush iconBrush)
+    {
+        SpinnerRotation.BeginAnimation(RotateTransform.AngleProperty, null);
+        LoadingSpinner.Visibility = Visibility.Collapsed;
+        StateIcon.Text = icon;
+        StateIcon.Foreground = iconBrush;
+        StateIcon.Visibility = Visibility.Visible;
+        StateTitleText.Text = title;
+        StateSubtitleText.Text = subtitle;
     }
 
     private void EnableClose()
@@ -129,6 +197,42 @@ public partial class OperationWindow : Window
         OutputTextBox.AppendText(sanitized.TrimEnd());
         OutputTextBox.AppendText(Environment.NewLine);
         OutputTextBox.ScrollToEnd();
+        _hasStreamedOutput = true;
+        DetailsExpander.Visibility = Visibility.Visible;
+    }
+
+    private void ScheduleAutoClose()
+    {
+        StopAutoCloseTimer();
+        _autoCloseTimer = new DispatcherTimer(
+            DispatcherPriority.Background,
+            Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(1000),
+        };
+        _autoCloseTimer.Tick += AutoCloseTimer_Tick;
+        _autoCloseTimer.Start();
+    }
+
+    private void AutoCloseTimer_Tick(object? sender, EventArgs e)
+    {
+        StopAutoCloseTimer();
+        if (_canClose)
+        {
+            Close();
+        }
+    }
+
+    private void StopAutoCloseTimer()
+    {
+        if (_autoCloseTimer is null)
+        {
+            return;
+        }
+
+        _autoCloseTimer.Stop();
+        _autoCloseTimer.Tick -= AutoCloseTimer_Tick;
+        _autoCloseTimer = null;
     }
 
     private void OnContentRendered(object? sender, EventArgs e)
@@ -143,7 +247,15 @@ public partial class OperationWindow : Window
         {
             e.Cancel = true;
             RequestCancel();
+            return;
         }
+
+        StopAutoCloseTimer();
+    }
+
+    private void OnClosed(object? sender, EventArgs e)
+    {
+        StopAutoCloseTimer();
     }
 
     private void Close_Click(object sender, RoutedEventArgs e)
@@ -168,6 +280,8 @@ public partial class OperationWindow : Window
 
         _cancelRequested = true;
         PhaseText.Text = _text.Cancelling;
+        StateTitleText.Text = _text.Cancelling;
+        StateSubtitleText.Text = string.Empty;
         CloseButton.IsEnabled = false;
         HeaderCloseButton.IsEnabled = false;
         _requestCancel();
@@ -193,6 +307,18 @@ internal sealed record OperationWindowText(
     string Cancelling,
     string Cancelled)
 {
+    public bool AutoCloseOnSuccess { get; init; }
+
+    public string? PendingSubtitle { get; init; }
+
+    public string? SuccessTitle { get; init; }
+
+    public string? SuccessSubtitle { get; init; }
+
+    public string? FailureSubtitle { get; init; }
+
+    public string? CancelledSubtitle { get; init; }
+
     public static OperationWindowText AddAccount { get; } = new(
         "添加账号",
         "等待浏览器登录",
@@ -202,7 +328,14 @@ internal sealed record OperationWindowText(
         "关闭",
         "取消登录",
         "正在取消登录…",
-        "登录已取消");
+        "登录已取消")
+    {
+        AutoCloseOnSuccess = true,
+        PendingSubtitle = "请在浏览器中完成账号授权",
+        SuccessTitle = "账号添加成功",
+        SuccessSubtitle = "窗口即将自动关闭",
+        FailureSubtitle = "可展开登录信息查看原因",
+    };
 
     public static OperationWindowText English(string heading, string phase)
     {

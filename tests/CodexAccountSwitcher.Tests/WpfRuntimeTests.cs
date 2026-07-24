@@ -175,7 +175,10 @@ public sealed class WpfRuntimeTests
                 Assert.Equal("Close", AutomationProperties.GetName(confirmationClose));
                 confirmationWindow.Close();
 
-                localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                localizedWindow = new OperationWindow(
+                    OperationWindowText.AddAccount,
+                    static () => { },
+                    static () => true);
                 Assert.False(localizedWindow.ShowInTaskbar);
                 var localizedFirstRender = localizedWindow.ShowAndWaitForFirstRenderAsync(CancellationToken.None);
                 Assert.False(localizedFirstRender.IsCompleted);
@@ -185,30 +188,70 @@ public sealed class WpfRuntimeTests
                 var localizedPhase = Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText"));
                 var localizedClose = Assert.IsType<Button>(localizedWindow.FindName("CloseButton"));
                 var localizedHeaderClose = Assert.IsType<Button>(localizedWindow.FindName("HeaderCloseButton"));
+                var localizedSpinner = Assert.IsType<Grid>(localizedWindow.FindName("LoadingSpinner"));
+                var localizedStateIcon = Assert.IsType<TextBlock>(localizedWindow.FindName("StateIcon"));
+                var localizedStateTitle = Assert.IsType<TextBlock>(localizedWindow.FindName("StateTitleText"));
+                var localizedStateSubtitle = Assert.IsType<TextBlock>(localizedWindow.FindName("StateSubtitleText"));
+                var localizedDetails = Assert.IsType<Expander>(localizedWindow.FindName("DetailsExpander"));
                 Assert.Equal("添加账号", localizedHeading.Text);
                 Assert.Equal("等待浏览器登录", localizedPhase.Text);
-                Assert.Equal("关闭", localizedClose.Content);
-                Assert.Equal("关闭", localizedHeaderClose.ToolTip);
-                Assert.Equal("关闭", AutomationProperties.GetName(localizedHeaderClose));
-                Assert.Equal(Visibility.Collapsed, localizedClose.Visibility);
-                Assert.Equal(Visibility.Collapsed, localizedHeaderClose.Visibility);
+                Assert.Equal("等待浏览器登录", localizedStateTitle.Text);
+                Assert.Equal("取消登录", localizedClose.Content);
+                Assert.Equal("取消登录", localizedHeaderClose.ToolTip);
+                Assert.Equal("取消登录", AutomationProperties.GetName(localizedHeaderClose));
+                Assert.Equal(Visibility.Visible, localizedClose.Visibility);
+                Assert.Equal(Visibility.Visible, localizedHeaderClose.Visibility);
+                Assert.Equal(Visibility.Visible, localizedSpinner.Visibility);
+                Assert.Equal(Visibility.Collapsed, localizedStateIcon.Visibility);
+                Assert.Equal(Visibility.Collapsed, localizedDetails.Visibility);
+                Assert.False(localizedDetails.IsExpanded);
+
+                localizedWindow.AppendLine(new ProcessOutputLine(
+                    ProcessOutputStream.StandardOutput,
+                    "https://auth.openai.com/codex/device"));
+                Assert.Equal(Visibility.Visible, localizedDetails.Visibility);
+                Assert.False(localizedDetails.IsExpanded);
+                Assert.Contains(
+                    "https://auth.openai.com/codex/device",
+                    Assert.IsType<TextBox>(localizedWindow.FindName("OutputTextBox")).Text,
+                    StringComparison.Ordinal);
+
                 localizedWindow.Close();
                 Assert.True(localizedWindow.IsVisible);
 
+                var localizedClosed = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                localizedWindow.Closed += (_, _) => localizedClosed.TrySetResult();
                 localizedWindow.Complete(new CommandResult(0, string.Empty, string.Empty));
                 Assert.Equal("已完成", localizedPhase.Text);
+                Assert.Equal("账号添加成功", localizedStateTitle.Text);
+                Assert.Equal(Visibility.Collapsed, localizedSpinner.Visibility);
+                Assert.Equal(Visibility.Visible, localizedStateIcon.Visibility);
+                Assert.Equal(Visibility.Collapsed, localizedDetails.Visibility);
                 Assert.Equal(Visibility.Visible, localizedClose.Visibility);
                 Assert.Equal(Visibility.Visible, localizedHeaderClose.Visibility);
-                localizedWindow.Close();
+                await localizedClosed.Task.WaitAsync(TimeSpan.FromSeconds(3));
                 Assert.False(localizedWindow.IsVisible);
 
                 localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
+                localizedWindow.AppendLine(new ProcessOutputLine(
+                    ProcessOutputStream.StandardError,
+                    "login failed"));
                 localizedWindow.Complete(new CommandResult(7, string.Empty, string.Empty));
                 Assert.Equal("失败（退出代码 7）", Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText")).Text);
+                Assert.Equal(
+                    "失败（退出代码 7）",
+                    Assert.IsType<TextBlock>(localizedWindow.FindName("StateTitleText")).Text);
+                Assert.Equal(
+                    Visibility.Visible,
+                    Assert.IsType<Expander>(localizedWindow.FindName("DetailsExpander")).Visibility);
 
                 localizedWindow = new OperationWindow(OperationWindowText.AddAccount);
                 localizedWindow.Fail();
                 Assert.Equal("操作失败", Assert.IsType<TextBlock>(localizedWindow.FindName("PhaseText")).Text);
+                Assert.Equal(
+                    "操作失败",
+                    Assert.IsType<TextBlock>(localizedWindow.FindName("StateTitleText")).Text);
 
                 operationWindow = new OperationWindow("Add account", "Waiting for device login");
                 var firstRender = operationWindow.ShowAndWaitForFirstRenderAsync(CancellationToken.None);
@@ -238,6 +281,10 @@ public sealed class WpfRuntimeTests
                 var streamedOutput = Assert.IsType<TextBox>(
                     operationWindow.FindName("OutputTextBox")).Text;
                 Assert.Equal(1, CountOccurrences(streamedOutput, "login failed"));
+                Assert.Equal(
+                    Visibility.Visible,
+                    Assert.IsType<Expander>(operationWindow.FindName("DetailsExpander")).Visibility);
+                Assert.False(Assert.IsType<Expander>(operationWindow.FindName("DetailsExpander")).IsExpanded);
                 Assert.Equal(Visibility.Visible, operationClose.Visibility);
                 operationWindow.Close();
                 Assert.False(operationWindow.IsVisible);
@@ -360,6 +407,10 @@ public sealed class WpfRuntimeTests
                 Assert.Equal(1, cancelConfirmations);
                 Assert.Equal("登录已取消", cancelPhase.Text);
                 Assert.Equal("关闭", cancelButton.Content);
+                Assert.Equal(
+                    Visibility.Collapsed,
+                    Assert.IsType<Grid>(canceledLoginWindow.FindName("LoadingSpinner")).Visibility);
+                Assert.True(cancelButton.IsEnabled);
                 canceledLoginWindow.Close();
                 Assert.False(canceledLoginWindow.IsVisible);
 
@@ -384,6 +435,8 @@ public sealed class WpfRuntimeTests
                 Assert.Equal("Close", removeClose.Content);
                 Assert.Equal("Close", removeHeaderClose.ToolTip);
                 Assert.Equal("Close", AutomationProperties.GetName(removeHeaderClose));
+                await Task.Delay(TimeSpan.FromMilliseconds(1200));
+                Assert.True(dialogRemoveWindow.IsVisible);
                 dialogRemoveWindow.Close();
                 Assert.DoesNotContain(
                     Application.Current.Windows.OfType<OperationWindow>(),

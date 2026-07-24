@@ -88,6 +88,30 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Add_account_operation_window_uses_compact_animated_state_layout()
+    {
+        var viewDirectory = Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "Views");
+        var xaml = File.ReadAllText(Path.Combine(viewDirectory, "OperationWindow.xaml"));
+        var source = File.ReadAllText(Path.Combine(viewDirectory, "OperationWindow.xaml.cs"));
+
+        Assert.Contains("Width=\"420\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Height=\"230\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"LoadingSpinner\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"StateIcon\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"StateTitleText\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"StateSubtitleText\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DetailsExpander\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"OutputTextBox\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"CloseButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"HeaderCloseButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<DoubleAnimation", xaml, StringComparison.Ordinal);
+        Assert.Contains("RepeatBehavior=\"Forever\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("TimeSpan.FromMilliseconds(1000)", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Production_startup_wires_local_quota_cache_without_automatic_refresh()
     {
         var source = File.ReadAllText(Path.Combine(

@@ -1,8 +1,11 @@
 <Application x:Class="CodexAccountSwitcher.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:CodexAccountSwitcher.Converters"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
+        <converters:QuotaRemainingBrushConverter x:Key="QuotaRemainingBrushConverter" />
+
         <Color x:Key="WindowBackgroundColor">#F4F6F7</Color>
         <Color x:Key="SurfaceColor">#FBFCFC</Color>
         <Color x:Key="BorderColor">#D9DEE2</Color>

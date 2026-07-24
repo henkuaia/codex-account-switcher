@@ -33,7 +33,7 @@
 - `ConvertBack` throws `NotSupportedException`.
 - Missing, non-numeric, NaN, or infinite input returns neutral `#667178`.
 
-- [ ] **Step 1: Write failing converter tests**
+- [x] **Step 1: Write failing converter tests**
 
 Cover exact endpoints and midpoint:
 
@@ -56,7 +56,7 @@ Also assert `25` and `75` equal the piecewise linear RGB interpolation, values
 below/above the range clamp to the endpoint colors, invalid input is neutral,
 and `ConvertBack` throws.
 
-- [ ] **Step 2: Run converter tests and verify RED**
+- [x] **Step 2: Run converter tests and verify RED**
 
 Run:
 
@@ -66,7 +66,7 @@ Run:
 
 Expected: compilation fails because `QuotaRemainingBrushConverter` does not exist.
 
-- [ ] **Step 3: Implement the converter and resource**
+- [x] **Step 3: Implement the converter and resource**
 
 Use two linear interpolation segments:
 
@@ -81,13 +81,13 @@ Register one application resource:
 <converters:QuotaRemainingBrushConverter x:Key="QuotaRemainingBrushConverter" />
 ```
 
-- [ ] **Step 4: Run converter tests and verify GREEN**
+- [x] **Step 4: Run converter tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all converter tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add src/CodexAccountSwitcher/Converters/QuotaRemainingBrushConverter.cs src/CodexAccountSwitcher/App.xaml tests/CodexAccountSwitcher.Tests/QuotaRemainingBrushConverterTests.cs
@@ -108,7 +108,7 @@ git commit -m "feat: color quota by remaining percentage"
 - Keeps all existing view-model bindings and command names.
 - Produces: an `Expander` named `QuotaDetailsExpander`, collapsed by default.
 
-- [ ] **Step 1: Write failing card-contract tests**
+- [x] **Step 1: Write failing card-contract tests**
 
 Assert the XAML contains:
 
@@ -123,7 +123,7 @@ Update the WPF runtime test to retrieve the first generated account card,
 assert the details expander starts collapsed, and assert an unqueried row has no
 visible percentage text.
 
-- [ ] **Step 2: Run card tests and verify RED**
+- [x] **Step 2: Run card tests and verify RED**
 
 Run:
 
@@ -133,7 +133,7 @@ Run:
 
 Expected: the compact-card and expander assertions fail.
 
-- [ ] **Step 3: Implement the compact card template**
+- [x] **Step 3: Implement the compact card template**
 
 Keep always-visible content in this order:
 
@@ -151,13 +151,13 @@ foreground and progress-bar foreground through
 `QuotaRemainingBrushConverter`. Preserve the neutral track and all existing
 visibility triggers.
 
-- [ ] **Step 4: Run card tests and verify GREEN**
+- [x] **Step 4: Run card tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all focused WPF tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```powershell
 git add src/CodexAccountSwitcher/MainWindow.xaml tests/CodexAccountSwitcher.Tests/WpfInterfaceContractTests.cs tests/CodexAccountSwitcher.Tests/WpfRuntimeTests.cs
@@ -186,7 +186,7 @@ git commit -m "feat: compact account quota cards"
 - Adds `OperationWindowText.AutoCloseOnSuccess`, true only for `AddAccount`.
 - Successful add-account close delay is exactly `TimeSpan.FromMilliseconds(1000)`.
 
-- [ ] **Step 1: Write failing compact-state tests**
+- [x] **Step 1: Write failing compact-state tests**
 
 Add XAML contract assertions for fixed `Width="420"`, `Height="230"`, spinner
 animation, and the named state/details controls.
@@ -202,7 +202,7 @@ In the WPF runtime test assert:
 5. cancellation keeps the existing confirmation and disabled-button behavior;
 6. an English remove window does not auto-close on successful completion.
 
-- [ ] **Step 2: Run operation-window tests and verify RED**
+- [x] **Step 2: Run operation-window tests and verify RED**
 
 Run:
 
@@ -212,7 +212,7 @@ Run:
 
 Expected: compact-state element and behavior assertions fail.
 
-- [ ] **Step 3: Implement the compact dialog XAML**
+- [x] **Step 3: Implement the compact dialog XAML**
 
 Use a fixed `420×230` window. Replace the permanent dark terminal area with:
 
@@ -224,7 +224,7 @@ Use a fixed `420×230` window. Replace the permanent dark terminal area with:
 Use WPF `Storyboard` rotation with no external library. Keep the output text
 selectable and vertically scrollable when disclosed.
 
-- [ ] **Step 4: Implement the window state transitions**
+- [x] **Step 4: Implement the window state transitions**
 
 `AppendLine` appends sanitized text and makes the disclosure available without
 expanding it. `Complete` transitions to success/failure, stops the spinner, and
@@ -232,13 +232,13 @@ keeps existing close rules. For successful `OperationWindowText.AddAccount`,
 start a one-shot dispatcher timer for `1000 ms`; stop the timer during window
 close. `Fail` and `Cancelled` transition to their corresponding concise states.
 
-- [ ] **Step 5: Run operation-window tests and verify GREEN**
+- [x] **Step 5: Run operation-window tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all focused operation and WPF tests pass.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```powershell
 git add src/CodexAccountSwitcher/Views/OperationWindow.xaml src/CodexAccountSwitcher/Views/OperationWindow.xaml.cs tests/CodexAccountSwitcher.Tests/WpfRuntimeTests.cs tests/CodexAccountSwitcher.Tests/WpfInterfaceContractTests.cs
@@ -258,7 +258,7 @@ git commit -m "feat: simplify account login dialog"
 - Preserves the existing nine-file publish contract.
 - Preserves the local feature branch and pushes its HEAD to remote `main`.
 
-- [ ] **Step 1: Run complete Release tests**
+- [x] **Step 1: Run complete Release tests**
 
 Run:
 
@@ -268,7 +268,7 @@ Run:
 
 Expected: all tests pass with zero failures and zero skips.
 
-- [ ] **Step 2: Publish and verify authentication preservation**
+- [x] **Step 2: Publish and verify authentication preservation**
 
 Hash `%USERPROFILE%\.codex\auth.json` and every file below
 `%USERPROFILE%\.codex\accounts`, then run:
@@ -280,14 +280,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish.ps1
 Verify unchanged authentication hashes, exactly nine output files, matching
 helper/manifest SHA-256, and no staging/backup residue.
 
-- [ ] **Step 3: Replace the installed application**
+- [x] **Step 3: Replace the installed application**
 
 Stage and hash-verify the new distribution under `C:\Users\demax\Apps`. Stop
 only `CodexAccountSwitcher.exe`, move the current installation to a timestamped
 backup, move the staged distribution into the stable install path, verify all
 hashes, and restart the app.
 
-- [ ] **Step 4: Perform read-only visual inspection**
+- [x] **Step 4: Perform read-only visual inspection**
 
 Inspect the installed main window and add-account window without initiating a
 login. Verify compact layout, default-collapsed details, neutral unqueried rows,
@@ -305,4 +305,3 @@ git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 pus
 
 Verify remote `main` equals local `HEAD`, the worktree is clean, authentication
 hashes are unchanged, and the installed process runs from the stable path.
-

@@ -295,3 +295,57 @@ Tests:
 No source or test blocker remains. No live login, quota refresh, account switch,
 logout, account removal, process control, publish, install, or user-owned
 session mutation was performed.
+
+---
+
+## Final reviewer micro-fixes
+
+Date: 2026-07-25 (Asia/Shanghai)
+Implementation commit: `332b47a6de848596b96c26e7de0ef05ed3f81d54`
+Result: **PASS for both remaining Important findings**
+
+### Corrections
+
+1. Schema 2 checkpoint structure is now validated before per-event aggregates
+   are compacted. A null checkpoint, null aggregate collection, or any other
+   invalid legacy checkpoint value returns the existing preservation-safe
+   invalid-ledger result, blocks overwrite, and leaves the original file
+   unchanged. No `NullReferenceException` catch was added.
+2. Batch quota refresh now buffers completed account updates until hybrid
+   completion/save returns. Every completed account is emitted exactly once,
+   in input order, with the same completion warning. On cancellation, already
+   completed accounts are finalized and emitted once before the original
+   cancellation is rethrown.
+
+### TDD evidence
+
+- Schema 2 corruption RED: **2 failed, 0 passed**. Both the null-checkpoint and
+  null-`Aggregates` fixtures threw `NullReferenceException` from
+  `CompactLegacyCheckpoint`.
+- Schema 2 migration GREEN: **3 passed, 0 failed**, covering the two corrupt
+  fixtures plus a valid schema 2 compaction.
+- Multi-account warning RED: **1 failed, 0 passed**. The first account had a
+  null warning while the second account received the shared unsaved warning.
+- Batch warning/cancellation GREEN: **3 passed, 0 failed**, covering two-account
+  shared warning and order, one-account exact-once behavior, and cancellation
+  with only the completed account finalized and emitted.
+- Complete touched test classes: **58 passed, 0 failed, 0 skipped**.
+
+### Final verification
+
+- Focused touched-area Release aggregate: **311 passed, 0 failed, 0 skipped**
+  in the reported **3 s** test duration.
+- Full Release suite: **667 passed, 0 failed, 0 skipped** in the reported
+  **10 s** test duration.
+- `git diff --check`: exit `0`; only the repository's standard LF-to-CRLF
+  working-copy notices were emitted.
+
+Files changed:
+
+- `src/CodexAccountSwitcher/Services/QuotaEstimateLedgerService.cs`
+- `src/CodexAccountSwitcher/Services/QuotaService.cs`
+- `tests/CodexAccountSwitcher.Tests/QuotaEstimateLedgerServiceTests.cs`
+- `tests/CodexAccountSwitcher.Tests/QuotaServiceTests.cs`
+
+No live authentication, account, session, publish, install, or process
+operation was performed.

@@ -101,6 +101,22 @@ public sealed class QuotaEstimateMathTests
     }
 
     [Fact]
+    public void Delta_credit_uncertainty_widens_both_interval_endpoints()
+    {
+        var result = QuotaEstimateMath.TryCreateDeltaIntervalPrecise(
+            lowerDeltaCredits: 50m,
+            upperDeltaCredits: 100m,
+            earlierPercent: 20,
+            earlierResolution: 1,
+            laterPercent: 30,
+            laterResolution: 1);
+
+        Assert.NotNull(result);
+        Assert.Equal(50m / 0.11m * 0.04m, result.LowerUsd);
+        Assert.Equal(100m / 0.09m * 0.04m, result.UpperUsd);
+    }
+
+    [Fact]
     public void Delta_interval_clamps_both_percentage_endpoints()
     {
         var result = QuotaEstimateMath.TryCreateDeltaInterval(

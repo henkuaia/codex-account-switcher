@@ -1,3 +1,4 @@
+using System.Collections;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
 
@@ -346,6 +347,187 @@ public sealed class HybridQuotaEstimateServiceTests
         Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
         Assert.Null(result.EstimatedPeriodQuotaUpperUsd);
         Assert.Contains("本机用量扫描不完整", result.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Deleted_malformed_only_checkpoint_suppresses_historical_local_range()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "malformed-only.jsonl");
+        directory.Write(
+            "malformed-only.jsonl",
+            """{"timestamp":""" + Environment.NewLine);
+        var collector = new LocalCodexUsageCollector(
+            directory.Path,
+            utcNow: () => ServerNow);
+        var first = await collector.CollectAsync(
+            SegmentStart,
+            CancellationToken.None);
+        File.Delete(path);
+        var second = await collector.CollectAsync(
+            SegmentStart,
+            first.FileCheckpoints,
+            CancellationToken.None);
+        var activationStart = SegmentStart.AddMinutes(-1);
+        var historical = Observation(
+            Segment,
+            SegmentStart.AddHours(2),
+            lowerUsd: 15m,
+            upperUsd: 17m) with
+        {
+            ActivationStartedAt = activationStart,
+        };
+        var service = CreateService(
+            usage: second,
+            ledger: StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                historical));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.False(second.IsComplete);
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Null(result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Contains("本机用量扫描不完整", result.EstimateStatus);
+    }
+
+    [Fact]
+    public async Task Reset_boundary_inside_hourly_bucket_keeps_credit_interval_uncertainty()
+    {
+        var segment = new QuotaSegment(
+            QuotaPeriod.Weekly,
+            DateTimeOffset.Parse("2026-07-24T10:30:00Z"),
+            DateTimeOffset.Parse("2026-07-31T10:30:00Z"));
+        var usage = UsageResult() with
+        {
+            Buckets =
+            [
+                Bucket(
+                    firstEventAt: DateTimeOffset.Parse("2026-07-24T10:10:00Z"),
+                    lastEventAt: DateTimeOffset.Parse("2026-07-24T10:50:00Z"),
+                    pricedCredits: 100m),
+            ],
+        };
+        var service = CreateService(
+            usage,
+            StateWithAccount(new AccountActivationInterval(
+                segment.SegmentStart.AddHours(-1),
+                null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(
+                resetsAt: segment.ResetsAt,
+                serverNow: segment.SegmentStart.AddHours(1)),
+            segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(0m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.33m, result.EstimatedPeriodQuotaUpperUsd);
+        var observation = Assert.Single(
+            context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.Equal(0m, observation.AttributedCredits);
+        Assert.Equal(100m, observation.AttributedCreditsUpper);
+        Assert.True(observation.HasAttributionBoundaryUncertainty);
+        Assert.Contains("Credits 归属按区间保守处理", result.EstimateStatus);
+    }
+
+    [Fact]
+    public async Task Activation_boundary_inside_hourly_bucket_never_claims_exact_credits()
+    {
+        var activationStart = SegmentStart.AddHours(2).AddMinutes(30);
+        var usage = UsageResult() with
+        {
+            Buckets =
+            [
+                Bucket(
+                    firstEventAt: SegmentStart.AddHours(2).AddMinutes(10),
+                    lastEventAt: SegmentStart.AddHours(2).AddMinutes(50),
+                    pricedCredits: 100m),
+            ],
+        };
+        var service = CreateService(
+            usage,
+            StateWithAccount(new AccountActivationInterval(activationStart, null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(serverNow: SegmentStart.AddHours(3)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        var observation = Assert.Single(
+            context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.Equal(0m, observation.AttributedCredits);
+        Assert.Equal(100m, observation.AttributedCreditsUpper);
+        Assert.True(observation.HasAttributionBoundaryUncertainty);
+    }
+
+    [Fact]
+    public async Task Compact_usage_is_indexed_once_for_a_multi_account_batch()
+    {
+        var secondAccount = Accounts.Record(
+            "account-b",
+            "second@example.com",
+            accountId: "acct-2");
+        var buckets = new CountingReadOnlyList<LocalUsageBucket>(
+        [
+            Bucket(
+                SegmentStart.AddHours(1),
+                SegmentStart.AddHours(1).AddMinutes(10),
+                10m),
+            Bucket(
+                SegmentStart.AddHours(3),
+                SegmentStart.AddHours(3).AddMinutes(10),
+                20m),
+        ]);
+        var service = CreateService(
+            UsageResult() with { Buckets = buckets },
+            State(
+                (
+                    Account.AccountKey,
+                    new AccountQuotaEstimateLedger(
+                        [new AccountActivationInterval(
+                            SegmentStart.AddMinutes(-1),
+                            SegmentStart.AddHours(2))],
+                        [])),
+                (
+                    secondAccount.AccountKey,
+                    new AccountQuotaEstimateLedger(
+                        [new AccountActivationInterval(SegmentStart.AddHours(2), null)],
+                        []))));
+        var context = await service.BeginRefreshAsync(default);
+
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(serverNow: SegmentStart.AddHours(4)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+        service.ApplyObservation(
+            context,
+            secondAccount,
+            Display(serverNow: SegmentStart.AddHours(4)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(1, buckets.EnumerationCount);
     }
 
     [Fact]
@@ -775,6 +957,42 @@ public sealed class HybridQuotaEstimateServiceTests
         Assert.Contains("部分用量无法计价，区间可能偏低", result.EstimateStatus, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("enterprise", true)]
+    [InlineData("Business", false)]
+    [InlineData("team", false)]
+    [InlineData("plus", false)]
+    public async Task Enterprise_only_discloses_legacy_rate_card_eligibility_gap(
+        string plan,
+        bool expected)
+    {
+        var account = Account with { Plan = plan };
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger: State((
+                account.AccountKey,
+                new AccountQuotaEstimateLedger(
+                    [new AccountActivationInterval(
+                        SegmentStart.AddMinutes(-1),
+                        null)],
+                    []))));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(
+            expected,
+            result.EstimateStatus?.Contains(
+                "旧版 token 费率资格",
+                StringComparison.Ordinal) == true);
+    }
+
     [Fact]
     public async Task Compatible_history_produces_multi_point_intersection()
     {
@@ -1094,6 +1312,51 @@ public sealed class HybridQuotaEstimateServiceTests
         Assert.Equal(observedAt, activation.StartedAt);
     }
 
+    [Theory]
+    [InlineData("login")]
+    [InlineData("switch")]
+    [InlineData("logout")]
+    public async Task Non_advancing_registry_clock_returns_sanitized_warning(
+        string operation)
+    {
+        var observedAt = DateTimeOffset.Parse("2026-07-25T10:00:00Z");
+        var secondAccount = Accounts.Record(
+            "account-b",
+            "second@example.com",
+            accountId: "acct-2");
+        var ledger = operation == "login"
+            ? StateWithAccount(new AccountActivationInterval(
+                observedAt.AddHours(-1),
+                observedAt.AddMinutes(1)))
+            : StateWithAccount(new AccountActivationInterval(observedAt, null));
+        var registry = operation switch
+        {
+            "login" => new AccountRegistry(3, Account.AccountKey, [Account]),
+            "switch" => new AccountRegistry(
+                3,
+                secondAccount.AccountKey,
+                [Account, secondAccount]),
+            "logout" => new AccountRegistry(3, null, [Account]),
+            _ => throw new ArgumentOutOfRangeException(nameof(operation)),
+        };
+        var saveCount = 0;
+        var service = CreateService(
+            ledger: ledger,
+            utcNow: () => observedAt,
+            saveAsync: (_, _) =>
+            {
+                saveCount++;
+                return Task.CompletedTask;
+            });
+
+        var warning = await service.ObserveRegistryAsync(registry, default);
+
+        Assert.Equal(
+            "本地额度估算状态暂时无法更新，账号操作结果不受影响。",
+            warning);
+        Assert.Equal(0, saveCount);
+    }
+
     [Fact]
     public async Task Completed_refresh_becomes_registry_observation_baseline()
     {
@@ -1233,6 +1496,30 @@ public sealed class HybridQuotaEstimateServiceTests
             CachedInputTokens: 0,
             OutputTokens: 0);
 
+    private static LocalUsageBucket Bucket(
+        DateTimeOffset firstEventAt,
+        DateTimeOffset lastEventAt,
+        decimal pricedCredits)
+    {
+        var utc = firstEventAt.ToUniversalTime();
+        return new LocalUsageBucket(
+            new DateTimeOffset(
+                utc.Year,
+                utc.Month,
+                utc.Day,
+                utc.Hour,
+                minute: 0,
+                second: 0,
+                TimeSpan.Zero),
+            firstEventAt,
+            lastEventAt,
+            pricedCredits,
+            PricedEventCount: 1,
+            UnknownModelEventCount: 0,
+            UnknownServiceTierEventCount: 0,
+            InvalidUsageEventCount: 0);
+    }
+
     private static AnalyticsUsageParseResult EmptyAnalytics() =>
         new(AnalyticsUsageState.Empty, LowerCredits: 0, UpperCredits: 0);
 
@@ -1309,4 +1596,22 @@ public sealed class HybridQuotaEstimateServiceTests
             item => item.Key,
             item => item.Ledger,
             StringComparer.Ordinal));
+
+    private sealed class CountingReadOnlyList<T>(
+        IReadOnlyList<T> items) : IReadOnlyList<T>
+    {
+        public int EnumerationCount { get; private set; }
+
+        public int Count => items.Count;
+
+        public T this[int index] => items[index];
+
+        public IEnumerator<T> GetEnumerator()
+        {
+            EnumerationCount++;
+            return items.GetEnumerator();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+    }
 }

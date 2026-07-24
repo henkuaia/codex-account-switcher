@@ -906,6 +906,51 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Refresh_all_completion_warning_reports_one_update_per_account()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult(
+                [LocalUsage(segmentStart.AddHours(1))],
+                0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                StateWithActivation(
+                    account,
+                    new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+                null)),
+            (_, _) => Task.FromException(new IOException("ledger-save-failure")),
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+        var progress = new CollectingProgress<QuotaUpdate>();
+
+        await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAllAsync(
+                [account],
+                home.Path,
+                progress,
+                default);
+
+        var update = Assert.Single(progress.Values);
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
+        Assert.Contains("未保存", update.Display.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Estimator_propagates_user_cancellation()
     {
         using var home = new TemporaryDirectory();

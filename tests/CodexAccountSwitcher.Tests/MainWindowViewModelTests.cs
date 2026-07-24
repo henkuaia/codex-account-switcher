@@ -1316,6 +1316,37 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Repeated_quota_failure_rendering_is_idempotent()
+    {
+        var row = new AccountRowViewModel(
+            Accounts.Record("key", "first@example.com"),
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            row.Account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Weekly,
+                42,
+                DateTimeOffset.Parse("2026-07-25T12:34:00Z"),
+                TimeSpan.FromDays(7),
+                "Weekly quota"),
+            null));
+        var failure = new QuotaUpdate(
+            row.Account.AccountKey,
+            Display: null,
+            Error: "quota failed (HTTP 403).");
+        row.ApplyQuota(failure);
+        var firstStatus = RequiredProperty<string>(row, "QuotaStatusText");
+        var firstTooltip = RequiredProperty<string>(row, "QuotaToolTip");
+
+        row.ApplyQuota(failure);
+
+        Assert.Equal(firstStatus, RequiredProperty<string>(row, "QuotaStatusText"));
+        Assert.Equal(firstTooltip, RequiredProperty<string>(row, "QuotaToolTip"));
+    }
+
+    [Fact]
     public void Cached_quota_shows_last_refresh_time_before_server_reset()
     {
         var row = new AccountRowViewModel(

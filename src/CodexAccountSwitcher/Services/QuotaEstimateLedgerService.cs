@@ -10,7 +10,8 @@ public sealed record QuotaEstimateLedgerLoadResult(
 
 public sealed class QuotaEstimateLedgerService
 {
-    private const int CurrentSchemaVersion = 2;
+    private const int CurrentSchemaVersion = 3;
+    private const int CheckpointAggregateSchemaVersion = 2;
     private const int LegacySchemaVersion = 1;
     private const string InvalidFileError = "本地额度估算账本无效，原文件已保留。";
     private const string UnsupportedVersionError = "本地额度估算账本版本不受支持，原文件已保留。";
@@ -65,12 +66,15 @@ public sealed class QuotaEstimateLedgerService
                 return Blocked(InvalidFileError);
             }
 
-            if (document.SchemaVersion is not CurrentSchemaVersion and not LegacySchemaVersion)
+            if (document.SchemaVersion is not CurrentSchemaVersion and
+                not CheckpointAggregateSchemaVersion and
+                not LegacySchemaVersion)
             {
                 return Blocked(UnsupportedVersionError);
             }
 
-            if (document.SchemaVersion == CurrentSchemaVersion &&
+            if (document.SchemaVersion is CurrentSchemaVersion or
+                CheckpointAggregateSchemaVersion &&
                 document.FileCheckpoints is null)
             {
                 return Blocked(InvalidFileError);
@@ -90,7 +94,9 @@ public sealed class QuotaEstimateLedgerService
                 ? new Dictionary<string, LocalUsageFileCheckpoint>(StringComparer.Ordinal)
                 : document.FileCheckpoints.ToDictionary(
                     pair => pair.Key,
-                    pair => pair.Value,
+                    pair => document.SchemaVersion == CheckpointAggregateSchemaVersion
+                        ? CompactLegacyCheckpoint(pair.Value)
+                        : pair.Value,
                     StringComparer.Ordinal);
             var state = new QuotaEstimateLedgerState(accounts)
             {
@@ -422,9 +428,12 @@ public sealed class QuotaEstimateLedgerService
                 !double.IsFinite(observation.UsedPercent) ||
                 observation.UsedPercent is < 0 or > 100 ||
                 !double.IsFinite(observation.PercentResolution) ||
-                observation.PercentResolution <= 0 ||
-                 observation.AttributedCredits < 0 ||
-                 observation.MalformedLineCount < 0 ||
+                 observation.PercentResolution <= 0 ||
+                  observation.AttributedCredits < 0 ||
+                  observation.AttributedCreditsUpper is { } attributedUpper &&
+                  (attributedUpper < 0 ||
+                   attributedUpper < observation.AttributedCredits) ||
+                  observation.MalformedLineCount < 0 ||
                  observation.SkippedFileCount < 0 ||
                  observation.ActivationStartedAt is { } activationStartedAt &&
                  !IsUtcTimestamp(activationStartedAt) ||
@@ -469,21 +478,119 @@ public sealed class QuotaEstimateLedgerService
                 checkpoint.Model is null ||
                 checkpoint.ServiceTier is null ||
                 checkpoint.Aggregates is null ||
+                checkpoint.Aggregates.Count != 0 ||
+                checkpoint.Buckets is null ||
                 checkpoint.InvalidLineCount < 0 ||
                 string.IsNullOrWhiteSpace(checkpoint.RateCardVersion) ||
-                checkpoint.Aggregates.Any(aggregate =>
-                    aggregate is null ||
-                    !IsUtcTimestamp(aggregate.Timestamp) ||
-                    aggregate.Credits < 0 ||
-                    !Enum.IsDefined(aggregate.FailureReason) ||
-                    aggregate.FailureReason != CreditPricingFailureReason.None &&
-                    aggregate.Credits != 0))
+                !IsUtcTimestamp(checkpoint.RelevantThroughUtc) ||
+                checkpoint.RelevantThroughUtc < checkpoint.LastWriteTimeUtc ||
+                checkpoint.IsTombstone && checkpoint.HasCompleteScan ||
+                checkpoint.InvalidLineCount > 0 && checkpoint.HasCompleteScan ||
+                checkpoint.Buckets.Any(bucket =>
+                    !IsValidBucket(bucket) ||
+                    bucket.LastEventAtUtc > checkpoint.RelevantThroughUtc))
             {
                 return false;
             }
         }
 
         return true;
+    }
+
+    private static LocalUsageFileCheckpoint CompactLegacyCheckpoint(
+        LocalUsageFileCheckpoint checkpoint)
+    {
+        var buckets = new Dictionary<DateTimeOffset, LocalUsageBucket>();
+        foreach (var aggregate in checkpoint.Aggregates)
+        {
+            var utc = aggregate.Timestamp.ToUniversalTime();
+            var bucketStart = new DateTimeOffset(
+                utc.Year,
+                utc.Month,
+                utc.Day,
+                utc.Hour,
+                minute: 0,
+                second: 0,
+                TimeSpan.Zero);
+            var next = new LocalUsageBucket(
+                bucketStart,
+                utc,
+                utc,
+                aggregate.FailureReason == CreditPricingFailureReason.None
+                    ? aggregate.Credits
+                    : 0m,
+                aggregate.FailureReason == CreditPricingFailureReason.None ? 1 : 0,
+                aggregate.FailureReason == CreditPricingFailureReason.UnknownModel ? 1 : 0,
+                aggregate.FailureReason == CreditPricingFailureReason.UnknownServiceTier ? 1 : 0,
+                aggregate.FailureReason == CreditPricingFailureReason.InvalidUsage ? 1 : 0);
+            buckets[bucketStart] = buckets.TryGetValue(bucketStart, out var existing)
+                ? MergeBucket(existing, next)
+                : next;
+        }
+
+        var compacted = buckets.Values
+            .OrderBy(bucket => bucket.BucketStartUtc)
+            .ToArray();
+        var relevantThroughUtc = compacted
+            .Select(bucket => bucket.LastEventAtUtc)
+            .Append(checkpoint.LastWriteTimeUtc)
+            .Max();
+        return checkpoint with
+        {
+            Aggregates = Array.Empty<LocalUsageAggregate>(),
+            Buckets = compacted,
+            HasCompleteScan = checkpoint.InvalidLineCount == 0,
+            IsTombstone = false,
+            RelevantThroughUtc = relevantThroughUtc,
+        };
+    }
+
+    private static LocalUsageBucket MergeBucket(
+        LocalUsageBucket left,
+        LocalUsageBucket right) =>
+        left with
+        {
+            FirstEventAtUtc = left.FirstEventAtUtc <= right.FirstEventAtUtc
+                ? left.FirstEventAtUtc
+                : right.FirstEventAtUtc,
+            LastEventAtUtc = left.LastEventAtUtc >= right.LastEventAtUtc
+                ? left.LastEventAtUtc
+                : right.LastEventAtUtc,
+            PricedCredits = left.PricedCredits + right.PricedCredits,
+            PricedEventCount = left.PricedEventCount + right.PricedEventCount,
+            UnknownModelEventCount =
+                left.UnknownModelEventCount + right.UnknownModelEventCount,
+            UnknownServiceTierEventCount =
+                left.UnknownServiceTierEventCount + right.UnknownServiceTierEventCount,
+            InvalidUsageEventCount =
+                left.InvalidUsageEventCount + right.InvalidUsageEventCount,
+        };
+
+    private static bool IsValidBucket(LocalUsageBucket? bucket)
+    {
+        if (bucket is null ||
+            !IsUtcTimestamp(bucket.BucketStartUtc) ||
+            bucket.BucketStartUtc.Minute != 0 ||
+            bucket.BucketStartUtc.Second != 0 ||
+            bucket.BucketStartUtc.Millisecond != 0 ||
+            !IsUtcTimestamp(bucket.FirstEventAtUtc) ||
+            !IsUtcTimestamp(bucket.LastEventAtUtc) ||
+            bucket.FirstEventAtUtc < bucket.BucketStartUtc ||
+            bucket.LastEventAtUtc >= bucket.BucketStartUtc.AddHours(1) ||
+            bucket.FirstEventAtUtc > bucket.LastEventAtUtc ||
+            bucket.PricedCredits < 0 ||
+            bucket.PricedEventCount < 0 ||
+            bucket.UnknownModelEventCount < 0 ||
+            bucket.UnknownServiceTierEventCount < 0 ||
+            bucket.InvalidUsageEventCount < 0)
+        {
+            return false;
+        }
+
+        return bucket.PricedEventCount +
+            bucket.UnknownModelEventCount +
+            bucket.UnknownServiceTierEventCount +
+            bucket.InvalidUsageEventCount > 0;
     }
 
     private static bool IsSafeRelativePath(string relativePath)

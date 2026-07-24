@@ -167,12 +167,8 @@ public sealed class AccountRowViewModel : ObservableObject
             QuotaDisplay is not null)
         {
             QuotaError = update.Error;
-            QuotaStatusText = string.IsNullOrWhiteSpace(QuotaStatusText)
-                ? update.Error
-                : $"{update.Error} · {QuotaStatusText}";
-            QuotaToolTip = string.IsNullOrWhiteSpace(QuotaToolTip)
-                ? update.Error
-                : $"{update.Error}; {QuotaToolTip}";
+            QuotaStatusText = PrefixOnce(QuotaStatusText, update.Error, " · ");
+            QuotaToolTip = PrefixOnce(QuotaToolTip, update.Error, "; ");
             HasQuotaStatus = true;
             return;
         }
@@ -329,6 +325,17 @@ public sealed class AccountRowViewModel : ObservableObject
             ? estimateStatus
             : $"{text}; {estimateStatus}";
     }
+
+    private static string PrefixOnce(
+        string? existing,
+        string prefix,
+        string separator) =>
+        string.IsNullOrWhiteSpace(existing)
+            ? prefix
+            : string.Equals(existing, prefix, StringComparison.Ordinal) ||
+              existing.StartsWith($"{prefix}{separator}", StringComparison.Ordinal)
+                ? existing
+                : $"{prefix}{separator}{existing}";
 
     private static string FormatUsd(decimal value) =>
         value.ToString("0.##", CultureInfo.InvariantCulture);

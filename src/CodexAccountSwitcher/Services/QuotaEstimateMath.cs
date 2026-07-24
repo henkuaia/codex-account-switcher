@@ -75,9 +75,25 @@ public static class QuotaEstimateMath
         double earlierPercent,
         double earlierResolution,
         double laterPercent,
+        double laterResolution) =>
+        TryCreateDeltaIntervalPrecise(
+            deltaCredits,
+            deltaCredits,
+            earlierPercent,
+            earlierResolution,
+            laterPercent,
+            laterResolution);
+
+    internal static PeriodQuotaEstimate? TryCreateDeltaIntervalPrecise(
+        decimal lowerDeltaCredits,
+        decimal upperDeltaCredits,
+        double earlierPercent,
+        double earlierResolution,
+        double laterPercent,
         double laterResolution)
     {
-        if (deltaCredits <= 0 ||
+        if (lowerDeltaCredits <= 0 ||
+            upperDeltaCredits < lowerDeltaCredits ||
             !TryGetPercentageBounds(
                 earlierPercent,
                 earlierResolution,
@@ -102,9 +118,9 @@ public static class QuotaEstimateMath
             }
 
             var lowerUsd =
-                deltaCredits / (deltaPercentHigh / 100m) * UsdPerCredit;
+                lowerDeltaCredits / (deltaPercentHigh / 100m) * UsdPerCredit;
             var upperUsd =
-                deltaCredits / (deltaPercentLow / 100m) * UsdPerCredit;
+                upperDeltaCredits / (deltaPercentLow / 100m) * UsdPerCredit;
             return new PeriodQuotaEstimate(lowerUsd, upperUsd);
         }
         catch (OverflowException)
@@ -137,6 +153,8 @@ public static class QuotaEstimateMath
                 observation.UsedPercent,
                 observation.PercentResolution,
                 observation.AttributedCredits,
+                observation.AttributedCreditsUpper,
+                observation.HasAttributionBoundaryUncertainty,
                 observation.LowerUsd,
                 observation.UpperUsd,
             })

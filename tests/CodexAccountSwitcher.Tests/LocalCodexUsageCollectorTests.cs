@@ -1,3 +1,4 @@
+using System.Text;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Services;
 
@@ -26,15 +27,29 @@ public sealed class LocalCodexUsageCollectorTests
 
         var result = await collector.CollectAsync(EarliestUtc, CancellationToken.None);
 
-        Assert.Equal(2, result.Events.Count);
-        Assert.Equal("gpt-5.4", result.Events[0].Model);
-        Assert.Equal("priority", result.Events[0].ServiceTier);
-        Assert.Equal(20_203, result.Events[0].InputTokens);
-        Assert.Equal(10_000, result.Events[0].CachedInputTokens);
-        Assert.Equal(397, result.Events[0].OutputTokens);
-        Assert.Equal("gpt-5.3-codex", result.Events[1].Model);
-        Assert.Equal("default", result.Events[1].ServiceTier);
-        Assert.Equal(3, result.Events[1].OutputTokens);
+        Assert.Empty(result.Events);
+        var bucket = Assert.Single(result.Buckets);
+        Assert.Equal(2, bucket.PricedEventCount);
+        var rateCard = new CodexCreditRateCard();
+        var expectedCredits =
+            rateCard.CalculateCredits(new LocalUsageEvent(
+                DateTimeOffset.Parse("2026-07-24T05:01:00Z"),
+                "gpt-5.4",
+                "priority",
+                20_203,
+                10_000,
+                397)).Credits +
+            rateCard.CalculateCredits(new LocalUsageEvent(
+                DateTimeOffset.Parse("2026-07-24T05:05:00Z"),
+                "gpt-5.3-codex",
+                "default",
+                20,
+                10,
+                3)).Credits;
+        Assert.Equal(expectedCredits, bucket.PricedCredits);
+        var checkpoint = Assert.Single(result.FileCheckpoints).Value;
+        Assert.Equal("gpt-5.3-codex", checkpoint.Model);
+        Assert.Equal("default", checkpoint.ServiceTier);
         Assert.Equal(0, result.InvalidLineCount);
     }
 
@@ -69,7 +84,10 @@ public sealed class LocalCodexUsageCollectorTests
 
         var result = await collector.CollectAsync(EarliestUtc, CancellationToken.None);
 
-        Assert.Single(result.Events);
+        Assert.Empty(result.Events);
+        Assert.Equal(
+            1,
+            Assert.Single(result.Buckets).UnknownServiceTierEventCount);
         Assert.Equal(1, result.InvalidLineCount);
         Assert.False(result.IsComplete);
         var checkpoint = Assert.Single(result.FileCheckpoints).Value;
@@ -114,9 +132,8 @@ public sealed class LocalCodexUsageCollectorTests
         var second = await new LocalCodexUsageCollector(directory.Path)
             .CollectAsync(EarliestUtc, first.FileCheckpoints, CancellationToken.None);
 
-        Assert.Equal(2, second.Aggregates.Count);
-        Assert.All(second.Aggregates, aggregate =>
-            Assert.Equal(CreditPricingFailureReason.None, aggregate.FailureReason));
+        var bucket = Assert.Single(second.Buckets);
+        Assert.Equal(2, bucket.PricedEventCount);
         Assert.True(second.ParsedByteCount < new FileInfo(path).Length);
         var checkpoint = Assert.Single(second.FileCheckpoints).Value;
         Assert.Equal("nested/session.jsonl", checkpoint.RelativePath);
@@ -127,7 +144,7 @@ public sealed class LocalCodexUsageCollectorTests
     }
 
     [Fact]
-    public async Task Shrunk_or_rotated_file_is_rescanned_without_retaining_old_aggregates()
+    public async Task Shrunk_or_rotated_file_is_rescanned_without_retaining_old_buckets()
     {
         using var directory = new TemporaryDirectory();
         var path = Path.Combine(directory.Path, "session.jsonl");
@@ -148,8 +165,9 @@ public sealed class LocalCodexUsageCollectorTests
         var second = await new LocalCodexUsageCollector(directory.Path)
             .CollectAsync(EarliestUtc, first.FileCheckpoints, CancellationToken.None);
 
-        var aggregate = Assert.Single(second.Aggregates);
-        Assert.Equal(DateTimeOffset.Parse("2026-07-24T06:02:00Z"), aggregate.Timestamp);
+        var bucket = Assert.Single(second.Buckets);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-24T06:02:00Z"), bucket.FirstEventAtUtc);
+        Assert.Equal(1, bucket.PricedEventCount);
         Assert.True(second.IsComplete);
     }
 
@@ -178,8 +196,9 @@ public sealed class LocalCodexUsageCollectorTests
         var second = await new LocalCodexUsageCollector(directory.Path)
             .CollectAsync(EarliestUtc, first.FileCheckpoints, CancellationToken.None);
 
-        var aggregate = Assert.Single(second.Aggregates);
-        Assert.Equal(DateTimeOffset.Parse("2026-07-24T06:02:00Z"), aggregate.Timestamp);
+        var bucket = Assert.Single(second.Buckets);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-24T06:02:00Z"), bucket.FirstEventAtUtc);
+        Assert.Equal(1, bucket.PricedEventCount);
     }
 
     [Fact]
@@ -203,7 +222,7 @@ public sealed class LocalCodexUsageCollectorTests
         var result = await new LocalCodexUsageCollector(directory.Path)
             .CollectAsync(EarliestUtc, CancellationToken.None);
 
-        Assert.Single(result.Aggregates);
+        Assert.Single(result.Buckets);
         Assert.Equal(1, result.SkippedFileCount);
         Assert.False(result.IsComplete);
     }
@@ -222,6 +241,165 @@ public sealed class LocalCodexUsageCollectorTests
         Assert.Empty(result.Aggregates);
         Assert.Equal(1, result.SkippedFileCount);
         Assert.False(result.IsComplete);
+    }
+
+    [Fact]
+    public async Task Deleted_malformed_only_checkpoint_remains_an_incomplete_tombstone()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "malformed-only.jsonl");
+        directory.Write(
+            "malformed-only.jsonl",
+            """{"timestamp":""" + Environment.NewLine);
+        var collector = new LocalCodexUsageCollector(
+            directory.Path,
+            utcNow: () => EarliestUtc.AddDays(1));
+        var first = await collector.CollectAsync(EarliestUtc, CancellationToken.None);
+        Assert.Empty(first.Aggregates);
+        Assert.Equal(1, first.InvalidLineCount);
+        var checkpoint = Assert.Single(first.FileCheckpoints).Value;
+        Assert.False(checkpoint.HasCompleteScan);
+        File.Delete(path);
+
+        var second = await collector.CollectAsync(
+            EarliestUtc,
+            first.FileCheckpoints,
+            CancellationToken.None);
+
+        Assert.False(second.IsComplete);
+        Assert.Equal(1, second.SkippedFileCount);
+        Assert.Equal(1, second.InvalidLineCount);
+        var tombstone = Assert.Single(second.FileCheckpoints).Value;
+        Assert.Equal(checkpoint.RelativePath, tombstone.RelativePath);
+        Assert.True(tombstone.IsTombstone);
+        Assert.False(tombstone.HasCompleteScan);
+
+        var expired = await collector.CollectAsync(
+            tombstone.RelevantThroughUtc.AddTicks(1),
+            second.FileCheckpoints,
+            CancellationToken.None);
+
+        Assert.True(expired.IsComplete);
+        Assert.Empty(expired.FileCheckpoints);
+    }
+
+    [Fact]
+    public async Task First_run_file_open_failure_persists_a_bounded_tombstone()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "locked.jsonl");
+        directory.Write("locked.jsonl", "{}");
+        var collector = new LocalCodexUsageCollector(
+            directory.Path,
+            utcNow: () => EarliestUtc.AddDays(1));
+        LocalUsageCollectionResult first;
+        await using (var locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None))
+        {
+            first = await collector.CollectAsync(EarliestUtc, CancellationToken.None);
+        }
+
+        var tombstone = Assert.Single(first.FileCheckpoints).Value;
+        Assert.True(tombstone.IsTombstone);
+        Assert.False(tombstone.HasCompleteScan);
+        Assert.True(tombstone.RelevantThroughUtc >= EarliestUtc);
+        File.Delete(path);
+
+        var second = await collector.CollectAsync(
+            EarliestUtc,
+            first.FileCheckpoints,
+            CancellationToken.None);
+
+        Assert.False(second.IsComplete);
+        Assert.Single(second.FileCheckpoints);
+    }
+
+    [Fact]
+    public async Task Current_open_failure_renews_an_expired_checkpoint_tombstone()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "locked.jsonl");
+        directory.Write("locked.jsonl", "{}");
+        var observedAt = EarliestUtc.AddDays(1);
+        var collector = new LocalCodexUsageCollector(
+            directory.Path,
+            utcNow: () => observedAt);
+        var initial = await collector.CollectAsync(
+            EarliestUtc,
+            CancellationToken.None);
+        var checkpoint = Assert.Single(initial.FileCheckpoints).Value with
+        {
+            LastWriteTimeUtc = EarliestUtc.AddDays(-1),
+            RelevantThroughUtc = EarliestUtc.AddTicks(-1),
+        };
+        LocalUsageCollectionResult result;
+        await using (var locked = new FileStream(
+            path,
+            FileMode.Open,
+            FileAccess.ReadWrite,
+            FileShare.None))
+        {
+            result = await collector.CollectAsync(
+                EarliestUtc,
+                new Dictionary<string, LocalUsageFileCheckpoint>(
+                    StringComparer.Ordinal)
+                {
+                    [checkpoint.RelativePath] = checkpoint,
+                },
+                CancellationToken.None);
+        }
+
+        var tombstone = Assert.Single(result.FileCheckpoints).Value;
+        Assert.True(tombstone.IsTombstone);
+        Assert.Equal(observedAt, tombstone.RelevantThroughUtc);
+        Assert.False(result.IsComplete);
+    }
+
+    [Fact]
+    public async Task Large_history_persists_hourly_buckets_instead_of_token_events()
+    {
+        const int eventCount = 25_000;
+        using var directory = new TemporaryDirectory();
+        var historyStart = DateTimeOffset.Parse("2026-07-20T00:00:00Z");
+        var content = new StringBuilder(
+            eventCount * 200);
+        content.AppendLine(
+            """{"timestamp":"2026-07-20T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}""");
+        content.AppendLine(
+            """{"timestamp":"2026-07-20T00:00:01Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"default"}}}""");
+        for (var index = 0; index < eventCount; index++)
+        {
+            var timestamp = historyStart.AddTicks(
+                TimeSpan.FromHours(48).Ticks * index / eventCount);
+            content.Append("{\"timestamp\":\"");
+            content.Append(timestamp.ToString("O"));
+            content.AppendLine(
+                "\",\"type\":\"event_msg\",\"payload\":{\"type\":\"token_count\",\"info\":{\"last_token_usage\":{\"input_tokens\":1000,\"cached_input_tokens\":0,\"output_tokens\":100}}}}");
+        }
+
+        directory.Write("large-history.jsonl", content.ToString());
+        var result = await new LocalCodexUsageCollector(directory.Path)
+            .CollectAsync(historyStart, CancellationToken.None);
+
+        Assert.Empty(result.Events);
+        Assert.Empty(result.Aggregates);
+        Assert.InRange(result.Buckets.Count, 1, 49);
+        var checkpoint = Assert.Single(result.FileCheckpoints).Value;
+        Assert.Empty(checkpoint.Aggregates);
+        Assert.Equal(result.Buckets.Count, checkpoint.Buckets.Count);
+
+        var ledgerPath = Path.Combine(directory.Path, "ledger", "quota.json");
+        await new QuotaEstimateLedgerService(ledgerPath).SaveAsync(
+            QuotaEstimateLedgerState.Empty with
+            {
+                FileCheckpoints = result.FileCheckpoints,
+            },
+            CancellationToken.None);
+
+        Assert.InRange(new FileInfo(ledgerPath).Length, 1, 50_000);
     }
 
     [Fact]

@@ -27,6 +27,16 @@ public sealed record LocalUsageAggregate(
     decimal Credits,
     CreditPricingFailureReason FailureReason);
 
+public sealed record LocalUsageBucket(
+    DateTimeOffset BucketStartUtc,
+    DateTimeOffset FirstEventAtUtc,
+    DateTimeOffset LastEventAtUtc,
+    decimal PricedCredits,
+    int PricedEventCount,
+    int UnknownModelEventCount,
+    int UnknownServiceTierEventCount,
+    int InvalidUsageEventCount);
+
 public sealed record LocalUsageFileCheckpoint(
     string RelativePath,
     long CompletedLineByteOffset,
@@ -41,7 +51,17 @@ public sealed record LocalUsageFileCheckpoint(
     string ServiceTier,
     IReadOnlyList<LocalUsageAggregate> Aggregates,
     int InvalidLineCount,
-    string RateCardVersion);
+    string RateCardVersion)
+{
+    public IReadOnlyList<LocalUsageBucket> Buckets { get; init; } =
+        Array.Empty<LocalUsageBucket>();
+
+    public bool HasCompleteScan { get; init; } = true;
+
+    public bool IsTombstone { get; init; }
+
+    public DateTimeOffset RelevantThroughUtc { get; init; } = LastWriteTimeUtc;
+}
 
 public sealed record AccountActivationInterval(
     DateTimeOffset StartedAt,
@@ -65,6 +85,10 @@ public sealed record QuotaUsageObservation(
     QuotaObservationKind Kind)
 {
     public bool IsLocalScanComplete { get; init; } = true;
+
+    public decimal? AttributedCreditsUpper { get; init; }
+
+    public bool HasAttributionBoundaryUncertainty { get; init; }
 
     public int MalformedLineCount { get; init; }
 

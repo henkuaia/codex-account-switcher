@@ -14,6 +14,9 @@ public sealed record LocalUsageCollectionResult(
     public IReadOnlyList<LocalUsageAggregate> Aggregates { get; init; } =
         Array.Empty<LocalUsageAggregate>();
 
+    public IReadOnlyList<LocalUsageBucket> Buckets { get; init; } =
+        Array.Empty<LocalUsageBucket>();
+
     public IReadOnlyDictionary<string, LocalUsageFileCheckpoint> FileCheckpoints { get; init; } =
         new Dictionary<string, LocalUsageFileCheckpoint>(StringComparer.Ordinal);
 
@@ -23,7 +26,10 @@ public sealed record LocalUsageCollectionResult(
 
     public bool HasCheckpointChanges { get; init; }
 
-    public bool IsComplete => InvalidLineCount == 0 && SkippedFileCount == 0;
+    public bool IsComplete =>
+        InvalidLineCount == 0 &&
+        SkippedFileCount == 0 &&
+        FileCheckpoints.Values.All(checkpoint => checkpoint.HasCompleteScan);
 }
 
 public sealed class LocalCodexUsageCollector
@@ -36,14 +42,17 @@ public sealed class LocalCodexUsageCollector
 
     private readonly string _sessionRoot;
     private readonly CodexCreditRateCard _rateCard;
+    private readonly Func<DateTimeOffset> _utcNow;
 
     public LocalCodexUsageCollector(
         string sessionRoot,
-        CodexCreditRateCard? rateCard = null)
+        CodexCreditRateCard? rateCard = null,
+        Func<DateTimeOffset>? utcNow = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionRoot);
         _sessionRoot = Path.GetFullPath(sessionRoot);
         _rateCard = rateCard ?? new CodexCreditRateCard();
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     public Task<LocalUsageCollectionResult> CollectAsync(
@@ -68,15 +77,29 @@ public sealed class LocalCodexUsageCollector
         var invalidLineCount = 0;
         var skippedFileCount = 0;
         long parsedByteCount = 0;
+        var observedAt = _utcNow().ToUniversalTime();
 
         if (!Directory.Exists(_sessionRoot))
         {
+            foreach (var (relativePath, checkpoint) in checkpoints)
+            {
+                var retained = FilterCheckpoint(checkpoint, earliestUtc);
+                if (IsRelevant(retained, earliestUtc))
+                {
+                    updatedCheckpoints[relativePath] = AsTombstone(retained);
+                    invalidLineCount += retained.InvalidLineCount;
+                }
+            }
+
             return new LocalUsageCollectionResult(newEvents, invalidLineCount)
             {
                 Aggregates = Array.Empty<LocalUsageAggregate>(),
+                Buckets = Array.Empty<LocalUsageBucket>(),
                 FileCheckpoints = updatedCheckpoints,
                 SkippedFileCount = Math.Max(1, checkpoints.Count),
-                HasCheckpointChanges = checkpoints.Count > 0,
+                HasCheckpointChanges = !CheckpointMapsEqual(
+                    checkpoints,
+                    updatedCheckpoints),
             };
         }
 
@@ -103,7 +126,6 @@ public sealed class LocalCodexUsageCollector
                 }
 
                 updatedCheckpoints[relativePath] = scan.Checkpoint;
-                newEvents.AddRange(scan.NewEvents);
                 invalidLineCount += scan.ReportedInvalidLineCount;
                 parsedByteCount += scan.ParsedByteCount;
             }
@@ -114,15 +136,16 @@ public sealed class LocalCodexUsageCollector
             catch (Exception exception) when (IsExpectedFileFailure(exception))
             {
                 skippedFileCount++;
-                if (checkpoint is not null)
+                var retained = checkpoint is null
+                    ? CreateTombstone(relativePath, observedAt)
+                    : FilterCheckpoint(checkpoint, earliestUtc);
+                if (!IsRelevant(retained, earliestUtc))
                 {
-                    var retained = FilterCheckpoint(checkpoint, earliestUtc);
-                    if (retained.Aggregates.Count > 0)
-                    {
-                        updatedCheckpoints[relativePath] = retained;
-                        invalidLineCount += retained.InvalidLineCount;
-                    }
+                    retained = CreateTombstone(relativePath, observedAt);
                 }
+
+                updatedCheckpoints[relativePath] = AsTombstone(retained);
+                invalidLineCount += retained.InvalidLineCount;
             }
         }
 
@@ -134,23 +157,22 @@ public sealed class LocalCodexUsageCollector
             }
 
             var retained = FilterCheckpoint(checkpoint, earliestUtc);
-            if (retained.Aggregates.Count == 0)
+            if (!IsRelevant(retained, earliestUtc))
             {
                 continue;
             }
 
-            updatedCheckpoints[relativePath] = retained;
+            updatedCheckpoints[relativePath] = AsTombstone(retained);
             invalidLineCount += retained.InvalidLineCount;
             skippedFileCount++;
         }
 
-        var aggregates = updatedCheckpoints.Values
-            .SelectMany(checkpoint => checkpoint.Aggregates)
-            .OrderBy(aggregate => aggregate.Timestamp)
-            .ToArray();
+        var buckets = CompactBuckets(updatedCheckpoints.Values
+            .SelectMany(checkpoint => checkpoint.Buckets));
         return new LocalUsageCollectionResult(newEvents, invalidLineCount)
         {
-            Aggregates = aggregates,
+            Aggregates = Array.Empty<LocalUsageAggregate>(),
+            Buckets = buckets,
             FileCheckpoints = updatedCheckpoints,
             SkippedFileCount = skippedFileCount,
             ParsedByteCount = parsedByteCount,
@@ -181,6 +203,7 @@ public sealed class LocalCodexUsageCollector
         }
 
         var canResume = checkpoint is not null &&
+            !checkpoint.IsTombstone &&
             string.Equals(
                 checkpoint.RateCardVersion,
                 CodexCreditRateCard.Version,
@@ -195,9 +218,9 @@ public sealed class LocalCodexUsageCollector
 
         var model = canResume ? checkpoint!.Model : string.Empty;
         var serviceTier = canResume ? checkpoint!.ServiceTier : string.Empty;
-        var aggregates = canResume
-            ? checkpoint!.Aggregates
-                .Where(aggregate => aggregate.Timestamp >= earliestUtc)
+        var buckets = canResume
+            ? checkpoint!.Buckets
+                .Where(bucket => bucket.LastEventAtUtc >= earliestUtc)
                 .ToList()
             : [];
         var persistentInvalidLineCount = canResume
@@ -213,7 +236,7 @@ public sealed class LocalCodexUsageCollector
             model,
             serviceTier,
             cancellationToken);
-        aggregates.AddRange(scan.NewAggregates);
+        buckets = CompactBuckets(buckets.Concat(scan.NewBuckets)).ToList();
         persistentInvalidLineCount += scan.CompletedInvalidLineCount;
 
         var finalLength = stream.Length;
@@ -230,24 +253,31 @@ public sealed class LocalCodexUsageCollector
             scan.CompletedLineByteOffset - completedTailLength,
             completedTailLength,
             cancellationToken);
+        var finalLastWriteTimeUtc = AsUtc(File.GetLastWriteTimeUtc(path));
         var updated = new LocalUsageFileCheckpoint(
             relativePath,
             scan.CompletedLineByteOffset,
             finalLength,
             creationTimeUtc,
-            AsUtc(File.GetLastWriteTimeUtc(path)),
+            finalLastWriteTimeUtc,
             prefixLength,
             prefixSha256,
             completedTailLength,
             completedTailSha256,
             scan.Model,
             scan.ServiceTier,
-            aggregates,
+            Aggregates: Array.Empty<LocalUsageAggregate>(),
             persistentInvalidLineCount,
-            CodexCreditRateCard.Version);
+            CodexCreditRateCard.Version)
+        {
+            Buckets = buckets,
+            HasCompleteScan =
+                persistentInvalidLineCount + scan.IncompleteFinalLineCount == 0,
+            IsTombstone = false,
+            RelevantThroughUtc = finalLastWriteTimeUtc,
+        };
         return new FileScanResult(
             updated,
-            scan.NewEvents,
             persistentInvalidLineCount + scan.IncompleteFinalLineCount,
             scan.ParsedByteCount);
     }
@@ -263,8 +293,7 @@ public sealed class LocalCodexUsageCollector
         stream.Seek(startOffset, SeekOrigin.Begin);
         var model = initialModel;
         var serviceTier = initialServiceTier;
-        var newEvents = new List<LocalUsageEvent>();
-        var newAggregates = new List<LocalUsageAggregate>();
+        var newBuckets = new Dictionary<DateTimeOffset, LocalUsageBucket>();
         var completedInvalidLineCount = 0;
         var buffer = new byte[BufferSize];
         using var line = new MemoryStream();
@@ -303,12 +332,8 @@ public sealed class LocalCodexUsageCollector
                 }
                 else if (usage is not null)
                 {
-                    newEvents.Add(usage);
                     var calculation = _rateCard.CalculateCredits(usage);
-                    newAggregates.Add(new LocalUsageAggregate(
-                        usage.Timestamp,
-                        calculation.Credits,
-                        calculation.FailureReason));
+                    AddUsage(newBuckets, usage.Timestamp, calculation);
                 }
 
                 line.SetLength(0);
@@ -333,12 +358,8 @@ public sealed class LocalCodexUsageCollector
             {
                 if (usage is not null)
                 {
-                    newEvents.Add(usage);
                     var calculation = _rateCard.CalculateCredits(usage);
-                    newAggregates.Add(new LocalUsageAggregate(
-                        usage.Timestamp,
-                        calculation.Credits,
-                        calculation.FailureReason));
+                    AddUsage(newBuckets, usage.Timestamp, calculation);
                 }
 
                 completedLineByteOffset = absoluteOffset;
@@ -349,8 +370,9 @@ public sealed class LocalCodexUsageCollector
             completedLineByteOffset,
             model,
             serviceTier,
-            newEvents,
-            newAggregates,
+            newBuckets.Values
+                .OrderBy(bucket => bucket.BucketStartUtc)
+                .ToArray(),
             completedInvalidLineCount,
             incompleteFinalLineCount,
             parsedByteCount);
@@ -531,7 +553,118 @@ public sealed class LocalCodexUsageCollector
             Aggregates = checkpoint.Aggregates
                 .Where(aggregate => aggregate.Timestamp >= earliestUtc)
                 .ToArray(),
+            Buckets = checkpoint.Buckets
+                .Where(bucket => bucket.LastEventAtUtc >= earliestUtc)
+                .ToArray(),
+            HasCompleteScan =
+                checkpoint.HasCompleteScan && checkpoint.InvalidLineCount == 0,
         };
+
+    private static void AddUsage(
+        IDictionary<DateTimeOffset, LocalUsageBucket> buckets,
+        DateTimeOffset timestamp,
+        CodexCreditCalculationResult calculation)
+    {
+        var utc = timestamp.ToUniversalTime();
+        var bucketStart = new DateTimeOffset(
+            utc.Year,
+            utc.Month,
+            utc.Day,
+            utc.Hour,
+            minute: 0,
+            second: 0,
+            TimeSpan.Zero);
+        var next = new LocalUsageBucket(
+            bucketStart,
+            utc,
+            utc,
+            calculation.IsPriced ? calculation.Credits : 0m,
+            calculation.IsPriced ? 1 : 0,
+            calculation.FailureReason == CreditPricingFailureReason.UnknownModel ? 1 : 0,
+            calculation.FailureReason == CreditPricingFailureReason.UnknownServiceTier ? 1 : 0,
+            calculation.FailureReason == CreditPricingFailureReason.InvalidUsage ? 1 : 0);
+        buckets[bucketStart] = buckets.TryGetValue(bucketStart, out var existing)
+            ? MergeBucket(existing, next)
+            : next;
+    }
+
+    private static IReadOnlyList<LocalUsageBucket> CompactBuckets(
+        IEnumerable<LocalUsageBucket> buckets)
+    {
+        var compacted = new Dictionary<DateTimeOffset, LocalUsageBucket>();
+        foreach (var bucket in buckets)
+        {
+            compacted[bucket.BucketStartUtc] =
+                compacted.TryGetValue(bucket.BucketStartUtc, out var existing)
+                    ? MergeBucket(existing, bucket)
+                    : bucket;
+        }
+
+        return compacted.Values
+            .OrderBy(bucket => bucket.BucketStartUtc)
+            .ToArray();
+    }
+
+    private static LocalUsageBucket MergeBucket(
+        LocalUsageBucket left,
+        LocalUsageBucket right) =>
+        left with
+        {
+            FirstEventAtUtc = left.FirstEventAtUtc <= right.FirstEventAtUtc
+                ? left.FirstEventAtUtc
+                : right.FirstEventAtUtc,
+            LastEventAtUtc = left.LastEventAtUtc >= right.LastEventAtUtc
+                ? left.LastEventAtUtc
+                : right.LastEventAtUtc,
+            PricedCredits = left.PricedCredits + right.PricedCredits,
+            PricedEventCount = left.PricedEventCount + right.PricedEventCount,
+            UnknownModelEventCount =
+                left.UnknownModelEventCount + right.UnknownModelEventCount,
+            UnknownServiceTierEventCount =
+                left.UnknownServiceTierEventCount + right.UnknownServiceTierEventCount,
+            InvalidUsageEventCount =
+                left.InvalidUsageEventCount + right.InvalidUsageEventCount,
+        };
+
+    private static bool IsRelevant(
+        LocalUsageFileCheckpoint checkpoint,
+        DateTimeOffset earliestUtc) =>
+        checkpoint.RelevantThroughUtc >= earliestUtc;
+
+    private static LocalUsageFileCheckpoint AsTombstone(
+        LocalUsageFileCheckpoint checkpoint) =>
+        checkpoint with
+        {
+            HasCompleteScan = false,
+            IsTombstone = true,
+        };
+
+    private static LocalUsageFileCheckpoint CreateTombstone(
+        string relativePath,
+        DateTimeOffset observedAt)
+    {
+        var emptySha256 = Convert.ToHexString(SHA256.HashData([]));
+        return new LocalUsageFileCheckpoint(
+            relativePath,
+            CompletedLineByteOffset: 0,
+            LastKnownLength: 0,
+            observedAt,
+            observedAt,
+            PrefixLength: 0,
+            emptySha256,
+            CompletedTailLength: 0,
+            emptySha256,
+            Model: string.Empty,
+            ServiceTier: string.Empty,
+            Aggregates: Array.Empty<LocalUsageAggregate>(),
+            InvalidLineCount: 0,
+            CodexCreditRateCard.Version)
+        {
+            HasCompleteScan = false,
+            IsTombstone = true,
+            RelevantThroughUtc = observedAt,
+        };
+    }
 
     private static async Task<bool> PrefixMatchesAsync(
         FileStream stream,
@@ -624,9 +757,18 @@ public sealed class LocalCodexUsageCollector
         foreach (var (key, leftCheckpoint) in left)
         {
             if (!right.TryGetValue(key, out var rightCheckpoint) ||
-                leftCheckpoint with { Aggregates = Array.Empty<LocalUsageAggregate>() } !=
-                rightCheckpoint with { Aggregates = Array.Empty<LocalUsageAggregate>() } ||
-                !leftCheckpoint.Aggregates.SequenceEqual(rightCheckpoint.Aggregates))
+                leftCheckpoint with
+                {
+                    Aggregates = Array.Empty<LocalUsageAggregate>(),
+                    Buckets = Array.Empty<LocalUsageBucket>(),
+                } !=
+                rightCheckpoint with
+                {
+                    Aggregates = Array.Empty<LocalUsageAggregate>(),
+                    Buckets = Array.Empty<LocalUsageBucket>(),
+                } ||
+                !leftCheckpoint.Aggregates.SequenceEqual(rightCheckpoint.Aggregates) ||
+                !leftCheckpoint.Buckets.SequenceEqual(rightCheckpoint.Buckets))
             {
                 return false;
             }
@@ -704,7 +846,6 @@ public sealed class LocalCodexUsageCollector
 
     private sealed record FileScanResult(
         LocalUsageFileCheckpoint Checkpoint,
-        IReadOnlyList<LocalUsageEvent> NewEvents,
         int ReportedInvalidLineCount,
         long ParsedByteCount);
 
@@ -712,8 +853,7 @@ public sealed class LocalCodexUsageCollector
         long CompletedLineByteOffset,
         string Model,
         string ServiceTier,
-        IReadOnlyList<LocalUsageEvent> NewEvents,
-        IReadOnlyList<LocalUsageAggregate> NewAggregates,
+        IReadOnlyList<LocalUsageBucket> NewBuckets,
         int CompletedInvalidLineCount,
         int IncompleteFinalLineCount,
         long ParsedByteCount);

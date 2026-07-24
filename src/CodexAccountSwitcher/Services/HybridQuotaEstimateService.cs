@@ -19,13 +19,25 @@ public sealed record HybridQuotaRefreshContext(
     internal bool HasChanges { get; set; }
 
     internal string? PersistenceWarning { get; set; }
+
+    internal IReadOnlyDictionary<string, LocalUsageAccountIndex>? LocalUsageIndex
+    {
+        get;
+        set;
+    }
 }
+
+internal sealed record LocalUsageAccountIndex(
+    IReadOnlyList<LocalUsageBucket> ExactBuckets,
+    IReadOnlyList<LocalUsageBucket> BoundaryBuckets);
 
 public sealed class HybridQuotaEstimateService
 {
     private const double PercentResolution = 1d;
     private const string LedgerSaveError =
         "本地额度估算账本暂时无法保存。";
+    private const string RegistryObservationWarning =
+        "本地额度估算状态暂时无法更新，账号操作结果不受影响。";
 
     private readonly Func<
         DateTimeOffset,
@@ -136,13 +148,15 @@ public sealed class HybridQuotaEstimateService
         {
             FileCheckpoints = localUsage.FileCheckpoints,
         };
-        return new HybridQuotaRefreshContext(localUsage, ledger)
+        var context = new HybridQuotaRefreshContext(localUsage, ledger)
         {
             HasChanges = localUsage.HasCheckpointChanges,
             PersistenceWarning = loadError is null
                 ? null
                 : $"{loadError} 本次本地估算结果尚未保存。",
         };
+        context.LocalUsageIndex = BuildLocalUsageIndex(localUsage, ledger);
+        return context;
     }
 
     public QuotaDisplay ApplyObservation(
@@ -192,6 +206,7 @@ public sealed class HybridQuotaEstimateService
                 segment,
                 observedAt,
                 display.UsedPercent,
+                analytics.LowerCredits,
                 analytics.UpperCredits,
                 hasFullSegmentCoverage: true,
                 estimate,
@@ -374,6 +389,10 @@ public sealed class HybridQuotaEstimateService
         {
             return LedgerSaveError;
         }
+        catch (ArgumentException)
+        {
+            return AppendStatus(_registryLoadError, RegistryObservationWarning);
+        }
         finally
         {
             _registryLock.Release();
@@ -420,11 +439,6 @@ public sealed class HybridQuotaEstimateService
         DateTimeOffset observedAt,
         ICollection<string> statuses)
     {
-        var attributedCredits = 0m;
-        var pricedCount = 0;
-        var unknownModelCount = 0;
-        var unknownTierCount = 0;
-        var invalidUsageCount = 0;
         if (!context.Ledger.Accounts.TryGetValue(
                 account.AccountKey,
                 out var existingLedger) ||
@@ -433,35 +447,26 @@ public sealed class HybridQuotaEstimateService
             statuses.Add("账号历史归属不明确，将从本次刷新开始记录");
         }
 
-        foreach (var aggregate in GetAggregates(context.LocalUsage))
+        if (string.Equals(account.Plan, "enterprise", StringComparison.OrdinalIgnoreCase))
         {
-            if (aggregate.Timestamp < segment.SegmentStart ||
-                aggregate.Timestamp > observedAt ||
-                !IsUnambiguouslyAttributed(
-                    context.Ledger,
-                    account.AccountKey,
-                    aggregate.Timestamp))
-            {
-                continue;
-            }
-
-            switch (aggregate.FailureReason)
-            {
-                case CreditPricingFailureReason.None:
-                    attributedCredits += aggregate.Credits;
-                    pricedCount++;
-                    break;
-                case CreditPricingFailureReason.UnknownModel:
-                    unknownModelCount++;
-                    break;
-                case CreditPricingFailureReason.UnknownServiceTier:
-                    unknownTierCount++;
-                    break;
-                default:
-                    invalidUsageCount++;
-                    break;
-            }
+            statuses.Add(
+                "Enterprise 账号无法从本地元数据识别旧版 token 费率资格，本机估算可能不适用");
         }
+
+        context.LocalUsageIndex ??= BuildLocalUsageIndex(
+            context.LocalUsage,
+            context.Ledger);
+        var usage = QueryLocalUsage(
+            context.LocalUsageIndex,
+            account.AccountKey,
+            segment.SegmentStart,
+            observedAt);
+        var attributedCredits = usage.LowerCredits;
+        var attributedCreditsUpper = usage.UpperCredits;
+        var pricedCount = usage.PossiblePricedEventCount;
+        var unknownModelCount = usage.PossibleUnknownModelEventCount;
+        var unknownTierCount = usage.PossibleUnknownServiceTierEventCount;
+        var invalidUsageCount = usage.PossibleInvalidUsageEventCount;
 
         var activation = FindUnambiguousActivation(
             context.Ledger,
@@ -479,17 +484,17 @@ public sealed class HybridQuotaEstimateService
             ? QuotaObservationKind.FullSegment
             : QuotaObservationKind.Delta;
         if (context.LocalUsage.IsComplete &&
-            attributedCredits > 0 &&
+            attributedCreditsUpper > 0 &&
             hasFullCoverage)
         {
             estimate = QuotaEstimateMath.TryCreateFullIntervalPrecise(
                 attributedCredits,
-                attributedCredits,
+                attributedCreditsUpper,
                 display.UsedPercent,
                 PercentResolution);
         }
         else if (context.LocalUsage.IsComplete &&
-            attributedCredits > 0 &&
+            attributedCreditsUpper > 0 &&
             activation is not null)
         {
             var earlier = context.Ledger.Accounts
@@ -509,8 +514,16 @@ public sealed class HybridQuotaEstimateService
                 .FirstOrDefault();
             if (earlier is not null)
             {
+                var earlierUpper = GetAttributedCreditsUpper(earlier);
+                var lowerDelta = Math.Max(
+                    0m,
+                    attributedCredits - earlierUpper);
+                var upperDelta = Math.Max(
+                    0m,
+                    attributedCreditsUpper - earlier.AttributedCredits);
                 estimate = QuotaEstimateMath.TryCreateDeltaIntervalPrecise(
-                    attributedCredits - earlier.AttributedCredits,
+                    lowerDelta,
+                    upperDelta,
                     earlier.UsedPercent,
                     earlier.PercentResolution,
                     display.UsedPercent,
@@ -534,6 +547,11 @@ public sealed class HybridQuotaEstimateService
             statuses.Add(partialDetails.Count == 0
                 ? "本机用量扫描不完整"
                 : $"本机用量扫描不完整（{string.Join("，", partialDetails)}）");
+        }
+
+        if (usage.HasBoundaryUncertainty)
+        {
+            statuses.Add("用量桶跨越账号或额度边界，Credits 归属按区间保守处理");
         }
 
         if (unknownTierCount > 0)
@@ -563,6 +581,7 @@ public sealed class HybridQuotaEstimateService
             observedAt,
             display.UsedPercent,
             attributedCredits,
+            attributedCreditsUpper,
             hasFullCoverage,
             estimate,
             QuotaEstimateSource.Local,
@@ -571,7 +590,8 @@ public sealed class HybridQuotaEstimateService
             context.LocalUsage.InvalidLineCount,
             context.LocalUsage.SkippedFileCount,
             CodexCreditRateCard.Version,
-            activation?.StartedAt);
+            activation?.StartedAt,
+            usage.HasBoundaryUncertainty);
     }
 
     private static QuotaUsageObservation CreateObservation(
@@ -579,6 +599,7 @@ public sealed class HybridQuotaEstimateService
         DateTimeOffset observedAt,
         double usedPercent,
         decimal attributedCredits,
+        decimal attributedCreditsUpper,
         bool hasFullSegmentCoverage,
         PeriodQuotaEstimate? estimate,
         QuotaEstimateSource source,
@@ -587,7 +608,8 @@ public sealed class HybridQuotaEstimateService
         int malformedLineCount = 0,
         int skippedFileCount = 0,
         string? rateCardVersion = null,
-        DateTimeOffset? activationStartedAt = null) =>
+        DateTimeOffset? activationStartedAt = null,
+        bool hasAttributionBoundaryUncertainty = false) =>
         new(
             segment,
             observedAt,
@@ -600,6 +622,9 @@ public sealed class HybridQuotaEstimateService
             source,
             kind)
         {
+            AttributedCreditsUpper = attributedCreditsUpper,
+            HasAttributionBoundaryUncertainty =
+                hasAttributionBoundaryUncertainty,
             IsLocalScanComplete = isLocalScanComplete,
             MalformedLineCount = malformedLineCount,
             SkippedFileCount = skippedFileCount,
@@ -630,41 +655,252 @@ public sealed class HybridQuotaEstimateService
         context.HasChanges = true;
     }
 
-    private static bool IsUnambiguouslyAttributed(
-        QuotaEstimateLedgerState ledger,
-        string accountKey,
-        DateTimeOffset timestamp)
+    private IReadOnlyDictionary<string, LocalUsageAccountIndex> BuildLocalUsageIndex(
+        LocalUsageCollectionResult localUsage,
+        QuotaEstimateLedgerState ledger)
     {
-        var matches = ledger.Accounts
+        var activations = ledger.Accounts
             .SelectMany(pair => pair.Value.Activations.Select(
-                activation => (pair.Key, Activation: activation)))
-            .Where(item =>
-                item.Activation.StartedAt <= timestamp &&
-                (item.Activation.EndedAt is null ||
-                 timestamp < item.Activation.EndedAt.Value))
-            .Take(2)
+                activation => (AccountKey: pair.Key, Activation: activation)))
+            .OrderBy(item => item.Activation.StartedAt)
             .ToArray();
-        return matches.Length == 1 &&
-            string.Equals(matches[0].Key, accountKey, StringComparison.Ordinal);
-    }
-
-    private IEnumerable<LocalUsageAggregate> GetAggregates(
-        LocalUsageCollectionResult localUsage)
-    {
-        if (localUsage.Aggregates.Count > 0 || localUsage.Events.Count == 0)
+        var exact = new Dictionary<string, List<LocalUsageBucket>>(
+            StringComparer.Ordinal);
+        var boundary = new Dictionary<string, List<LocalUsageBucket>>(
+            StringComparer.Ordinal);
+        foreach (var bucket in GetBuckets(localUsage))
         {
-            return localUsage.Aggregates;
+            var covering = activations
+                .Where(item =>
+                    item.Activation.StartedAt <= bucket.FirstEventAtUtc &&
+                    (item.Activation.EndedAt is null ||
+                     bucket.LastEventAtUtc < item.Activation.EndedAt.Value))
+                .Take(2)
+                .ToArray();
+            if (covering.Length == 1)
+            {
+                GetOrAdd(exact, covering[0].AccountKey).Add(bucket);
+                continue;
+            }
+
+            foreach (var accountKey in activations
+                .Where(item =>
+                    item.Activation.StartedAt <= bucket.LastEventAtUtc &&
+                    (item.Activation.EndedAt is null ||
+                     item.Activation.EndedAt.Value > bucket.FirstEventAtUtc))
+                .Select(item => item.AccountKey)
+                .Distinct(StringComparer.Ordinal))
+            {
+                GetOrAdd(boundary, accountKey).Add(bucket);
+            }
         }
 
-        return localUsage.Events.Select(usage =>
+        return exact.Keys
+            .Concat(boundary.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(
+                accountKey => accountKey,
+                accountKey => new LocalUsageAccountIndex(
+                    exact.GetValueOrDefault(accountKey) ?? [],
+                    boundary.GetValueOrDefault(accountKey) ?? []),
+                StringComparer.Ordinal);
+    }
+
+    private IEnumerable<LocalUsageBucket> GetBuckets(
+        LocalUsageCollectionResult localUsage)
+    {
+        if (localUsage.Buckets.Count > 0)
+        {
+            return localUsage.Buckets;
+        }
+
+        if (localUsage.Aggregates.Count > 0)
+        {
+            return CompactBuckets(localUsage.Aggregates.Select(aggregate =>
+                CreateBucket(
+                    aggregate.Timestamp,
+                    aggregate.Credits,
+                    aggregate.FailureReason)));
+        }
+
+        return CompactBuckets(localUsage.Events.Select(usage =>
         {
             var calculation = _rateCard.CalculateCredits(usage);
-            return new LocalUsageAggregate(
+            return CreateBucket(
                 usage.Timestamp,
                 calculation.Credits,
                 calculation.FailureReason);
-        });
+        }));
     }
+
+    private static LocalUsageCreditRange QueryLocalUsage(
+        IReadOnlyDictionary<string, LocalUsageAccountIndex> index,
+        string accountKey,
+        DateTimeOffset rangeStart,
+        DateTimeOffset rangeEnd)
+    {
+        if (!index.TryGetValue(accountKey, out var account))
+        {
+            return LocalUsageCreditRange.Empty;
+        }
+
+        var lowerCredits = 0m;
+        var upperCredits = 0m;
+        var pricedCount = 0;
+        var unknownModelCount = 0;
+        var unknownTierCount = 0;
+        var invalidUsageCount = 0;
+        var hasBoundaryUncertainty = false;
+        foreach (var bucket in account.ExactBuckets)
+        {
+            if (!Overlaps(bucket, rangeStart, rangeEnd))
+            {
+                continue;
+            }
+
+            AddPossibleCounts(
+                bucket,
+                ref pricedCount,
+                ref unknownModelCount,
+                ref unknownTierCount,
+                ref invalidUsageCount);
+            upperCredits += bucket.PricedCredits;
+            if (bucket.FirstEventAtUtc >= rangeStart &&
+                bucket.LastEventAtUtc <= rangeEnd)
+            {
+                lowerCredits += bucket.PricedCredits;
+            }
+            else
+            {
+                hasBoundaryUncertainty = true;
+            }
+        }
+
+        foreach (var bucket in account.BoundaryBuckets)
+        {
+            if (!Overlaps(bucket, rangeStart, rangeEnd))
+            {
+                continue;
+            }
+
+            AddPossibleCounts(
+                bucket,
+                ref pricedCount,
+                ref unknownModelCount,
+                ref unknownTierCount,
+                ref invalidUsageCount);
+            upperCredits += bucket.PricedCredits;
+            hasBoundaryUncertainty = true;
+        }
+
+        return new LocalUsageCreditRange(
+            lowerCredits,
+            upperCredits,
+            pricedCount,
+            unknownModelCount,
+            unknownTierCount,
+            invalidUsageCount,
+            hasBoundaryUncertainty);
+    }
+
+    private static bool Overlaps(
+        LocalUsageBucket bucket,
+        DateTimeOffset rangeStart,
+        DateTimeOffset rangeEnd) =>
+        bucket.LastEventAtUtc >= rangeStart &&
+        bucket.FirstEventAtUtc <= rangeEnd;
+
+    private static void AddPossibleCounts(
+        LocalUsageBucket bucket,
+        ref int pricedCount,
+        ref int unknownModelCount,
+        ref int unknownTierCount,
+        ref int invalidUsageCount)
+    {
+        pricedCount += bucket.PricedEventCount;
+        unknownModelCount += bucket.UnknownModelEventCount;
+        unknownTierCount += bucket.UnknownServiceTierEventCount;
+        invalidUsageCount += bucket.InvalidUsageEventCount;
+    }
+
+    private static List<LocalUsageBucket> GetOrAdd(
+        IDictionary<string, List<LocalUsageBucket>> buckets,
+        string accountKey)
+    {
+        if (!buckets.TryGetValue(accountKey, out var value))
+        {
+            value = [];
+            buckets[accountKey] = value;
+        }
+
+        return value;
+    }
+
+    private static LocalUsageBucket CreateBucket(
+        DateTimeOffset timestamp,
+        decimal credits,
+        CreditPricingFailureReason failureReason)
+    {
+        var utc = timestamp.ToUniversalTime();
+        return new LocalUsageBucket(
+            new DateTimeOffset(
+                utc.Year,
+                utc.Month,
+                utc.Day,
+                utc.Hour,
+                minute: 0,
+                second: 0,
+                TimeSpan.Zero),
+            utc,
+            utc,
+            failureReason == CreditPricingFailureReason.None ? credits : 0m,
+            failureReason == CreditPricingFailureReason.None ? 1 : 0,
+            failureReason == CreditPricingFailureReason.UnknownModel ? 1 : 0,
+            failureReason == CreditPricingFailureReason.UnknownServiceTier ? 1 : 0,
+            failureReason == CreditPricingFailureReason.InvalidUsage ? 1 : 0);
+    }
+
+    private static IReadOnlyList<LocalUsageBucket> CompactBuckets(
+        IEnumerable<LocalUsageBucket> source)
+    {
+        var buckets = new Dictionary<DateTimeOffset, LocalUsageBucket>();
+        foreach (var bucket in source)
+        {
+            if (!buckets.TryGetValue(bucket.BucketStartUtc, out var existing))
+            {
+                buckets[bucket.BucketStartUtc] = bucket;
+                continue;
+            }
+
+            buckets[bucket.BucketStartUtc] = existing with
+            {
+                FirstEventAtUtc = existing.FirstEventAtUtc <= bucket.FirstEventAtUtc
+                    ? existing.FirstEventAtUtc
+                    : bucket.FirstEventAtUtc,
+                LastEventAtUtc = existing.LastEventAtUtc >= bucket.LastEventAtUtc
+                    ? existing.LastEventAtUtc
+                    : bucket.LastEventAtUtc,
+                PricedCredits = existing.PricedCredits + bucket.PricedCredits,
+                PricedEventCount =
+                    existing.PricedEventCount + bucket.PricedEventCount,
+                UnknownModelEventCount =
+                    existing.UnknownModelEventCount + bucket.UnknownModelEventCount,
+                UnknownServiceTierEventCount =
+                    existing.UnknownServiceTierEventCount +
+                    bucket.UnknownServiceTierEventCount,
+                InvalidUsageEventCount =
+                    existing.InvalidUsageEventCount + bucket.InvalidUsageEventCount,
+            };
+        }
+
+        return buckets.Values
+            .OrderBy(bucket => bucket.BucketStartUtc)
+            .ToArray();
+    }
+
+    private static decimal GetAttributedCreditsUpper(
+        QuotaUsageObservation observation) =>
+        observation.AttributedCreditsUpper ?? observation.AttributedCredits;
 
     private static AccountActivationInterval? FindUnambiguousActivation(
         QuotaEstimateLedgerState ledger,
@@ -790,6 +1026,19 @@ public sealed class HybridQuotaEstimateService
             UnauthorizedAccessException or
             InvalidOperationException or
             OperationCanceledException;
+
+    private sealed record LocalUsageCreditRange(
+        decimal LowerCredits,
+        decimal UpperCredits,
+        int PossiblePricedEventCount,
+        int PossibleUnknownModelEventCount,
+        int PossibleUnknownServiceTierEventCount,
+        int PossibleInvalidUsageEventCount,
+        bool HasBoundaryUncertainty)
+    {
+        public static LocalUsageCreditRange Empty { get; } =
+            new(0m, 0m, 0, 0, 0, 0, false);
+    }
 
     private sealed record PendingRegistryObservation(
         AccountRegistry Registry,

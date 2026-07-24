@@ -69,11 +69,57 @@ public sealed class QuotaEstimateLedgerServiceTests
         Assert.Equal("gpt-5.4", checkpoint.Model);
         Assert.Equal("priority", checkpoint.ServiceTier);
         Assert.Equal(CodexCreditRateCard.Version, checkpoint.RateCardVersion);
-        Assert.Single(checkpoint.Aggregates);
+        Assert.Empty(checkpoint.Aggregates);
+        Assert.Single(checkpoint.Buckets);
         Assert.Empty(Directory.GetFiles(directory.Path, "*.tmp"));
 
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
-        Assert.Equal(2, document.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(3, document.RootElement.GetProperty("schemaVersion").GetInt32());
+    }
+
+    [Fact]
+    public async Task Schema_two_per_event_aggregates_are_compacted_on_load()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "quota-estimate-ledger.json");
+        var legacyCheckpoint = CreateCheckpoint() with
+        {
+            Buckets = [],
+            Aggregates =
+            [
+                new LocalUsageAggregate(
+                    DateTimeOffset.Parse("2026-07-24T04:10:00Z"),
+                    1.25m,
+                    CreditPricingFailureReason.None),
+                new LocalUsageAggregate(
+                    DateTimeOffset.Parse("2026-07-24T04:50:00Z"),
+                    2.75m,
+                    CreditPricingFailureReason.None),
+            ],
+        };
+        await File.WriteAllTextAsync(
+            path,
+            JsonSerializer.Serialize(
+                new
+                {
+                    SchemaVersion = 2,
+                    Accounts = new Dictionary<string, AccountQuotaEstimateLedger>(),
+                    FileCheckpoints =
+                        new Dictionary<string, LocalUsageFileCheckpoint>
+                        {
+                            [legacyCheckpoint.RelativePath] = legacyCheckpoint,
+                        },
+                },
+                new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+
+        var result = await new QuotaEstimateLedgerService(path).LoadAsync(default);
+
+        Assert.Null(result.Error);
+        var checkpoint = Assert.Single(result.State.FileCheckpoints).Value;
+        Assert.Empty(checkpoint.Aggregates);
+        var bucket = Assert.Single(checkpoint.Buckets);
+        Assert.Equal(4m, bucket.PricedCredits);
+        Assert.Equal(2, bucket.PricedEventCount);
     }
 
     [Fact]
@@ -231,6 +277,8 @@ public sealed class QuotaEstimateLedgerServiceTests
             valid with { PercentResolution = 0 },
             valid with { PercentResolution = double.PositiveInfinity },
             valid with { AttributedCredits = -1 },
+            valid with { AttributedCreditsUpper = -1 },
+            valid with { AttributedCredits = 2, AttributedCreditsUpper = 1 },
             valid with { LowerUsd = -1 },
             valid with { LowerUsd = 1, UpperUsd = null },
             valid with { LowerUsd = 2, UpperUsd = 1 },
@@ -555,15 +603,23 @@ public sealed class QuotaEstimateLedgerServiceTests
         CompletedTailSha256: new string('b', 64),
         Model: "gpt-5.4",
         ServiceTier: "priority",
-        Aggregates:
-        [
-            new LocalUsageAggregate(
-                DateTimeOffset.Parse("2026-07-24T04:30:00Z"),
-                Credits: 1.25m,
-                CreditPricingFailureReason.None),
-        ],
+        Aggregates: [],
         InvalidLineCount: 0,
-        RateCardVersion: CodexCreditRateCard.Version);
+        RateCardVersion: CodexCreditRateCard.Version)
+    {
+        Buckets =
+        [
+            new LocalUsageBucket(
+                DateTimeOffset.Parse("2026-07-24T04:00:00Z"),
+                DateTimeOffset.Parse("2026-07-24T04:30:00Z"),
+                DateTimeOffset.Parse("2026-07-24T04:30:00Z"),
+                PricedCredits: 1.25m,
+                PricedEventCount: 1,
+                UnknownModelEventCount: 0,
+                UnknownServiceTierEventCount: 0,
+                InvalidUsageEventCount: 0),
+        ],
+    };
 
     private static QuotaUsageObservation CreateObservation() => new(
         new QuotaSegment(QuotaPeriod.Weekly, SegmentStart, Reset),

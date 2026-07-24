@@ -577,7 +577,7 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
-    public async Task Zero_server_usage_skips_analytics_and_local_observation()
+    public async Task Zero_weekly_usage_records_baseline_without_analytics_or_local_credits()
     {
         using var home = new TemporaryDirectory();
         var account = Accounts.Record("user-1::acct-1", "first@example.com");
@@ -585,13 +585,13 @@ public sealed class QuotaServiceTests
         var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
         var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
         var resetAt = segmentStart.AddDays(7);
-        var saveCount = 0;
+        QuotaEstimateLedgerState? saved = null;
         var hybrid = CreateHybrid(
             [LocalUsage(segmentStart.AddHours(1))],
             StateWithActivation(
                 account,
                 new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
-            onSave: _ => saveCount++);
+            onSave: state => saved = state);
         using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
             UsageResponse(resetAt, serverNow, TimeSpan.FromDays(7), usedPercent: 0)));
         using var client = new HttpClient(handler);
@@ -602,9 +602,103 @@ public sealed class QuotaServiceTests
 
         Assert.Null(update.Error);
         Assert.Equal(100, update.Display!.RemainingPercent);
-        Assert.Equal(QuotaEstimateSource.None, update.Display.EstimateSource);
         Assert.Single(handler.Requests);
-        Assert.Equal(0, saveCount);
+        var observation = Assert.Single(saved!.Accounts[account.AccountKey].Observations);
+        Assert.Equal(0, observation.UsedPercent);
+        Assert.Equal(0m, observation.AttributedCredits);
+        Assert.Null(observation.LowerUsd);
+        Assert.Null(observation.UpperUsd);
+    }
+
+    [Fact]
+    public async Task Zero_monthly_usage_resolves_redeemed_segment_then_records_baseline()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var serverNow = DateTimeOffset.Parse("2026-07-30T00:00:00Z");
+        var resetAt = DateTimeOffset.Parse("2026-08-22T00:00:00Z");
+        var redeemedAt = DateTimeOffset.Parse("2026-07-26T12:30:00Z");
+        QuotaEstimateLedgerState? saved = null;
+        var hybrid = CreateHybrid(
+            [LocalUsage(redeemedAt.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(redeemedAt.AddMinutes(-1), null)),
+            onSave: state => saved = state);
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath switch
+            {
+                "/backend-api/wham/usage" =>
+                    UsageResponse(resetAt, serverNow, TimeSpan.FromDays(30), usedPercent: 0),
+                "/backend-api/wham/rate-limit-reset-credits" =>
+                    JsonResponse("""
+                        {"credits":[
+                          {"status":"redeemed","redeemed_at":"2026-07-26T12:30:00Z"}
+                        ]}
+                        """),
+                _ => throw new InvalidOperationException(
+                    "Zero usage must not request Analytics."),
+            }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(100, update.Display!.RemainingPercent);
+        var requests = handler.Requests.ToArray();
+        Assert.Equal(2, requests.Length);
+        Assert.Equal(
+            "/backend-api/wham/rate-limit-reset-credits",
+            requests[1].RequestUri!.AbsolutePath);
+        var observation = Assert.Single(saved!.Accounts[account.AccountKey].Observations);
+        Assert.Equal(redeemedAt, observation.Segment.SegmentStart);
+        Assert.Equal(0, observation.UsedPercent);
+        Assert.Equal(0m, observation.AttributedCredits);
+    }
+
+    [Fact]
+    public async Task Missing_server_now_with_hybrid_skips_analytics_and_estimate()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-07-27T12:00:00Z");
+        var segmentStart = resetAt.AddDays(-7);
+        var hybrid = CreateHybrid(
+            [LocalUsage(segmentStart.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(segmentStart.AddMinutes(-1), null)));
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? JsonResponse(
+                    """
+                    {"rate_limit":{"secondary_window":{
+                      "used_percent":25,
+                      "limit_window_seconds":604800,
+                      "reset_at":RESET_AT
+                    }}}
+                    """.Replace(
+                        "RESET_AT",
+                        resetAt.ToUnixTimeSeconds().ToString(
+                            System.Globalization.CultureInfo.InvariantCulture),
+                        StringComparison.Ordinal))
+                : throw new InvalidOperationException(
+                    "Missing ServerNow must not request Analytics.")));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Null(update.Display!.ServerNow);
+        Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Contains("缺少服务器时间", update.Display.EstimateStatus, StringComparison.Ordinal);
+        Assert.Single(handler.Requests);
     }
 
     [Fact]
@@ -763,6 +857,74 @@ public sealed class QuotaServiceTests
         Assert.Empty(handler.Requests);
     }
 
+    [Fact]
+    public async Task Refresh_all_cancellation_saves_completed_observations_once()
+    {
+        using var home = new TemporaryDirectory();
+        var accounts = new[]
+        {
+            Accounts.Record(
+                "user-1::acct-1",
+                "first@example.com",
+                accountId: "acct-1"),
+            Accounts.Record(
+                "user-2::acct-2",
+                "second@example.com",
+                accountId: "acct-2"),
+        };
+        foreach (var account in accounts)
+        {
+            WriteSnapshot(
+                home,
+                account,
+                $"access-{account.ChatGptAccountId}",
+                account.ChatGptAccountId);
+        }
+
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var initial = StateWithActivation(
+            accounts[0],
+            new AccountActivationInterval(segmentStart.AddMinutes(-1), null));
+        var saveCount = 0;
+        QuotaEstimateLedgerState? attemptedSave = null;
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult([], 0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(initial, null)),
+            (state, _) =>
+            {
+                saveCount++;
+                attemptedSave = state;
+                return Task.FromException(new IOException("ledger-save-failure"));
+            },
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+        using var cancellation = new CancellationTokenSource();
+        var progress = new CancelAfterFirstProgress<QuotaUpdate>(cancellation);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new QuotaService(
+                client,
+                hybridEstimator: hybrid).RefreshAllAsync(
+                    accounts,
+                    home.Path,
+                    progress,
+                    cancellation.Token));
+
+        Assert.Single(progress.Values);
+        Assert.Equal(1, saveCount);
+        Assert.Single(attemptedSave!.Accounts[accounts[0].AccountKey].Observations);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
     private static HybridQuotaEstimateService CreateHybrid(
         IReadOnlyList<LocalUsageEvent> events,
         QuotaEstimateLedgerState state,
@@ -840,4 +1002,16 @@ public sealed class QuotaServiceTests
     {
         Content = new StringContent(json),
     };
+
+    private sealed class CancelAfterFirstProgress<T>(
+        CancellationTokenSource cancellation) : IProgress<T>
+    {
+        public List<T> Values { get; } = [];
+
+        public void Report(T value)
+        {
+            Values.Add(value);
+            cancellation.Cancel();
+        }
+    }
 }

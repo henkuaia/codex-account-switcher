@@ -121,6 +121,31 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Missing_server_now_declines_observation_without_using_local_clock()
+    {
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)),
+            utcNow: () => ServerNow.AddDays(1));
+        var context = await service.BeginRefreshAsync(default);
+        var display = Display() with { ServerNow = null };
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            display,
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(QuotaEstimateSource.None, result.EstimateSource);
+        Assert.Contains("缺少服务器时间", result.EstimateStatus, StringComparison.Ordinal);
+        Assert.Empty(context.Ledger.Accounts[Account.AccountKey].Observations);
+    }
+
+    [Fact]
     public async Task Full_segment_activation_produces_initial_local_estimate()
     {
         var service = CreateService(
@@ -509,6 +534,69 @@ public sealed class HybridQuotaEstimateServiceTests
         Assert.Equal(1, loadCount);
         Assert.Single(saves);
         Assert.Single(saves[^1].Accounts[Account.AccountKey].Observations);
+    }
+
+    [Fact]
+    public async Task Completion_merges_observations_with_registry_switch_and_deduplicates()
+    {
+        var secondAccount = Accounts.Record(
+            "account-b",
+            "second@example.com",
+            accountId: "acct-2");
+        var switchAt = ServerNow.AddMinutes(30);
+        var observationAt = ServerNow.AddHours(1);
+        var initial = StateWithAccount(
+            new AccountActivationInterval(SegmentStart.AddMinutes(-1), null));
+        var saves = new List<QuotaEstimateLedgerState>();
+        var service = CreateService(
+            loadAsync: _ => Task.FromResult(
+                new QuotaEstimateLedgerLoadResult(initial, null)),
+            saveAsync: (state, _) =>
+            {
+                saves.Add(state);
+                return Task.CompletedTask;
+            },
+            utcNow: () => switchAt.AddMinutes(1));
+        var context = await service.BeginRefreshAsync(default);
+        var registry = new AccountRegistry(
+            3,
+            secondAccount.AccountKey,
+            [Account, secondAccount])
+        {
+            ActiveAccountActivatedAt = switchAt,
+        };
+        Assert.Null(await service.ObserveRegistryAsync(registry, default));
+        var display = Display(serverNow: observationAt);
+        var analytics = new AnalyticsUsageParseResult(
+            AnalyticsUsageState.Valid,
+            50m,
+            50m);
+        service.ApplyObservation(
+            context,
+            Account,
+            display,
+            Segment,
+            analytics,
+            AnalyticsAvailability.Available);
+        service.ApplyObservation(
+            context,
+            Account,
+            display,
+            Segment,
+            analytics,
+            AnalyticsAvailability.Available);
+
+        await service.CompleteRefreshAsync(context, default);
+
+        Assert.Equal(2, saves.Count);
+        var final = saves[^1];
+        var firstActivation = Assert.Single(final.Accounts[Account.AccountKey].Activations);
+        Assert.Equal(switchAt, firstActivation.EndedAt);
+        var secondActivation = Assert.Single(
+            final.Accounts[secondAccount.AccountKey].Activations);
+        Assert.Equal(switchAt, secondActivation.StartedAt);
+        Assert.Null(secondActivation.EndedAt);
+        Assert.Single(final.Accounts[Account.AccountKey].Observations);
     }
 
     private static HybridQuotaEstimateService CreateService(

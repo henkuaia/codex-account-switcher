@@ -7,6 +7,7 @@ public enum AnalyticsAvailability
 {
     Available,
     Failed,
+    NotRequested,
 }
 
 public sealed record HybridQuotaRefreshContext(
@@ -101,9 +102,17 @@ public sealed class HybridQuotaEstimateService
         ArgumentNullException.ThrowIfNull(display);
         ArgumentNullException.ThrowIfNull(segment);
 
-        var observedAt = display.ServerNow is { } serverNow
-            ? RequireUtc(serverNow)
-            : RequireUtc(_utcNow());
+        if (display.ServerNow is not { } serverNow)
+        {
+            return display with
+            {
+                EstimateStatus = AppendStatus(
+                    display.EstimateStatus,
+                    "缺少服务器时间，已跳过额度估算"),
+            };
+        }
+
+        var observedAt = RequireUtc(serverNow);
         var statuses = new List<string>();
         var source = QuotaEstimateSource.Local;
         QuotaUsageObservation observation;
@@ -128,6 +137,25 @@ public sealed class HybridQuotaEstimateService
                 estimate,
                 source,
                 QuotaObservationKind.FullSegment);
+        }
+        else if (analyticsAvailability == AnalyticsAvailability.NotRequested)
+        {
+            var hasFullCoverage = HasFullSegmentCoverage(
+                context.Ledger,
+                account.AccountKey,
+                segment.SegmentStart,
+                observedAt);
+            observation = CreateObservation(
+                segment,
+                observedAt,
+                display.UsedPercent,
+                attributedCredits: 0m,
+                hasFullCoverage,
+                estimate: null,
+                source,
+                hasFullCoverage
+                    ? QuotaObservationKind.FullSegment
+                    : QuotaObservationKind.Delta);
         }
         else
         {
@@ -176,8 +204,13 @@ public sealed class HybridQuotaEstimateService
             await _registryLock.WaitAsync(cancellationToken);
             try
             {
-                await _saveAsync(context.Ledger, cancellationToken);
-                _registryLedger = context.Ledger;
+                var stateToSave = _registryLoadAttempted &&
+                    _registryLedger is not null
+                        ? MergeObservations(_registryLedger, context.Ledger)
+                        : context.Ledger;
+                await _saveAsync(stateToSave, cancellationToken);
+                context.Ledger = stateToSave;
+                _registryLedger = stateToSave;
                 _registryLoadError = null;
                 _registryLoadAttempted = true;
                 context.HasChanges = false;
@@ -390,6 +423,7 @@ public sealed class HybridQuotaEstimateService
         {
             Observations = ledger.Observations
                 .Append(observation)
+                .Distinct()
                 .OrderBy(item => item.ObservedAt)
                 .ToArray(),
         };
@@ -470,6 +504,46 @@ public sealed class HybridQuotaEstimateService
             statuses.Add("Analytics 数据无效，已改用本机用量估算");
         }
     }
+
+    private static QuotaEstimateLedgerState MergeObservations(
+        QuotaEstimateLedgerState latest,
+        QuotaEstimateLedgerState batch)
+    {
+        var accounts = latest.Accounts.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value,
+            StringComparer.Ordinal);
+        foreach (var (accountKey, batchLedger) in batch.Accounts)
+        {
+            if (!accounts.TryGetValue(accountKey, out var latestLedger))
+            {
+                accounts[accountKey] = batchLedger with
+                {
+                    Observations = batchLedger.Observations
+                        .Distinct()
+                        .OrderBy(item => item.ObservedAt)
+                        .ToArray(),
+                };
+                continue;
+            }
+
+            accounts[accountKey] = latestLedger with
+            {
+                Observations = latestLedger.Observations
+                    .Concat(batchLedger.Observations)
+                    .Distinct()
+                    .OrderBy(item => item.ObservedAt)
+                    .ToArray(),
+            };
+        }
+
+        return new QuotaEstimateLedgerState(accounts);
+    }
+
+    private static string AppendStatus(string? existing, string status) =>
+        string.IsNullOrWhiteSpace(existing)
+            ? status
+            : $"{existing}；{status}";
 
     private static DateTimeOffset RequireUtc(DateTimeOffset value)
     {

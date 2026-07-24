@@ -166,13 +166,23 @@ public sealed class QuotaService
         CancellationToken userCancellationToken)
     {
         if (display.Period != QuotaPeriod.Weekly ||
-            display.UsedPercent <= 0 ||
             display.ResetsAt is null)
         {
             return display;
         }
 
         var resetStart = display.ResetsAt.Value - display.WindowDuration;
+        if (display.UsedPercent <= 0)
+        {
+            return ApplyEstimate(
+                display,
+                account,
+                hybridContext,
+                resetStart,
+                analytics: null,
+                AnalyticsAvailability.NotRequested);
+        }
+
         return await TryApplyPeriodEstimateAsync(
             display,
             account,
@@ -192,10 +202,15 @@ public sealed class QuotaService
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
-        if (display.UsedPercent <= 0 ||
-            display.ResetsAt is null ||
+        if (display.ResetsAt is null ||
             display.ServerNow is null ||
             display.WindowDuration <= TimeSpan.Zero)
+        {
+            return display;
+        }
+
+        if (display.UsedPercent <= 0 &&
+            (_hybridEstimator is null || hybridContext is null))
         {
             return display;
         }
@@ -227,6 +242,17 @@ public sealed class QuotaService
             }
 
             var segmentStart = latestRedeemedAt ?? naturalStart;
+            if (display.UsedPercent <= 0)
+            {
+                return ApplyEstimate(
+                    display,
+                    account,
+                    hybridContext,
+                    segmentStart,
+                    analytics: null,
+                    AnalyticsAvailability.NotRequested);
+            }
+
             return await TryApplyPeriodEstimateAsync(
                 display,
                 account,
@@ -261,6 +287,19 @@ public sealed class QuotaService
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
+        if (display.ServerNow is null &&
+            _hybridEstimator is not null &&
+            hybridContext is not null)
+        {
+            return ApplyEstimate(
+                display,
+                account,
+                hybridContext,
+                segmentStart,
+                analytics: null,
+                AnalyticsAvailability.NotRequested);
+        }
+
         var serverNow = display.ServerNow ?? DateTimeOffset.UtcNow;
         var startDate = DateOnly.FromDateTime(segmentStart.UtcDateTime);
         var endDateExclusive = DateOnly.FromDateTime(serverNow.UtcDateTime).AddDays(1);
@@ -335,7 +374,9 @@ public sealed class QuotaService
         }
         finally
         {
-            await TryCompleteHybridRefreshAsync(hybridContext, cancellationToken);
+            await TryCompleteHybridRefreshAsync(
+                hybridContext,
+                CancellationToken.None);
         }
     }
 
@@ -349,7 +390,6 @@ public sealed class QuotaService
     {
         if (_hybridEstimator is not null &&
             hybridContext is not null &&
-            display.ServerNow is not null &&
             display.ResetsAt is { } resetsAt)
         {
             try

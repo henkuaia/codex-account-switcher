@@ -99,7 +99,8 @@ public sealed class MainWindowViewModel : ObservableObject
         IAccountDialogService dialogService,
         IUiDispatcher dispatcher,
         IOperationActivityTracker activityTracker,
-        AccountMetadataService accountMetadataService)
+        AccountMetadataService accountMetadataService,
+        QuotaCacheService quotaCacheService)
         : this(
             CreateLoadRegistryDelegate(codexHome, accountRegistryService),
             CreateRefreshQuotaDelegate(codexHome, quotaService),
@@ -112,7 +113,9 @@ public sealed class MainWindowViewModel : ObservableObject
             dispatcher,
             activityTracker,
             CreateLoadMetadataDelegate(accountMetadataService),
-            CreateSaveMetadataDelegate(accountMetadataService))
+            CreateSaveMetadataDelegate(accountMetadataService),
+            CreateLoadQuotaCacheDelegate(quotaCacheService),
+            CreateSaveQuotaCacheDelegate(quotaCacheService))
     {
     }
 
@@ -859,6 +862,22 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(accountMetadataService);
         return accountMetadataService.SaveAsync;
+    }
+
+    private static Func<CancellationToken, Task<QuotaCacheLoadResult>> CreateLoadQuotaCacheDelegate(
+        QuotaCacheService quotaCacheService)
+    {
+        ArgumentNullException.ThrowIfNull(quotaCacheService);
+        return quotaCacheService.LoadAsync;
+    }
+
+    private static Func<
+        IReadOnlyDictionary<string, QuotaCacheEntry>,
+        CancellationToken,
+        Task> CreateSaveQuotaCacheDelegate(QuotaCacheService quotaCacheService)
+    {
+        ArgumentNullException.ThrowIfNull(quotaCacheService);
+        return quotaCacheService.SaveAsync;
     }
 
     private static Func<

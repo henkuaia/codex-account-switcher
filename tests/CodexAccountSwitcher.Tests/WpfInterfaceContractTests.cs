@@ -72,6 +72,21 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Production_startup_wires_local_quota_cache_without_automatic_refresh()
+    {
+        var source = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "App.xaml.cs"));
+
+        Assert.Contains(
+            "var quotaCacheService = QuotaCacheService.CreateDefault();",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains("quotaCacheService);", source, StringComparison.Ordinal);
+        Assert.DoesNotContain("RefreshCommand.Execute", source, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Removal_dialog_is_compact_app_owned_single_selection_with_active_account_disabled()
     {
         var xaml = File.ReadAllText(Path.Combine(

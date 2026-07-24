@@ -55,6 +55,7 @@ public partial class App : System.Windows.Application
             _httpClient = new HttpClient();
             var quotaService = new QuotaService(_httpClient);
             var metadataService = AccountMetadataService.CreateDefault();
+            var quotaCacheService = QuotaCacheService.CreateDefault();
             var processController = new CodexProcessController();
             var loginCoordinator = new SafeLoginCoordinator(
                 package,
@@ -88,7 +89,8 @@ public partial class App : System.Windows.Application
                 dialogService,
                 uiDispatcher,
                 activityTracker,
-                metadataService);
+                metadataService,
+                quotaCacheService);
 
             _mainWindow = new MainWindow(viewModel);
             MainWindow = _mainWindow;

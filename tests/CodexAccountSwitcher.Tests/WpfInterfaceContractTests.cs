@@ -112,17 +112,36 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
-    public void Production_startup_wires_local_quota_cache_without_automatic_refresh()
+    public void Production_startup_wires_hybrid_estimator_and_local_cache_without_automatic_refresh()
     {
         var source = File.ReadAllText(Path.Combine(
             FindDirectory("src", "CodexAccountSwitcher"),
             "App.xaml.cs"));
 
         Assert.Contains(
+            "var ledgerService = QuotaEstimateLedgerService.CreateDefault();",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "var collector = new LocalCodexUsageCollector(Path.Combine(codexHome, \"sessions\"));",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "var hybridEstimator = new HybridQuotaEstimateService(",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "var quotaService = new QuotaService(_httpClient, hybridEstimator: hybridEstimator);",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
             "var quotaCacheService = QuotaCacheService.CreateDefault();",
             source,
             StringComparison.Ordinal);
-        Assert.Contains("quotaCacheService);", source, StringComparison.Ordinal);
+        Assert.Contains(
+            "hybridEstimator.ObserveRegistryAsync);",
+            source,
+            StringComparison.Ordinal);
         Assert.DoesNotContain("RefreshCommand.Execute", source, StringComparison.Ordinal);
     }
 

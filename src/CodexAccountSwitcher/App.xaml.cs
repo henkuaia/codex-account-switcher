@@ -53,7 +53,13 @@ public partial class App : System.Windows.Application
                 processRunner);
             var registryService = new AccountRegistryService();
             _httpClient = new HttpClient();
-            var quotaService = new QuotaService(_httpClient);
+            var ledgerService = QuotaEstimateLedgerService.CreateDefault();
+            var collector = new LocalCodexUsageCollector(Path.Combine(codexHome, "sessions"));
+            var hybridEstimator = new HybridQuotaEstimateService(
+                collector,
+                ledgerService,
+                new CodexCreditRateCard());
+            var quotaService = new QuotaService(_httpClient, hybridEstimator: hybridEstimator);
             var metadataService = AccountMetadataService.CreateDefault();
             var quotaCacheService = QuotaCacheService.CreateDefault();
             var processController = new CodexProcessController();
@@ -90,7 +96,8 @@ public partial class App : System.Windows.Application
                 uiDispatcher,
                 activityTracker,
                 metadataService,
-                quotaCacheService);
+                quotaCacheService,
+                hybridEstimator.ObserveRegistryAsync);
 
             _mainWindow = new MainWindow(viewModel);
             MainWindow = _mainWindow;

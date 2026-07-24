@@ -82,6 +82,152 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Initial_load_observes_current_registry_once_before_display()
+    {
+        var fixture = new RegistryObservationFixture();
+
+        await fixture.ViewModel.LoadAsync();
+
+        var observed = Assert.Single(fixture.ObservedRegistries);
+        Assert.Same(fixture.Registry, observed);
+        Assert.Equal(2, fixture.ViewModel.Accounts.Count);
+    }
+
+    [Fact]
+    public async Task Repeated_load_of_same_registry_keeps_one_open_activation_interval()
+    {
+        var fixture = new RegistryObservationFixture();
+        var ledger = QuotaEstimateLedgerState.Empty;
+        var observedAt = DateTimeOffset.Parse("2026-07-24T05:00:00Z");
+        fixture.ObserveOperation = (registry, _) =>
+        {
+            ledger = QuotaEstimateLedgerService.ObserveRegistry(ledger, registry, observedAt);
+            observedAt = observedAt.AddMinutes(30);
+            return Task.FromResult<string?>(null);
+        };
+
+        await fixture.ViewModel.LoadAsync();
+        await fixture.ViewModel.LoadAsync();
+
+        var activation = Assert.Single(ledger.Accounts[fixture.First.AccountKey].Activations);
+        Assert.Equal(fixture.Registry.ActiveAccountActivatedAt, activation.StartedAt);
+        Assert.Null(activation.EndedAt);
+    }
+
+    [Fact]
+    public async Task Successful_login_reload_observes_new_registry()
+    {
+        var fixture = new RegistryObservationFixture();
+        await fixture.ViewModel.LoadAsync();
+        var added = Accounts.Record("added-key", "added@example.com", "Added", "added-account");
+        var reloaded = new AccountRegistry(
+            3,
+            added.AccountKey,
+            [fixture.First, fixture.Second, added])
+        {
+            ActiveAccountActivatedAt = DateTimeOffset.Parse("2026-07-24T06:00:00Z"),
+        };
+        fixture.Registry = reloaded;
+        fixture.LoginResult = new LoginResult(true, "login completed", true);
+
+        await fixture.ViewModel.AddCommand.ExecuteAsync();
+
+        Assert.Equal([fixture.InitialRegistry, reloaded], fixture.ObservedRegistries);
+        Assert.True(Assert.Single(
+            fixture.ViewModel.Accounts,
+            row => row.Account.AccountKey == added.AccountKey).IsActive);
+    }
+
+    [Fact]
+    public async Task Successful_switch_observes_new_active_account_and_activation_timestamp()
+    {
+        var fixture = new RegistryObservationFixture();
+        await fixture.ViewModel.LoadAsync();
+        var activatedAt = DateTimeOffset.Parse("2026-07-24T06:15:00Z");
+        var switched = fixture.Registry with
+        {
+            ActiveAccountKey = fixture.Second.AccountKey,
+            ActiveAccountActivatedAt = activatedAt,
+        };
+        fixture.SwitchOperation = (_, _, _) =>
+        {
+            fixture.Registry = switched;
+            return Task.FromResult(new SwitchResult(true, "switch completed", true));
+        };
+
+        await fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
+
+        Assert.Equal([fixture.InitialRegistry, switched], fixture.ObservedRegistries);
+        Assert.Equal(fixture.Second.AccountKey, fixture.ObservedRegistries[^1].ActiveAccountKey);
+        Assert.Equal(activatedAt, fixture.ObservedRegistries[^1].ActiveAccountActivatedAt);
+    }
+
+    [Theory]
+    [InlineData("failed-login")]
+    [InlineData("canceled-login")]
+    [InlineData("failed-switch")]
+    [InlineData("canceled-switch")]
+    public async Task Failed_or_canceled_login_and_switch_do_not_observe_a_new_interval(
+        string operation)
+    {
+        var fixture = new RegistryObservationFixture();
+        await fixture.ViewModel.LoadAsync();
+        using var cancellation = new CancellationTokenSource();
+
+        switch (operation)
+        {
+            case "failed-login":
+                fixture.LoginResult = new LoginResult(false, "login failed", true);
+                fixture.Registry = fixture.Registry with
+                {
+                    ActiveAccountKey = fixture.Second.AccountKey,
+                    ActiveAccountActivatedAt = DateTimeOffset.Parse("2026-07-24T06:00:00Z"),
+                };
+                await fixture.ViewModel.AddCommand.ExecuteAsync();
+                break;
+            case "canceled-login":
+                fixture.LoginOperation = (_, token) =>
+                {
+                    cancellation.Cancel();
+                    return Task.FromCanceled<LoginResult>(token);
+                };
+                await fixture.ViewModel.AddCommand.ExecuteAsync(null, cancellation.Token);
+                break;
+            case "failed-switch":
+                fixture.SwitchOperation = (_, _, _) =>
+                    Task.FromResult(new SwitchResult(false, "switch failed", true));
+                await fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
+                break;
+            case "canceled-switch":
+                fixture.Dialog.ConfirmResult = false;
+                await fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
+                break;
+        }
+
+        Assert.Equal([fixture.InitialRegistry], fixture.ObservedRegistries);
+    }
+
+    [Fact]
+    public async Task Ledger_error_sets_status_without_disabling_operations_or_hiding_cached_quota()
+    {
+        var fixture = new RegistryObservationFixture
+        {
+            LedgerError = "本地额度估算记录暂时无法写入。",
+        };
+        fixture.QuotaCache[fixture.First.AccountKey] = CreateQuotaCacheEntry(
+            64,
+            "2026-07-24T12:00:00Z",
+            "2100-08-01T00:00:00Z");
+
+        await fixture.ViewModel.LoadAsync();
+
+        Assert.Equal(fixture.LedgerError, fixture.ViewModel.StatusText);
+        Assert.True(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.True(fixture.ViewModel.RefreshCommand.CanExecute(null));
+        Assert.Equal(64, fixture.Row(fixture.First).QuotaDisplay!.RemainingPercent);
+    }
+
+    [Fact]
     public async Task Invalid_registry_load_keeps_empty_state_and_helper_commands_available()
     {
         var fixture = new Fixture();
@@ -1271,11 +1417,23 @@ public sealed class MainWindowViewModelTests
                 UsedPercent = 25,
                 EstimatedPeriodQuotaLowerUsd = 8m,
                 EstimatedPeriodQuotaUpperUsd = 24m,
+                EstimateSource = QuotaEstimateSource.Local,
+                EstimateQuality = QuotaEstimateQuality.Initial,
+                EstimateStatus = "Analytics 无数据，已改用本机用量估算",
+                EstimateObservationCount = 1,
             },
             null));
 
         Assert.Equal("单次周额度 US$40", row.PeriodQuotaText);
-        Assert.Equal("估算单次周额度 US$8–24", row.EstimatedPeriodQuotaText);
+        Assert.Equal(
+            $"初步估算单次周额度：US$8–24（本机用量）{Environment.NewLine}" +
+            "Analytics 无数据，已改用本机用量估算",
+            row.EstimatedPeriodQuotaText);
+        Assert.Contains(
+            "Analytics 无数据，已改用本机用量估算",
+            row.QuotaToolTip,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain("暂不可用", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1327,11 +1485,16 @@ public sealed class MainWindowViewModelTests
                 UsedPercent = 50,
                 EstimatedPeriodQuotaLowerUsd = 160m,
                 EstimatedPeriodQuotaUpperUsd = 200m,
+                EstimateSource = QuotaEstimateSource.Analytics,
+                EstimateQuality = QuotaEstimateQuality.MultiPoint,
+                EstimateObservationCount = 2,
             },
             null));
 
         Assert.Equal("单次月额度 US$220", row.PeriodQuotaText);
-        Assert.Equal("估算单次月额度 US$160–200", row.EstimatedPeriodQuotaText);
+        Assert.Equal(
+            "多点估算单次月额度：US$160–200（服务器 Analytics）",
+            row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1356,10 +1519,15 @@ public sealed class MainWindowViewModelTests
                 UsedPercent = 50,
                 EstimatedPeriodQuotaLowerUsd = 180m,
                 EstimatedPeriodQuotaUpperUsd = 180m,
+                EstimateSource = QuotaEstimateSource.Analytics,
+                EstimateQuality = QuotaEstimateQuality.Initial,
+                EstimateObservationCount = 1,
             },
             null));
 
-        Assert.Equal("估算单次月额度 US$180", row.EstimatedPeriodQuotaText);
+        Assert.Equal(
+            "初步估算单次月额度：US$180（服务器 Analytics）",
+            row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1387,6 +1555,43 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal("估算单次月额度：产生用量后可计算", row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Theory]
+    [InlineData("Analytics 无数据，已改用本机用量估算")]
+    [InlineData("已建立估算基线，继续使用后再次刷新")]
+    [InlineData("当前片段没有可计价的本机用量")]
+    [InlineData("当前模型暂无官方费率")]
+    [InlineData("部分用量无法计价，区间可能偏低")]
+    [InlineData("账号历史归属不明确，将从本次刷新开始记录")]
+    public void Actionable_estimate_status_is_a_detail_line_and_tooltip_without_replacing_reset(
+        string estimateStatus)
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                88,
+                DateTimeOffset.Parse("2026-08-22T22:06:00Z"),
+                TimeSpan.FromDays(30),
+                "Monthly: 88% remaining")
+            {
+                UsedPercent = 12,
+                EstimateSource = QuotaEstimateSource.Local,
+                EstimateStatus = estimateStatus,
+            },
+            null));
+
+        Assert.Equal(estimateStatus, row.EstimatedPeriodQuotaText);
+        Assert.Equal("Resets 2026-08-22 22:06 UTC", row.QuotaStatusText);
+        Assert.Contains(estimateStatus, row.QuotaToolTip, StringComparison.Ordinal);
+        Assert.DoesNotContain("暂不可用", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1471,7 +1676,23 @@ public sealed class MainWindowViewModelTests
         var renamed = account with { Alias = "After" };
         var loadCount = 0;
         var refreshCalls = 0;
-        var cached = CreateQuotaCacheEntry(64, "2026-07-24T12:00:00Z", "2100-08-01T00:00:00Z");
+        var cached = CreateQuotaCacheEntry(
+            64,
+            "2026-07-24T12:00:00Z",
+            "2100-08-01T00:00:00Z") with
+        {
+            Display = CreateQuotaCacheEntry(
+                64,
+                "2026-07-24T12:00:00Z",
+                "2100-08-01T00:00:00Z").Display with
+            {
+                EstimatedPeriodQuotaLowerUsd = 160m,
+                EstimatedPeriodQuotaUpperUsd = 180m,
+                EstimateSource = QuotaEstimateSource.Local,
+                EstimateQuality = QuotaEstimateQuality.Initial,
+                EstimateObservationCount = 1,
+            },
+        };
         var viewModel = new MainWindowViewModel(
             _ =>
             {
@@ -1511,6 +1732,9 @@ public sealed class MainWindowViewModelTests
         var row = Assert.Single(viewModel.Accounts);
         Assert.Equal(0, refreshCalls);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
+        Assert.Equal(
+            "初步估算单次月额度：US$160–180（本机用量）",
+            row.EstimatedPeriodQuotaText);
         Assert.Contains("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
 
         await viewModel.LoadAsync();
@@ -1518,6 +1742,9 @@ public sealed class MainWindowViewModelTests
         row = Assert.Single(viewModel.Accounts);
         Assert.Equal("After", row.DisplayIdentity);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
+        Assert.Equal(
+            "初步估算单次月额度：US$160–180（本机用量）",
+            row.EstimatedPeriodQuotaText);
         Assert.Equal(0, refreshCalls);
     }
 
@@ -2001,6 +2228,111 @@ public sealed class MainWindowViewModelTests
 
             BeforeSwitchReturn?.Invoke();
             return Task.FromResult(SwitchResult);
+        }
+    }
+
+    private sealed class RegistryObservationFixture
+    {
+        public RegistryObservationFixture()
+        {
+            First = Accounts.Record("first-key", "first@example.com", "First", "first-account");
+            Second = Accounts.Record("second-key", "second@example.com", "Second", "second-account");
+            InitialRegistry = new AccountRegistry(3, First.AccountKey, [First, Second])
+            {
+                ActiveAccountActivatedAt = DateTimeOffset.Parse("2026-07-24T04:00:00Z"),
+            };
+            Registry = InitialRegistry;
+            Dialog = new FakeDialogService { ConfirmResult = true };
+            ViewModel = new MainWindowViewModel(
+                LoadRegistryAsync,
+                (_, _, _) => Task.CompletedTask,
+                LoginAsync,
+                (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
+                SwitchAsync,
+                _ => Task.FromResult(true),
+                () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
+                Dialog,
+                new ImmediateDispatcher(),
+                new ActiveOperationTracker(),
+                loadMetadataAsync: null,
+                saveMetadataAsync: null,
+                _ => Task.FromResult(new QuotaCacheLoadResult(
+                    new Dictionary<string, QuotaCacheEntry>(QuotaCache, StringComparer.Ordinal),
+                    null)),
+                saveQuotaCacheAsync: null,
+                observeRegistryAsync: ObserveRegistryAsync);
+        }
+
+        public AccountRecord First { get; }
+
+        public AccountRecord Second { get; }
+
+        public AccountRegistry InitialRegistry { get; }
+
+        public AccountRegistry Registry { get; set; }
+
+        public FakeDialogService Dialog { get; }
+
+        public MainWindowViewModel ViewModel { get; }
+
+        public List<AccountRegistry> ObservedRegistries { get; } = [];
+
+        public Dictionary<string, QuotaCacheEntry> QuotaCache { get; } =
+            new(StringComparer.Ordinal);
+
+        public LoginResult LoginResult { get; set; } = new(true, "login completed", true);
+
+        public Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>? LoginOperation
+        {
+            get;
+            set;
+        }
+
+        public Func<
+            AccountRecord,
+            AccountRegistry,
+            CancellationToken,
+            Task<SwitchResult>>? SwitchOperation { get; set; }
+
+        public Func<AccountRegistry, CancellationToken, Task<string?>>? ObserveOperation
+        {
+            get;
+            set;
+        }
+
+        public string? LedgerError { get; set; }
+
+        public AccountRowViewModel Row(AccountRecord account) =>
+            Assert.Single(
+                ViewModel.Accounts,
+                row => row.Account.AccountKey == account.AccountKey);
+
+        private Task<AccountRegistry> LoadRegistryAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(Registry);
+        }
+
+        private Task<LoginResult> LoginAsync(
+            ProcessOutputHandler outputHandler,
+            CancellationToken cancellationToken) =>
+            LoginOperation?.Invoke(outputHandler, cancellationToken) ??
+            Task.FromResult(LoginResult);
+
+        private Task<SwitchResult> SwitchAsync(
+            AccountRecord target,
+            AccountRegistry before,
+            CancellationToken cancellationToken) =>
+            SwitchOperation?.Invoke(target, before, cancellationToken) ??
+            Task.FromResult(new SwitchResult(true, "switch completed", true));
+
+        private Task<string?> ObserveRegistryAsync(
+            AccountRegistry registry,
+            CancellationToken cancellationToken)
+        {
+            ObservedRegistries.Add(registry);
+            return ObserveOperation?.Invoke(registry, cancellationToken) ??
+                Task.FromResult(LedgerError);
         }
     }
 

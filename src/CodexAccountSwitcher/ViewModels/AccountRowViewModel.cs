@@ -173,7 +173,8 @@ public sealed class AccountRowViewModel : ObservableObject
                 _ => "Quota",
             };
         QuotaStatusText = update.Error ?? FormatReset(update.Display?.ResetsAt);
-        QuotaToolTip = update.Error ?? update.Display?.Tooltip ?? string.Empty;
+        QuotaToolTip = update.Error ??
+            AppendTooltip(update.Display?.Tooltip, update.Display?.EstimateStatus);
         HasQuotaStatus = !string.IsNullOrEmpty(QuotaStatusText);
         UpdateMetadataDisplay();
     }
@@ -241,30 +242,75 @@ public sealed class AccountRowViewModel : ObservableObject
 
         HasEstimatedPeriodQuotaText =
             QuotaDisplay?.Period is QuotaPeriod.Weekly or QuotaPeriod.Monthly;
-        EstimatedPeriodQuotaText = QuotaDisplay switch
+        EstimatedPeriodQuotaText = FormatEstimatedPeriodQuota(QuotaDisplay);
+    }
+
+    private static string FormatEstimatedPeriodQuota(QuotaDisplay? display)
+    {
+        if (display?.Period is not (QuotaPeriod.Weekly or QuotaPeriod.Monthly))
         {
-            { Period: QuotaPeriod.Weekly, EstimatedPeriodQuotaLowerUsd: { } lower,
-                EstimatedPeriodQuotaUpperUsd: { } upper } when lower == upper =>
-                $"估算单次周额度 US${FormatUsd(lower)}",
-            { Period: QuotaPeriod.Weekly, EstimatedPeriodQuotaLowerUsd: { } lower,
-                EstimatedPeriodQuotaUpperUsd: { } upper } =>
-                $"估算单次周额度 US${FormatUsd(lower)}–{FormatUsd(upper)}",
-            { Period: QuotaPeriod.Weekly, UsedPercent: <= 0 } =>
-                "估算单次周额度：产生用量后可计算",
-            { Period: QuotaPeriod.Weekly } =>
-                "估算单次周额度：暂不可用",
-            { Period: QuotaPeriod.Monthly, EstimatedPeriodQuotaLowerUsd: { } lower,
-                EstimatedPeriodQuotaUpperUsd: { } upper } when lower == upper =>
-                $"估算单次月额度 US${FormatUsd(lower)}",
-            { Period: QuotaPeriod.Monthly, EstimatedPeriodQuotaLowerUsd: { } lower,
-                EstimatedPeriodQuotaUpperUsd: { } upper } =>
-                $"估算单次月额度 US${FormatUsd(lower)}–{FormatUsd(upper)}",
-            { Period: QuotaPeriod.Monthly, UsedPercent: <= 0 } =>
-                "估算单次月额度：产生用量后可计算",
-            { Period: QuotaPeriod.Monthly } =>
-                "估算单次月额度：暂不可用",
-            _ => string.Empty,
-        };
+            return string.Empty;
+        }
+
+        var period = display.Period == QuotaPeriod.Weekly ? "周" : "月";
+        string text;
+        if (display.EstimatedPeriodQuotaLowerUsd is { } lower &&
+            display.EstimatedPeriodQuotaUpperUsd is { } upper)
+        {
+            var quality = display.EstimateQuality switch
+            {
+                QuotaEstimateQuality.Initial => "初步",
+                QuotaEstimateQuality.MultiPoint => "多点",
+                _ => string.Empty,
+            };
+            var source = display.EstimateSource switch
+            {
+                QuotaEstimateSource.Analytics => "（服务器 Analytics）",
+                QuotaEstimateSource.Local => "（本机用量）",
+                _ => string.Empty,
+            };
+            var range = lower == upper
+                ? FormatUsd(lower)
+                : $"{FormatUsd(lower)}–{FormatUsd(upper)}";
+            text = $"{quality}估算单次{period}额度：US${range}{source}";
+        }
+        else if (display.UsedPercent <= 0)
+        {
+            text = $"估算单次{period}额度：产生用量后可计算";
+        }
+        else
+        {
+            text = string.IsNullOrWhiteSpace(display.EstimateStatus)
+                ? $"估算单次{period}额度：暂不可用"
+                : string.Empty;
+        }
+
+        return AppendDetailLine(text, display.EstimateStatus);
+    }
+
+    private static string AppendDetailLine(string text, string? detail)
+    {
+        if (string.IsNullOrWhiteSpace(detail))
+        {
+            return text;
+        }
+
+        return string.IsNullOrEmpty(text)
+            ? detail
+            : $"{text}{Environment.NewLine}{detail}";
+    }
+
+    private static string AppendTooltip(string? tooltip, string? estimateStatus)
+    {
+        var text = tooltip ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(estimateStatus))
+        {
+            return text;
+        }
+
+        return string.IsNullOrEmpty(text)
+            ? estimateStatus
+            : $"{text}; {estimateStatus}";
     }
 
     private static string FormatUsd(decimal value) =>

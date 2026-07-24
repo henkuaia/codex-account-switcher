@@ -73,6 +73,7 @@ public sealed class MainWindowViewModel : ObservableObject
         IReadOnlyDictionary<string, QuotaCacheEntry>,
         CancellationToken,
         Task> _saveQuotaCacheAsync;
+    private readonly Func<AccountRegistry, CancellationToken, Task<string?>> _observeRegistryAsync;
     private readonly Func<HelperAvailability> _checkHelperAvailability;
     private readonly IAccountDialogService _dialogService;
     private readonly IUiDispatcher _dispatcher;
@@ -100,7 +101,11 @@ public sealed class MainWindowViewModel : ObservableObject
         IUiDispatcher dispatcher,
         IOperationActivityTracker activityTracker,
         AccountMetadataService accountMetadataService,
-        QuotaCacheService quotaCacheService)
+        QuotaCacheService quotaCacheService,
+        Func<
+            AccountRegistry,
+            CancellationToken,
+            Task<string?>>? observeRegistryAsync = null)
         : this(
             CreateLoadRegistryDelegate(codexHome, accountRegistryService),
             CreateRefreshQuotaDelegate(codexHome, quotaService),
@@ -115,7 +120,8 @@ public sealed class MainWindowViewModel : ObservableObject
             CreateLoadMetadataDelegate(accountMetadataService),
             CreateSaveMetadataDelegate(accountMetadataService),
             CreateLoadQuotaCacheDelegate(quotaCacheService),
-            CreateSaveQuotaCacheDelegate(quotaCacheService))
+            CreateSaveQuotaCacheDelegate(quotaCacheService),
+            observeRegistryAsync)
     {
     }
 
@@ -235,7 +241,11 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<
             IReadOnlyDictionary<string, QuotaCacheEntry>,
             CancellationToken,
-            Task>? saveQuotaCacheAsync = null)
+            Task>? saveQuotaCacheAsync = null,
+        Func<
+            AccountRegistry,
+            CancellationToken,
+            Task<string?>>? observeRegistryAsync = null)
     {
         _loadRegistryAsync = loadRegistryAsync ?? throw new ArgumentNullException(nameof(loadRegistryAsync));
         _refreshQuotaAsync = refreshQuotaAsync ?? throw new ArgumentNullException(nameof(refreshQuotaAsync));
@@ -258,6 +268,8 @@ public sealed class MainWindowViewModel : ObservableObject
                 new Dictionary<string, QuotaCacheEntry>(StringComparer.Ordinal),
                 null)));
         _saveQuotaCacheAsync = saveQuotaCacheAsync ?? ((_, _) => Task.CompletedTask);
+        _observeRegistryAsync = observeRegistryAsync ??
+            ((_, _) => Task.FromResult<string?>(null));
 
         var availability = _checkHelperAvailability();
         _isHelperAvailable = availability.IsAvailable;
@@ -354,6 +366,7 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         var availability = _checkHelperAvailability();
         var registry = await LoadRegistryOrEmptyAsync(cancellationToken);
+        var observationError = await _observeRegistryAsync(registry, cancellationToken);
         var metadataResult = await _loadMetadataAsync(cancellationToken);
         var quotaCacheResult = await _loadQuotaCacheAsync(cancellationToken);
 
@@ -369,7 +382,7 @@ public sealed class MainWindowViewModel : ObservableObject
                 ApplyRegistry(registry);
                 ApplyHelperAvailability(availability);
                 if (availability.IsAvailable &&
-                    (metadataResult.Error ?? quotaCacheResult.Error) is { } loadError)
+                    (observationError ?? metadataResult.Error ?? quotaCacheResult.Error) is { } loadError)
                 {
                     StatusText = loadError;
                 }
@@ -462,13 +475,16 @@ public sealed class MainWindowViewModel : ObservableObject
             CancellationToken.None);
 
         var registry = await LoadRegistryOrEmptyAsync(CancellationToken.None);
+        var observationError = result.Succeeded
+            ? await _observeRegistryAsync(registry, CancellationToken.None)
+            : null;
         await _dispatcher.InvokeAsync(
             () =>
             {
                 ApplyRegistry(registry);
                 if (!helperUnavailable)
                 {
-                    StatusText = result.Message;
+                    StatusText = observationError ?? result.Message;
                     CanRetryLaunch = result.CanRetryLaunch;
                 }
             },
@@ -585,11 +601,14 @@ public sealed class MainWindowViewModel : ObservableObject
         if (result.Succeeded)
         {
             var registry = await LoadRegistryOrEmptyAsync(CancellationToken.None);
+            var observationError = await _observeRegistryAsync(
+                registry,
+                CancellationToken.None);
             await _dispatcher.InvokeAsync(
                 () =>
                 {
                     ApplyRegistry(registry);
-                    StatusText = result.Message;
+                    StatusText = observationError ?? result.Message;
                     CanRetryLaunch = result.CanRetryLaunch;
                 },
                 CancellationToken.None);

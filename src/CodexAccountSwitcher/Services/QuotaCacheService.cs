@@ -68,9 +68,14 @@ public sealed class QuotaCacheService
             foreach (var (accountKey, entry) in document.Accounts)
             {
                 if (string.IsNullOrWhiteSpace(accountKey) ||
-                    entry is null ||
-                    !IsValid(entry) ||
-                    !accounts.TryAdd(accountKey, entry))
+                    entry?.Display is null)
+                {
+                    return Blocked(InvalidFileError);
+                }
+
+                var normalized = NormalizeLegacyEstimate(entry);
+                if (!IsValid(normalized) ||
+                    !accounts.TryAdd(accountKey, normalized))
                 {
                     return Blocked(InvalidFileError);
                 }
@@ -172,6 +177,15 @@ public sealed class QuotaCacheService
         var hasBothEstimateBounds =
             display.EstimatedPeriodQuotaLowerUsd.HasValue ==
             display.EstimatedPeriodQuotaUpperUsd.HasValue;
+        var hasValidEstimateMetadata =
+            Enum.IsDefined(display.EstimateSource) &&
+            Enum.IsDefined(display.EstimateQuality) &&
+            display.EstimateObservationCount >= 0 &&
+            (display.EstimatedPeriodQuotaLowerUsd is null
+                ? display.EstimateQuality == QuotaEstimateQuality.None
+                : display.EstimateSource != QuotaEstimateSource.None &&
+                  display.EstimateQuality != QuotaEstimateQuality.None &&
+                  display.EstimateObservationCount > 0);
         return entry.RefreshedAt != default &&
             display is not null &&
             Enum.IsDefined(display.Period) &&
@@ -186,7 +200,31 @@ public sealed class QuotaCacheService
             display.EstimatedPeriodQuotaUpperUsd is null or >= 0 &&
             hasBothEstimateBounds &&
             (display.EstimatedPeriodQuotaLowerUsd is null ||
-             display.EstimatedPeriodQuotaLowerUsd <= display.EstimatedPeriodQuotaUpperUsd);
+             display.EstimatedPeriodQuotaLowerUsd <= display.EstimatedPeriodQuotaUpperUsd) &&
+            hasValidEstimateMetadata;
+    }
+
+    private static QuotaCacheEntry NormalizeLegacyEstimate(QuotaCacheEntry entry)
+    {
+        var display = entry.Display;
+        if (display.EstimatedPeriodQuotaLowerUsd is null ||
+            display.EstimatedPeriodQuotaUpperUsd is null ||
+            display.EstimateSource != QuotaEstimateSource.None ||
+            display.EstimateQuality != QuotaEstimateQuality.None ||
+            display.EstimateObservationCount != 0)
+        {
+            return entry;
+        }
+
+        return entry with
+        {
+            Display = display with
+            {
+                EstimateSource = QuotaEstimateSource.Analytics,
+                EstimateQuality = QuotaEstimateQuality.Initial,
+                EstimateObservationCount = 1,
+            },
+        };
     }
 
     private static void Validate(QuotaCacheEntry entry)

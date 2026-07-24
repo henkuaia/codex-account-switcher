@@ -434,6 +434,396 @@ public sealed class QuotaServiceTests
         Assert.Null(progress.Values[2].Error);
     }
 
+    [Fact]
+    public async Task Analytics_empty_uses_full_window_local_weekly_estimate()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var resetAt = segmentStart.AddDays(7);
+        QuotaEstimateLedgerState? saved = null;
+        var hybrid = CreateHybrid(
+            [LocalUsage(segmentStart.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+            onSave: state => saved = state);
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(resetAt, serverNow, TimeSpan.FromDays(7), usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(15.69m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.33m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(QuotaEstimateSource.Local, update.Display.EstimateSource);
+        Assert.Equal(QuotaPeriod.Weekly, update.Display.Period);
+        Assert.Single(saved!.Accounts[account.AccountKey].Observations);
+    }
+
+    [Fact]
+    public async Task Analytics_empty_uses_local_monthly_estimate_after_redeemed_reset_selection()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var serverNow = DateTimeOffset.Parse("2026-07-30T00:00:00Z");
+        var resetAt = DateTimeOffset.Parse("2026-08-22T00:00:00Z");
+        var redeemedAt = DateTimeOffset.Parse("2026-07-26T12:30:00Z");
+        var hybrid = CreateHybrid(
+            [LocalUsage(redeemedAt.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(redeemedAt.AddMinutes(-1), null)));
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath switch
+            {
+                "/backend-api/wham/usage" =>
+                    UsageResponse(resetAt, serverNow, TimeSpan.FromDays(30), usedPercent: 25),
+                "/backend-api/wham/rate-limit-reset-credits" =>
+                    JsonResponse("""
+                        {"credits":[
+                          {"status":"redeemed","redeemed_at":"2026-07-26T12:30:00Z"}
+                        ]}
+                        """),
+                _ => JsonResponse("""{"data":[]}"""),
+            }));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(QuotaPeriod.Monthly, update.Display!.Period);
+        Assert.Equal(15.69m, update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(QuotaEstimateSource.Local, update.Display.EstimateSource);
+        Assert.Equal(3, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Valid_analytics_remains_preferred_over_local_result()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var resetAt = segmentStart.AddDays(7);
+        QuotaEstimateLedgerState? saved = null;
+        var hybrid = CreateHybrid(
+            [LocalUsage(segmentStart.AddHours(1), inputTokens: 8_000_000)],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+            onSave: state => saved = state);
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(resetAt, serverNow, TimeSpan.FromDays(7), usedPercent: 25)
+                : JsonResponse("""
+                    {"data":[
+                      {"date":"2026-07-21","totals":{"credits":50}}
+                    ]}
+                    """)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(QuotaEstimateSource.Analytics, update.Display!.EstimateSource);
+        Assert.Equal(7.84m, update.Display.EstimatedPeriodQuotaLowerUsd);
+        var observation = Assert.Single(saved!.Accounts[account.AccountKey].Observations);
+        Assert.Equal(50m, observation.AttributedCredits);
+        Assert.Equal(QuotaEstimateSource.Analytics, observation.Source);
+    }
+
+    [Fact]
+    public async Task Analytics_http_failure_attempts_local_fallback()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var resetAt = segmentStart.AddDays(7);
+        var hybrid = CreateHybrid(
+            [LocalUsage(segmentStart.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(segmentStart.AddMinutes(-1), null)));
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(resetAt, serverNow, TimeSpan.FromDays(7), usedPercent: 25)
+                : new HttpResponseMessage(HttpStatusCode.Forbidden)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(QuotaEstimateSource.Local, update.Display!.EstimateSource);
+        Assert.Equal(15.69m, update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Contains("Analytics 请求失败", update.Display.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Zero_server_usage_skips_analytics_and_local_observation()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var resetAt = segmentStart.AddDays(7);
+        var saveCount = 0;
+        var hybrid = CreateHybrid(
+            [LocalUsage(segmentStart.AddHours(1))],
+            StateWithActivation(
+                account,
+                new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+            onSave: _ => saveCount++);
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            UsageResponse(resetAt, serverNow, TimeSpan.FromDays(7), usedPercent: 0)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(100, update.Display!.RemainingPercent);
+        Assert.Equal(QuotaEstimateSource.None, update.Display.EstimateSource);
+        Assert.Single(handler.Requests);
+        Assert.Equal(0, saveCount);
+    }
+
+    [Fact]
+    public async Task Refresh_all_five_accounts_scans_once_and_saves_ledger_once()
+    {
+        using var home = new TemporaryDirectory();
+        var accounts = Enumerable.Range(1, 5)
+            .Select(index => Accounts.Record(
+                $"user-{index}::acct-{index}",
+                $"user{index}@example.com",
+                accountId: $"acct-{index}"))
+            .ToArray();
+        foreach (var account in accounts)
+        {
+            WriteSnapshot(
+                home,
+                account,
+                $"access-{account.ChatGptAccountId}",
+                account.ChatGptAccountId);
+        }
+
+        var collectCount = 0;
+        var saveCount = 0;
+        var hybrid = CreateHybrid(
+            [],
+            QuotaEstimateLedgerState.Empty,
+            onCollect: () => collectCount++,
+            onSave: _ => saveCount++);
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+        var progress = new CollectingProgress<QuotaUpdate>();
+
+        await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAllAsync(
+                accounts,
+                home.Path,
+                progress,
+                default);
+
+        Assert.Equal(1, collectCount);
+        Assert.Equal(1, saveCount);
+        Assert.Equal(5, progress.Values.Count);
+        Assert.Equal(1, handler.MaximumActiveRequests);
+    }
+
+    [Fact]
+    public async Task Estimator_start_failure_preserves_successful_server_display()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromException<LocalUsageCollectionResult>(
+                new IOException("local-estimator-failure")),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                QuotaEstimateLedgerState.Empty,
+                null)),
+            (_, _) => Task.CompletedTask,
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(
+            JsonResponse("""
+                {"rate_limit":{"secondary_window":{
+                  "used_percent":25,
+                  "limit_window_seconds":604800,
+                  "reset_at":1785000000,
+                  "reset_after_seconds":172800
+                }}}
+                """)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.NotNull(update.Display.ResetsAt);
+        Assert.Equal(2, handler.Requests.Count);
+    }
+
+    [Fact]
+    public async Task Estimator_internal_save_cancellation_preserves_successful_server_display()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult(
+                [LocalUsage(segmentStart.AddHours(1))],
+                0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                StateWithActivation(
+                    account,
+                    new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+                null)),
+            (_, _) => Task.FromCanceled(new CancellationToken(canceled: true)),
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Equal(QuotaEstimateSource.Local, update.Display.EstimateSource);
+    }
+
+    [Fact]
+    public async Task Estimator_propagates_user_cancellation()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, cancellationToken) =>
+                Task.FromCanceled<LocalUsageCollectionResult>(cancellationToken),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                QuotaEstimateLedgerState.Empty,
+                null)),
+            (_, _) => Task.CompletedTask,
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new QuotaService(
+                client,
+                hybridEstimator: hybrid).RefreshAccountAsync(
+                    account,
+                    home.Path,
+                    cancellation.Token));
+
+        Assert.Empty(handler.Requests);
+    }
+
+    private static HybridQuotaEstimateService CreateHybrid(
+        IReadOnlyList<LocalUsageEvent> events,
+        QuotaEstimateLedgerState state,
+        Action? onCollect = null,
+        Action<QuotaEstimateLedgerState>? onSave = null) =>
+        new(
+            (_, _) =>
+            {
+                onCollect?.Invoke();
+                return Task.FromResult(new LocalUsageCollectionResult(events, 0));
+            },
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(state, null)),
+            (updated, _) =>
+            {
+                onSave?.Invoke(updated);
+                return Task.CompletedTask;
+            },
+            new CodexCreditRateCard(),
+            () => DateTimeOffset.Parse("2026-07-25T00:00:00Z"));
+
+    private static QuotaEstimateLedgerState StateWithActivation(
+        AccountRecord account,
+        AccountActivationInterval activation) =>
+        new(new Dictionary<string, AccountQuotaEstimateLedger>(StringComparer.Ordinal)
+        {
+            [account.AccountKey] = new([activation], []),
+        });
+
+    private static LocalUsageEvent LocalUsage(
+        DateTimeOffset timestamp,
+        long inputTokens = 800_000) =>
+        new(
+            timestamp,
+            "gpt-5.6-sol",
+            "default",
+            inputTokens,
+            CachedInputTokens: 0,
+            OutputTokens: 0);
+
+    private static HttpResponseMessage UsageResponse(
+        DateTimeOffset resetAt,
+        DateTimeOffset serverNow,
+        TimeSpan window,
+        double usedPercent)
+    {
+        var resetAfter = (long)(resetAt - serverNow).TotalSeconds;
+        return JsonResponse(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            rate_limit = new
+            {
+                secondary_window = new
+                {
+                    used_percent = usedPercent,
+                    limit_window_seconds = (long)window.TotalSeconds,
+                    reset_at = resetAt.ToUnixTimeSeconds(),
+                    reset_after_seconds = resetAfter,
+                },
+            },
+        }));
+    }
+
     private static void WriteSnapshot(TemporaryDirectory home, AccountRecord account, string accessToken, string accountId)
     {
         var path = AccountSnapshotPathResolver.Resolve(home.Path, account.AccountKey);

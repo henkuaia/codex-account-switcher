@@ -18,11 +18,16 @@ public sealed class QuotaService
 
     private readonly HttpClient _httpClient;
     private readonly AuthSnapshotReader _authSnapshotReader;
+    private readonly HybridQuotaEstimateService? _hybridEstimator;
 
-    public QuotaService(HttpClient httpClient, AuthSnapshotReader? authSnapshotReader = null)
+    public QuotaService(
+        HttpClient httpClient,
+        AuthSnapshotReader? authSnapshotReader = null,
+        HybridQuotaEstimateService? hybridEstimator = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _authSnapshotReader = authSnapshotReader ?? new AuthSnapshotReader();
+        _hybridEstimator = hybridEstimator;
     }
 
     public async Task<QuotaUpdate> RefreshAccountAsync(
@@ -33,6 +38,27 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(account);
         ArgumentException.ThrowIfNullOrWhiteSpace(codexHome);
 
+        var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
+        try
+        {
+            return await RefreshAccountCoreAsync(
+                account,
+                codexHome,
+                hybridContext,
+                cancellationToken);
+        }
+        finally
+        {
+            await TryCompleteHybridRefreshAsync(hybridContext, cancellationToken);
+        }
+    }
+
+    private async Task<QuotaUpdate> RefreshAccountCoreAsync(
+        AccountRecord account,
+        string codexHome,
+        HybridQuotaRefreshContext? hybridContext,
+        CancellationToken cancellationToken)
+    {
         AuthSnapshot? snapshot = null;
         try
         {
@@ -76,6 +102,7 @@ public sealed class QuotaService
                     parsed.Display,
                     account,
                     snapshot,
+                    hybridContext,
                     requestCancellationSource.Token,
                     cancellationToken);
             return new QuotaUpdate(account.AccountKey, display, null);
@@ -106,6 +133,7 @@ public sealed class QuotaService
         QuotaDisplay display,
         AccountRecord account,
         AuthSnapshot snapshot,
+        HybridQuotaRefreshContext? hybridContext,
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
@@ -115,12 +143,14 @@ public sealed class QuotaService
                 display,
                 account,
                 snapshot,
+                hybridContext,
                 requestCancellationToken,
                 userCancellationToken),
             QuotaPeriod.Monthly => await TryApplyMonthlyEstimateAsync(
                 display,
                 account,
                 snapshot,
+                hybridContext,
                 requestCancellationToken,
                 userCancellationToken),
             _ => display,
@@ -131,6 +161,7 @@ public sealed class QuotaService
         QuotaDisplay display,
         AccountRecord account,
         AuthSnapshot snapshot,
+        HybridQuotaRefreshContext? hybridContext,
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
@@ -146,6 +177,7 @@ public sealed class QuotaService
             display,
             account,
             snapshot,
+            hybridContext,
             resetStart,
             includeStartDayInLower: false,
             requestCancellationToken,
@@ -156,6 +188,7 @@ public sealed class QuotaService
         QuotaDisplay display,
         AccountRecord account,
         AuthSnapshot snapshot,
+        HybridQuotaRefreshContext? hybridContext,
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
@@ -198,6 +231,7 @@ public sealed class QuotaService
                 display,
                 account,
                 snapshot,
+                hybridContext,
                 segmentStart,
                 segmentStart.UtcDateTime.TimeOfDay == TimeSpan.Zero,
                 requestCancellationToken,
@@ -221,6 +255,7 @@ public sealed class QuotaService
         QuotaDisplay display,
         AccountRecord account,
         AuthSnapshot snapshot,
+        HybridQuotaRefreshContext? hybridContext,
         DateTimeOffset segmentStart,
         bool includeStartDayInLower,
         CancellationToken requestCancellationToken,
@@ -237,6 +272,8 @@ public sealed class QuotaService
         var uri = new Uri(
             $"{AnalyticsEndpoint}?start_date={startDate:yyyy-MM-dd}" +
             $"&end_date={endDateExclusive:yyyy-MM-dd}&group_by=day");
+        AnalyticsUsageParseResult? analytics = null;
+        var availability = AnalyticsAvailability.Failed;
         try
         {
             using var request = CreateAuthenticatedRequest(uri, account, snapshot);
@@ -244,37 +281,34 @@ public sealed class QuotaService
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 requestCancellationToken);
-            if (!response.IsSuccessStatusCode)
+            if (response.IsSuccessStatusCode)
             {
-                return display;
+                var responseBody = await response.Content.ReadAsStringAsync(
+                    requestCancellationToken);
+                analytics = PeriodQuotaEstimator.Parse(
+                    responseBody,
+                    startDate,
+                    includeStartDayInLower);
+                availability = AnalyticsAvailability.Available;
             }
-
-            var responseBody = await response.Content.ReadAsStringAsync(requestCancellationToken);
-            var estimate = PeriodQuotaEstimator.TryEstimate(
-                responseBody,
-                display.UsedPercent,
-                startDate,
-                includeStartDayInLower);
-            return estimate is null || estimate.UpperUsd <= 0
-                ? display
-                : display with
-                {
-                    EstimatedPeriodQuotaLowerUsd = estimate.LowerUsd,
-                    EstimatedPeriodQuotaUpperUsd = estimate.UpperUsd,
-                };
         }
         catch (OperationCanceledException) when (!userCancellationToken.IsCancellationRequested)
         {
-            return display;
         }
         catch (HttpRequestException)
         {
-            return display;
         }
         catch (InvalidDataException)
         {
-            return display;
         }
+
+        return ApplyEstimate(
+            display,
+            account,
+            hybridContext,
+            segmentStart,
+            analytics,
+            availability);
     }
 
     public async Task RefreshAllAsync(
@@ -286,12 +320,132 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(accounts);
         ArgumentNullException.ThrowIfNull(progress);
 
-        foreach (var account in accounts)
+        var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
+        try
         {
-            var update = await RefreshAccountAsync(account, codexHome, cancellationToken);
-            progress.Report(update);
+            foreach (var account in accounts)
+            {
+                var update = await RefreshAccountCoreAsync(
+                    account,
+                    codexHome,
+                    hybridContext,
+                    cancellationToken);
+                progress.Report(update);
+            }
+        }
+        finally
+        {
+            await TryCompleteHybridRefreshAsync(hybridContext, cancellationToken);
         }
     }
+
+    private QuotaDisplay ApplyEstimate(
+        QuotaDisplay display,
+        AccountRecord account,
+        HybridQuotaRefreshContext? hybridContext,
+        DateTimeOffset segmentStart,
+        AnalyticsUsageParseResult? analytics,
+        AnalyticsAvailability availability)
+    {
+        if (_hybridEstimator is not null &&
+            hybridContext is not null &&
+            display.ServerNow is not null &&
+            display.ResetsAt is { } resetsAt)
+        {
+            try
+            {
+                return _hybridEstimator.ApplyObservation(
+                    hybridContext,
+                    account,
+                    display,
+                    new QuotaSegment(display.Period, segmentStart, resetsAt),
+                    analytics,
+                    availability);
+            }
+            catch (Exception exception) when (IsEstimatorFailure(exception))
+            {
+                return display;
+            }
+        }
+
+        if (availability != AnalyticsAvailability.Available ||
+            analytics?.State != AnalyticsUsageState.Valid)
+        {
+            return display;
+        }
+
+        var estimate = QuotaEstimateMath.TryCreateFullInterval(
+            analytics.LowerCredits,
+            analytics.UpperCredits,
+            display.UsedPercent,
+            percentResolution: 1);
+        return estimate is null || estimate.UpperUsd <= 0
+            ? display
+            : display with
+            {
+                EstimatedPeriodQuotaLowerUsd = estimate.LowerUsd,
+                EstimatedPeriodQuotaUpperUsd = estimate.UpperUsd,
+            };
+    }
+
+    private async Task<HybridQuotaRefreshContext?> TryBeginHybridRefreshAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_hybridEstimator is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _hybridEstimator.BeginRefreshAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (Exception exception) when (IsEstimatorFailure(exception))
+        {
+            return null;
+        }
+    }
+
+    private async Task TryCompleteHybridRefreshAsync(
+        HybridQuotaRefreshContext? context,
+        CancellationToken cancellationToken)
+    {
+        if (_hybridEstimator is null || context is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _hybridEstimator.CompleteRefreshAsync(context, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception) when (IsEstimatorFailure(exception))
+        {
+        }
+    }
+
+    private static bool IsEstimatorFailure(Exception exception) =>
+        exception is IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            InvalidOperationException or
+            ArgumentException or
+            OverflowException;
 
     private static QuotaUpdate Failure(AccountRecord account, string error, AuthSnapshot? snapshot)
     {

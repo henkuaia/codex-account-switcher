@@ -46,4 +46,7 @@ public sealed record QuotaParseResult(QuotaDisplay? Display, string? Error)
     public static QuotaParseResult Failure(string error) => new(null, error);
 }
 
-public sealed record QuotaUpdate(string AccountKey, QuotaDisplay? Display, string? Error);
+public sealed record QuotaUpdate(string AccountKey, QuotaDisplay? Display, string? Error)
+{
+    public string? Warning { get; init; }
+}

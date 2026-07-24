@@ -162,6 +162,21 @@ public sealed class AccountRowViewModel : ObservableObject
             throw new ArgumentException("The quota update belongs to another account.", nameof(update));
         }
 
+        if (update.Error is not null &&
+            update.Display is null &&
+            QuotaDisplay is not null)
+        {
+            QuotaError = update.Error;
+            QuotaStatusText = string.IsNullOrWhiteSpace(QuotaStatusText)
+                ? update.Error
+                : $"{update.Error} · {QuotaStatusText}";
+            QuotaToolTip = string.IsNullOrWhiteSpace(QuotaToolTip)
+                ? update.Error
+                : $"{update.Error}; {QuotaToolTip}";
+            HasQuotaStatus = true;
+            return;
+        }
+
         QuotaDisplay = update.Display;
         QuotaError = update.Error;
         QuotaLabel = update.Error is not null || update.Display is null
@@ -272,7 +287,9 @@ public sealed class AccountRowViewModel : ObservableObject
             var range = lower == upper
                 ? FormatUsd(lower)
                 : $"{FormatUsd(lower)}–{FormatUsd(upper)}";
-            text = $"{quality}估算单次{period}额度：US${range}{source}";
+            text =
+                $"{quality}估算单次{period}额度：US${range}{source}{Environment.NewLine}" +
+                "按 Credits 购买价格换算，非官方套餐额度";
         }
         else if (display.UsedPercent <= 0)
         {

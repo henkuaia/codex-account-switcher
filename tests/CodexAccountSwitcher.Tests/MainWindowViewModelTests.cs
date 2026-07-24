@@ -268,6 +268,35 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Ledger_warning_keeps_server_quota_visible_and_account_operations_enabled()
+    {
+        const string warning =
+            "本地额度估算账本暂时无法保存。本次本地估算结果未保存，将稍后重试。";
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var display = new QuotaDisplay(
+            QuotaPeriod.Weekly,
+            73,
+            DateTimeOffset.Parse("2026-07-31T00:00:00Z"),
+            TimeSpan.FromDays(7),
+            "weekly");
+        fixture.QuotaUpdates =
+        [
+            new QuotaUpdate(fixture.First.AccountKey, display, null)
+            {
+                Warning = warning,
+            },
+        ];
+
+        await fixture.ViewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.Equal(display, fixture.Row(fixture.First).QuotaDisplay);
+        Assert.Equal(warning, fixture.ViewModel.StatusText);
+        Assert.True(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.True(fixture.ViewModel.RefreshCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task Busy_operation_disables_all_mutation_commands()
     {
         var fixture = new Fixture();
@@ -1276,8 +1305,14 @@ public sealed class MainWindowViewModelTests
 
         row.ApplyQuota(new QuotaUpdate(row.Account.AccountKey, null, "quota failed (HTTP 403)."));
 
-        Assert.Equal("quota failed (HTTP 403).", RequiredProperty<string>(row, "QuotaStatusText"));
-        Assert.Equal("quota failed (HTTP 403).", RequiredProperty<string>(row, "QuotaToolTip"));
+        Assert.Equal(
+            "quota failed (HTTP 403). · Resets 2026-07-25 12:34 UTC",
+            RequiredProperty<string>(row, "QuotaStatusText"));
+        Assert.Contains(
+            "quota failed (HTTP 403).",
+            RequiredProperty<string>(row, "QuotaToolTip"),
+            StringComparison.Ordinal);
+        Assert.Equal(42, row.QuotaDisplay!.RemainingPercent);
     }
 
     [Fact]
@@ -1427,6 +1462,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("单次周额度 US$40", row.PeriodQuotaText);
         Assert.Equal(
             $"初步估算单次周额度：US$8–24（本机用量）{Environment.NewLine}" +
+            $"按 Credits 购买价格换算，非官方套餐额度{Environment.NewLine}" +
             "Analytics 无数据，已改用本机用量估算",
             row.EstimatedPeriodQuotaText);
         Assert.Contains(
@@ -1493,7 +1529,8 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal("单次月额度 US$220", row.PeriodQuotaText);
         Assert.Equal(
-            "多点估算单次月额度：US$160–200（服务器 Analytics）",
+            $"多点估算单次月额度：US$160–200（服务器 Analytics）{Environment.NewLine}" +
+            "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
@@ -1526,9 +1563,48 @@ public sealed class MainWindowViewModelTests
             null));
 
         Assert.Equal(
-            "初步估算单次月额度：US$180（服务器 Analytics）",
+            $"初步估算单次月额度：US$180（服务器 Analytics）{Environment.NewLine}" +
+            "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Theory]
+    [InlineData(QuotaPeriod.Weekly, "周")]
+    [InlineData(QuotaPeriod.Monthly, "月")]
+    public void Bounded_estimate_discloses_credits_purchase_price_conversion(
+        QuotaPeriod period,
+        string periodText)
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                period,
+                50,
+                null,
+                TimeSpan.FromDays(7),
+                "quota")
+            {
+                UsedPercent = 50,
+                EstimatedPeriodQuotaLowerUsd = 10m,
+                EstimatedPeriodQuotaUpperUsd = 20m,
+                EstimateSource = QuotaEstimateSource.Local,
+                EstimateQuality = QuotaEstimateQuality.Initial,
+                EstimateStatus = "现有状态",
+            },
+            null));
+
+        Assert.Equal(
+            $"初步估算单次{periodText}额度：US$10–20（本机用量）{Environment.NewLine}" +
+            $"按 Credits 购买价格换算，非官方套餐额度{Environment.NewLine}" +
+            "现有状态",
+            row.EstimatedPeriodQuotaText);
     }
 
     [Fact]
@@ -1733,7 +1809,8 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(0, refreshCalls);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
         Assert.Equal(
-            "初步估算单次月额度：US$160–180（本机用量）",
+            $"初步估算单次月额度：US$160–180（本机用量）{Environment.NewLine}" +
+            "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.Contains("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
 
@@ -1743,7 +1820,8 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("After", row.DisplayIdentity);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
         Assert.Equal(
-            "初步估算单次月额度：US$160–180（本机用量）",
+            $"初步估算单次月额度：US$160–180（本机用量）{Environment.NewLine}" +
+            "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.Equal(0, refreshCalls);
     }
@@ -1798,6 +1876,14 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(liveDisplay, saved[first.AccountKey].Display);
         Assert.True(saved[first.AccountKey].RefreshedAt > oldFirst.RefreshedAt);
         Assert.Equal(oldSecond, saved[second.AccountKey]);
+        var failedRow = viewModel.Accounts.Single(
+            row => string.Equals(
+                row.Account.AccountKey,
+                second.AccountKey,
+                StringComparison.Ordinal));
+        Assert.Equal(oldSecond.Display, failedRow.QuotaDisplay);
+        Assert.Equal("quota failed", failedRow.QuotaError);
+        Assert.Contains("上次刷新", failedRow.QuotaStatusText, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -83,6 +83,24 @@ public sealed class PeriodQuotaEstimatorTests
             PeriodQuotaEstimator.Parse(AnalyticsJson).State);
     }
 
+    [Theory]
+    [InlineData("""{"data":[{}]}""")]
+    [InlineData("""{"data":[{"date":"2026-07-23","totals":{"credits":50}},{}]}""")]
+    [InlineData("""{"data":[{"date":"not-a-date","totals":{"credits":50}}]}""")]
+    [InlineData("""{"data":[{"date":"2026-07-23","totals":{"credits":-1}}]}""")]
+    [InlineData("""{"data":[{"date":"2026-07-23","totals":{}}]}""")]
+    public void Parse_rejects_any_malformed_or_incomplete_nonempty_row(string json)
+    {
+        var result = PeriodQuotaEstimator.Parse(
+            json,
+            segmentStartDate: new DateOnly(2026, 7, 23),
+            includeStartDayInLower: true);
+
+        Assert.Equal(AnalyticsUsageState.Invalid, result.State);
+        Assert.Equal(0m, result.LowerCredits);
+        Assert.Equal(0m, result.UpperCredits);
+    }
+
     [Fact]
     public void Parse_excludes_non_midnight_start_day_only_from_lower_credits()
     {

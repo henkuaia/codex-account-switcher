@@ -2,8 +2,17 @@ using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.Services;
 
+public sealed record CodexCreditCalculationResult(
+    decimal Credits,
+    CreditPricingFailureReason FailureReason)
+{
+    public bool IsPriced => FailureReason == CreditPricingFailureReason.None;
+}
+
 public sealed class CodexCreditRateCard
 {
+    public const string Version = "2026-07-24-v1";
+
     private sealed record Rates(decimal Input, decimal CachedInput, decimal Output);
 
     private static readonly IReadOnlyDictionary<string, Rates> StandardRates =
@@ -22,27 +31,48 @@ public sealed class CodexCreditRateCard
 
     public bool TryCalculateCredits(LocalUsageEvent usage, out decimal credits)
     {
-        credits = 0m;
-        if (string.IsNullOrWhiteSpace(usage.Model) ||
-            usage.InputTokens < 0 ||
+        var result = CalculateCredits(usage);
+        credits = result.Credits;
+        return result.IsPriced;
+    }
+
+    public CodexCreditCalculationResult CalculateCredits(LocalUsageEvent usage)
+    {
+        ArgumentNullException.ThrowIfNull(usage);
+        if (usage.InputTokens < 0 ||
             usage.CachedInputTokens < 0 ||
             usage.OutputTokens < 0 ||
-            usage.CachedInputTokens > usage.InputTokens ||
-            !StandardRates.TryGetValue(usage.Model, out var rates) ||
-            !TryResolveFastMultiplier(usage.Model, usage.ServiceTier, out var multiplier))
+            usage.CachedInputTokens > usage.InputTokens)
         {
-            return false;
+            return Failure(CreditPricingFailureReason.InvalidUsage);
+        }
+
+        if (string.IsNullOrWhiteSpace(usage.Model) ||
+            !StandardRates.TryGetValue(usage.Model, out var rates))
+        {
+            return Failure(CreditPricingFailureReason.UnknownModel);
+        }
+
+        if (!TryResolveFastMultiplier(usage.Model, usage.ServiceTier, out var multiplier))
+        {
+            return Failure(CreditPricingFailureReason.UnknownServiceTier);
         }
 
         var uncachedInput = usage.InputTokens - usage.CachedInputTokens;
-        credits = (
+        var credits = (
             uncachedInput * rates.Input +
             usage.CachedInputTokens * rates.CachedInput +
             usage.OutputTokens * rates.Output) / 1_000_000m;
         credits *= multiplier;
         credits = Math.Round(credits, 9, MidpointRounding.AwayFromZero);
-        return true;
+        return new CodexCreditCalculationResult(
+            credits,
+            CreditPricingFailureReason.None);
     }
+
+    private static CodexCreditCalculationResult Failure(
+        CreditPricingFailureReason reason) =>
+        new(0m, reason);
 
     private static bool TryResolveFastMultiplier(
         string model,

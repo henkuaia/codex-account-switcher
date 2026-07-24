@@ -41,15 +41,22 @@ public sealed class QuotaService
         var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
         try
         {
-            return await RefreshAccountCoreAsync(
+            var update = await RefreshAccountCoreAsync(
                 account,
                 codexHome,
                 hybridContext,
                 cancellationToken);
+            var warning = await TryCompleteHybridRefreshAsync(
+                hybridContext,
+                cancellationToken);
+            return WithWarning(update, warning);
         }
-        finally
+        catch
         {
-            await TryCompleteHybridRefreshAsync(hybridContext, cancellationToken);
+            await TryCompleteHybridRefreshAsync(
+                hybridContext,
+                CancellationToken.None);
+            throw;
         }
     }
 
@@ -189,7 +196,7 @@ public sealed class QuotaService
             snapshot,
             hybridContext,
             resetStart,
-            includeStartDayInLower: false,
+            resetStart.UtcDateTime.TimeOfDay == TimeSpan.Zero,
             requestCancellationToken,
             userCancellationToken);
     }
@@ -228,7 +235,9 @@ public sealed class QuotaService
                 requestCancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                return display;
+                return WithEstimateStatus(
+                    display,
+                    "无法确定当前月额度片段，已跳过额度估算");
             }
 
             var responseBody = await response.Content.ReadAsStringAsync(requestCancellationToken);
@@ -238,7 +247,9 @@ public sealed class QuotaService
                     display.ServerNow.Value,
                     out var latestRedeemedAt))
             {
-                return display;
+                return WithEstimateStatus(
+                    display,
+                    "无法确定当前月额度片段，已跳过额度估算");
             }
 
             var segmentStart = latestRedeemedAt ?? naturalStart;
@@ -265,15 +276,21 @@ public sealed class QuotaService
         }
         catch (OperationCanceledException) when (!userCancellationToken.IsCancellationRequested)
         {
-            return display;
+            return WithEstimateStatus(
+                display,
+                "无法确定当前月额度片段，已跳过额度估算");
         }
         catch (HttpRequestException)
         {
-            return display;
+            return WithEstimateStatus(
+                display,
+                "无法确定当前月额度片段，已跳过额度估算");
         }
         catch (InvalidDataException)
         {
-            return display;
+            return WithEstimateStatus(
+                display,
+                "无法确定当前月额度片段，已跳过额度估算");
         }
     }
 
@@ -360,6 +377,7 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(progress);
 
         var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
+        var completedUpdates = new List<QuotaUpdate>(accounts.Count);
         try
         {
             foreach (var account in accounts)
@@ -369,14 +387,27 @@ public sealed class QuotaService
                     codexHome,
                     hybridContext,
                     cancellationToken);
+                completedUpdates.Add(update);
                 progress.Report(update);
             }
         }
-        finally
+        catch
         {
             await TryCompleteHybridRefreshAsync(
                 hybridContext,
                 CancellationToken.None);
+            throw;
+        }
+
+        var warning = await TryCompleteHybridRefreshAsync(
+            hybridContext,
+            CancellationToken.None);
+        if (!string.IsNullOrWhiteSpace(warning))
+        {
+            foreach (var update in completedUpdates)
+            {
+                progress.Report(WithWarning(update, warning));
+            }
         }
     }
 
@@ -454,18 +485,18 @@ public sealed class QuotaService
         }
     }
 
-    private async Task TryCompleteHybridRefreshAsync(
+    private async Task<string?> TryCompleteHybridRefreshAsync(
         HybridQuotaRefreshContext? context,
         CancellationToken cancellationToken)
     {
         if (_hybridEstimator is null || context is null)
         {
-            return;
+            return null;
         }
 
         try
         {
-            await _hybridEstimator.CompleteRefreshAsync(context, cancellationToken);
+            return await _hybridEstimator.CompleteRefreshAsync(context, cancellationToken);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -473,10 +504,44 @@ public sealed class QuotaService
         }
         catch (OperationCanceledException)
         {
+            return "本地额度估算账本暂时无法保存。本次本地估算结果未保存，将稍后重试。";
         }
         catch (Exception exception) when (IsEstimatorFailure(exception))
         {
+            return "本地额度估算账本暂时无法保存。本次本地估算结果未保存，将稍后重试。";
         }
+    }
+
+    private static QuotaUpdate WithWarning(QuotaUpdate update, string? warning)
+    {
+        if (string.IsNullOrWhiteSpace(warning))
+        {
+            return update;
+        }
+
+        return update with
+        {
+            Display = update.Display is null
+                ? null
+                : WithEstimateStatus(update.Display, warning),
+            Warning = warning,
+        };
+    }
+
+    private static QuotaDisplay WithEstimateStatus(
+        QuotaDisplay display,
+        string status)
+    {
+        var existing = display.EstimateStatus;
+        if (string.IsNullOrWhiteSpace(existing))
+        {
+            return display with { EstimateStatus = status };
+        }
+
+        return existing.Split('；', StringSplitOptions.RemoveEmptyEntries)
+            .Contains(status, StringComparer.Ordinal)
+            ? display
+            : display with { EstimateStatus = $"{existing}；{status}" };
     }
 
     private static bool IsEstimatorFailure(Exception exception) =>

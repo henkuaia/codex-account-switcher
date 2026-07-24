@@ -64,6 +64,86 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Begin_refresh_passes_persisted_checkpoints_and_saves_updated_scan_state()
+    {
+        var initialCheckpoint = Checkpoint("session.jsonl", completedOffset: 10);
+        var updatedCheckpoint = initialCheckpoint with
+        {
+            CompletedLineByteOffset = 20,
+            LastKnownLength = 20,
+        };
+        var initial = QuotaEstimateLedgerState.Empty with
+        {
+            FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                StringComparer.Ordinal)
+            {
+                [initialCheckpoint.RelativePath] = initialCheckpoint,
+            },
+        };
+        IReadOnlyDictionary<string, LocalUsageFileCheckpoint>? received = null;
+        QuotaEstimateLedgerState? saved = null;
+        var service = new HybridQuotaEstimateService(
+            (_, checkpoints, _) =>
+            {
+                received = checkpoints;
+                return Task.FromResult(UsageResult() with
+                {
+                    FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                        StringComparer.Ordinal)
+                    {
+                        [updatedCheckpoint.RelativePath] = updatedCheckpoint,
+                    },
+                    HasCheckpointChanges = true,
+                });
+            },
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(initial, null)),
+            (state, _) =>
+            {
+                saved = state;
+                return Task.CompletedTask;
+            },
+            new CodexCreditRateCard());
+
+        var context = await service.BeginRefreshAsync(default);
+        var warning = await service.CompleteRefreshAsync(context, default);
+
+        Assert.Same(initial.FileCheckpoints, received);
+        Assert.Null(warning);
+        Assert.Equal(20, saved!.FileCheckpoints["session.jsonl"].CompletedLineByteOffset);
+    }
+
+    [Fact]
+    public void Applying_observation_preserves_incremental_file_checkpoints()
+    {
+        var checkpoint = Checkpoint("session.jsonl", completedOffset: 20);
+        var ledger = StateWithAccount(
+            new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)) with
+        {
+            FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                StringComparer.Ordinal)
+            {
+                [checkpoint.RelativePath] = checkpoint,
+            },
+        };
+        var context = new HybridQuotaRefreshContext(
+            UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger);
+        var service = CreateService();
+
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Same(
+            checkpoint,
+            context.Ledger.FileCheckpoints[checkpoint.RelativePath]);
+    }
+
+    [Fact]
     public async Task Local_events_require_one_unambiguous_account_activation_and_server_cutoff()
     {
         var localWallClock = ServerNow.AddDays(1);
@@ -121,6 +201,32 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Activation_ending_at_server_cutoff_is_not_full_segment_coverage()
+    {
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(
+                    SegmentStart.AddMinutes(-1),
+                    ServerNow)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(serverNow: ServerNow),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.False(
+            context.Ledger.Accounts[Account.AccountKey]
+                .Observations[^1]
+                .HasFullSegmentCoverage);
+    }
+
+    [Fact]
     public async Task Missing_server_now_declines_observation_without_using_local_clock()
     {
         var service = CreateService(
@@ -171,6 +277,75 @@ public sealed class HybridQuotaEstimateServiceTests
         var observation = Assert.Single(context.Ledger.Accounts[Account.AccountKey].Observations);
         Assert.True(observation.HasFullSegmentCoverage);
         Assert.Equal(QuotaObservationKind.FullSegment, observation.Kind);
+        Assert.True(observation.IsLocalScanComplete);
+        Assert.Equal(CodexCreditRateCard.Version, observation.RateCardVersion);
+    }
+
+    [Fact]
+    public async Task Partial_local_scan_never_produces_a_bounded_full_segment_estimate()
+    {
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))) with
+            {
+                SkippedFileCount = 2,
+                InvalidLineCount = 3,
+            },
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Contains("本机用量扫描不完整", result.EstimateStatus, StringComparison.Ordinal);
+        Assert.Contains("跳过 2 个文件", result.EstimateStatus, StringComparison.Ordinal);
+        Assert.Contains("忽略 3 行", result.EstimateStatus, StringComparison.Ordinal);
+        var observation = Assert.Single(context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.False(observation.HasFullSegmentCoverage);
+        Assert.False(observation.IsLocalScanComplete);
+        Assert.Equal(2, observation.SkippedFileCount);
+        Assert.Equal(3, observation.MalformedLineCount);
+    }
+
+    [Fact]
+    public async Task Partial_current_scan_does_not_reuse_older_bounded_local_estimate()
+    {
+        var activationStart = SegmentStart.AddMinutes(-1);
+        var older = Observation(
+            Segment,
+            SegmentStart.AddHours(2),
+            lowerUsd: 15m,
+            upperUsd: 17m) with
+        {
+            ActivationStartedAt = activationStart,
+        };
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(3))) with
+            {
+                SkippedFileCount = 1,
+            },
+            ledger: StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                older));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(serverNow: SegmentStart.AddHours(4)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Null(result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Contains("本机用量扫描不完整", result.EstimateStatus, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -220,6 +395,246 @@ public sealed class HybridQuotaEstimateServiceTests
                 Assert.Equal(200m, observation.AttributedCredits);
                 Assert.Equal(QuotaObservationKind.Delta, observation.Kind);
             });
+    }
+
+    [Fact]
+    public async Task Zero_percent_baseline_records_existing_credits_for_later_delta()
+    {
+        var firstCutoff = SegmentStart.AddHours(4);
+        var secondCutoff = SegmentStart.AddHours(6);
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(SegmentStart.AddHours(5))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddHours(2), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var baseline = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 0, serverNow: firstCutoff),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.NotRequested);
+        var estimate = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 25, serverNow: secondCutoff),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(baseline.EstimatedPeriodQuotaLowerUsd);
+        Assert.NotNull(estimate.EstimatedPeriodQuotaLowerUsd);
+        Assert.Collection(
+            context.Ledger.Accounts[Account.AccountKey].Observations,
+            observation => Assert.Equal(100m, observation.AttributedCredits),
+            observation => Assert.Equal(200m, observation.AttributedCredits));
+    }
+
+    [Fact]
+    public async Task Same_account_reactivation_does_not_delta_across_activation_gap()
+    {
+        var firstActivation = SegmentStart.AddHours(1);
+        var secondActivation = SegmentStart.AddHours(5);
+        var earlier = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(3),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: null,
+            UpperUsd: null,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            RateCardVersion = CodexCreditRateCard.Version,
+            ActivationStartedAt = firstActivation,
+        };
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(2)),
+                Usage(SegmentStart.AddHours(5.5))),
+            ledger: State((
+                Account.AccountKey,
+                new AccountQuotaEstimateLedger(
+                    [
+                        new AccountActivationInterval(
+                            firstActivation,
+                            SegmentStart.AddHours(4)),
+                        new AccountActivationInterval(secondActivation, null),
+                    ],
+                    [earlier]))));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Contains("已建立估算基线", result.EstimateStatus, StringComparison.Ordinal);
+        var current = context.Ledger.Accounts[Account.AccountKey].Observations[^1];
+        Assert.Equal(200m, current.AttributedCredits);
+        Assert.Equal(secondActivation, current.ActivationStartedAt);
+    }
+
+    [Fact]
+    public async Task Reactivation_does_not_intersect_new_delta_with_old_activation_interval()
+    {
+        var firstActivation = SegmentStart.AddHours(1);
+        var secondActivation = SegmentStart.AddHours(5);
+        var oldBounded = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(3),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: 15.5m,
+            UpperUsd: 16.5m,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            RateCardVersion = CodexCreditRateCard.Version,
+            ActivationStartedAt = firstActivation,
+        };
+        var currentBaseline = oldBounded with
+        {
+            ObservedAt = SegmentStart.AddHours(5.5),
+            AttributedCredits = 200m,
+            LowerUsd = null,
+            UpperUsd = null,
+            ActivationStartedAt = secondActivation,
+        };
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(2)),
+                Usage(SegmentStart.AddHours(5.25)),
+                Usage(SegmentStart.AddHours(5.75))),
+            ledger: State((
+                Account.AccountKey,
+                new AccountQuotaEstimateLedger(
+                    [
+                        new AccountActivationInterval(
+                            firstActivation,
+                            SegmentStart.AddHours(4)),
+                        new AccountActivationInterval(secondActivation, null),
+                    ],
+                    [oldBounded, currentBaseline]))));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(15.38m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.67m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(QuotaEstimateQuality.Initial, result.EstimateQuality);
+        Assert.Equal(1, result.EstimateObservationCount);
+    }
+
+    [Fact]
+    public async Task Changed_rate_card_version_does_not_delta_against_old_credit_total()
+    {
+        var activationStart = SegmentStart.AddHours(2);
+        var earlier = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(4),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: null,
+            UpperUsd: null,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            RateCardVersion = "older-rate-card",
+            ActivationStartedAt = activationStart,
+        };
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(SegmentStart.AddHours(5))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                earlier));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Contains("已建立估算基线", result.EstimateStatus, StringComparison.Ordinal);
+        Assert.Equal(
+            CodexCreditRateCard.Version,
+            context.Ledger.Accounts[Account.AccountKey].Observations[^1].RateCardVersion);
+    }
+
+    [Fact]
+    public async Task Current_local_estimate_does_not_intersect_old_rate_card_bounds()
+    {
+        var activationStart = SegmentStart.AddHours(2);
+        var oldBounded = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(3),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: 15.5m,
+            UpperUsd: 16.5m,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            RateCardVersion = "older-rate-card",
+            ActivationStartedAt = activationStart,
+        };
+        var currentBaseline = oldBounded with
+        {
+            ObservedAt = SegmentStart.AddHours(4),
+            AttributedCredits = 100m,
+            LowerUsd = null,
+            UpperUsd = null,
+            RateCardVersion = CodexCreditRateCard.Version,
+        };
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(SegmentStart.AddHours(5))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                oldBounded,
+                currentBaseline));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(15.38m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.67m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(QuotaEstimateQuality.Initial, result.EstimateQuality);
+        Assert.Equal(1, result.EstimateObservationCount);
     }
 
     [Theory]
@@ -281,6 +696,35 @@ public sealed class HybridQuotaEstimateServiceTests
         Assert.Contains("当前模型暂无官方费率", result.EstimateStatus, StringComparison.Ordinal);
         var observation = Assert.Single(context.Ledger.Accounts[Account.AccountKey].Observations);
         Assert.Equal(0m, observation.AttributedCredits);
+    }
+
+    [Fact]
+    public async Task Unknown_service_tier_has_a_specific_sanitized_status()
+    {
+        var service = CreateService(
+            usage: UsageResult(Usage(
+                SegmentStart.AddHours(1),
+                serviceTier: string.Empty)),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Contains(
+            "速度模式未知，部分用量无法计价",
+            result.EstimateStatus,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "当前模型暂无官方费率",
+            result.EstimateStatus,
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -464,11 +908,169 @@ public sealed class HybridQuotaEstimateServiceTests
             EmptyAnalytics(),
             AnalyticsAvailability.Available);
 
-        await service.CompleteRefreshAsync(context, default);
+        var warning = await service.CompleteRefreshAsync(context, default);
 
+        Assert.Null(warning);
         Assert.Equal(1, saveCount);
         Assert.Same(context.Ledger, saved);
         Assert.Single(saved!.Accounts[Account.AccountKey].Observations);
+    }
+
+    [Fact]
+    public async Task Failed_completion_preserves_dirty_state_and_retries_it_later()
+    {
+        var attempts = new List<QuotaEstimateLedgerState>();
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)),
+            saveAsync: (state, _) =>
+            {
+                attempts.Add(state);
+                return attempts.Count == 1
+                    ? Task.FromException(new IOException("save failed"))
+                    : Task.CompletedTask;
+            });
+        var first = await service.BeginRefreshAsync(default);
+        service.ApplyObservation(
+            first,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        var firstWarning = await service.CompleteRefreshAsync(first, default);
+        var second = await service.BeginRefreshAsync(default);
+        var secondWarning = await service.CompleteRefreshAsync(second, default);
+
+        Assert.Contains("未保存", firstWarning, StringComparison.Ordinal);
+        Assert.Null(secondWarning);
+        Assert.Equal(2, attempts.Count);
+        Assert.Single(attempts[1].Accounts[Account.AccountKey].Observations);
+    }
+
+    [Fact]
+    public async Task Later_refresh_reloads_after_transient_load_error_before_dirty_retry()
+    {
+        const string loadWarning = "本地额度估算账本暂时无法读取，原文件已保留。";
+        var loadCount = 0;
+        var saveCount = 0;
+        QuotaEstimateLedgerState? saved = null;
+        var initial = StateWithAccount(
+            new AccountActivationInterval(SegmentStart.AddMinutes(-1), null));
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            loadAsync: _ =>
+            {
+                loadCount++;
+                return Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                    initial,
+                    loadCount == 1 ? loadWarning : null));
+            },
+            saveAsync: (state, _) =>
+            {
+                saveCount++;
+                if (loadCount < 2)
+                {
+                    return Task.FromException(new InvalidOperationException(
+                        "load must recover before save"));
+                }
+
+                saved = state;
+                return Task.CompletedTask;
+            });
+        var first = await service.BeginRefreshAsync(default);
+        service.ApplyObservation(
+            first,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        var firstWarning = await service.CompleteRefreshAsync(first, default);
+        var second = await service.BeginRefreshAsync(default);
+        var secondWarning = await service.CompleteRefreshAsync(second, default);
+
+        Assert.Contains("未保存", firstWarning, StringComparison.Ordinal);
+        Assert.Null(secondWarning);
+        Assert.Equal(2, loadCount);
+        Assert.Equal(2, saveCount);
+        Assert.Single(saved!.Accounts[Account.AccountKey].Observations);
+    }
+
+    [Fact]
+    public async Task Successful_reload_replays_registry_activation_recorded_during_load_error()
+    {
+        const string loadWarning = "本地额度估算账本暂时无法读取，原文件已保留。";
+        var priorStart = SegmentStart.AddHours(-2);
+        var priorEnd = SegmentStart.AddHours(-1);
+        var reactivatedAt = SegmentStart.AddHours(1);
+        var observedAt = SegmentStart.AddHours(2);
+        var persisted = StateWithAccount(
+            new AccountActivationInterval(priorStart, priorEnd));
+        var loadCount = 0;
+        var service = CreateService(
+            loadAsync: _ =>
+            {
+                loadCount++;
+                return Task.FromResult(loadCount == 1
+                    ? new QuotaEstimateLedgerLoadResult(
+                        QuotaEstimateLedgerState.Empty,
+                        loadWarning)
+                    : new QuotaEstimateLedgerLoadResult(persisted, null));
+            },
+            saveAsync: (_, _) => Task.FromException(
+                new InvalidOperationException("ledger remains blocked")),
+            utcNow: () => observedAt);
+        var registry = new AccountRegistry(3, Account.AccountKey, [Account])
+        {
+            ActiveAccountActivatedAt = reactivatedAt,
+        };
+
+        var warning = await service.ObserveRegistryAsync(registry, default);
+        var context = await service.BeginRefreshAsync(default);
+
+        Assert.Contains("未保存", warning, StringComparison.Ordinal);
+        Assert.Equal(2, loadCount);
+        Assert.Collection(
+            context.Ledger.Accounts[Account.AccountKey].Activations,
+            activation =>
+            {
+                Assert.Equal(priorStart, activation.StartedAt);
+                Assert.Equal(priorEnd, activation.EndedAt);
+            },
+            activation =>
+            {
+                Assert.Equal(reactivatedAt, activation.StartedAt);
+                Assert.Null(activation.EndedAt);
+            });
+    }
+
+    [Fact]
+    public async Task Load_warning_is_carried_into_the_estimate_without_discarding_loaded_state()
+    {
+        const string loadWarning = "本地额度估算账本暂时无法读取，原文件已保留。";
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            loadAsync: _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                StateWithAccount(
+                    new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)),
+                loadWarning)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(QuotaEstimateSource.Local, result.EstimateSource);
+        Assert.Contains(loadWarning, result.EstimateStatus, StringComparison.Ordinal);
+        Assert.Contains("未保存", result.EstimateStatus, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -621,11 +1223,12 @@ public sealed class HybridQuotaEstimateServiceTests
 
     private static LocalUsageEvent Usage(
         DateTimeOffset timestamp,
-        string model = "gpt-5.6-sol") =>
+        string model = "gpt-5.6-sol",
+        string serviceTier = "default") =>
         new(
             timestamp,
             model,
-            "default",
+            serviceTier,
             InputTokens: 800_000,
             CachedInputTokens: 0,
             OutputTokens: 0);
@@ -666,7 +1269,32 @@ public sealed class HybridQuotaEstimateServiceTests
             lowerUsd,
             upperUsd,
             QuotaEstimateSource.Local,
-            QuotaObservationKind.FullSegment);
+            QuotaObservationKind.FullSegment)
+        {
+            RateCardVersion = CodexCreditRateCard.Version,
+            ActivationStartedAt = SegmentStart.AddMinutes(-1),
+        };
+
+    private static LocalUsageFileCheckpoint Checkpoint(
+        string relativePath,
+        long completedOffset) =>
+        new(
+            relativePath,
+            completedOffset,
+            completedOffset,
+            DateTimeOffset.Parse("2026-07-24T00:00:00Z"),
+            DateTimeOffset.Parse("2026-07-24T01:00:00Z"),
+            PrefixLength: 0,
+            PrefixSha256:
+                "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            CompletedTailLength: 0,
+            CompletedTailSha256:
+                "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855",
+            Model: "gpt-5.4",
+            ServiceTier: "default",
+            Aggregates: [],
+            InvalidLineCount: 0,
+            RateCardVersion: CodexCreditRateCard.Version);
 
     private static QuotaEstimateLedgerState StateWithAccount(
         AccountActivationInterval activation,

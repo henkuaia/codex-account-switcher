@@ -74,6 +74,39 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Weekly_utc_midnight_segment_includes_complete_start_day_in_lower_bound()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var resetAt = DateTimeOffset.Parse("2026-07-27T00:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-22T12:00:00Z");
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    resetAt,
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""
+                    {"data":[
+                      {"date":"2026-07-20","totals":{"credits":50}},
+                      {"date":"2026-07-21","totals":{"credits":100}}
+                    ]}
+                    """)));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(
+            account,
+            home.Path,
+            default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(23.53m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24.49m, update.Display.EstimatedPeriodQuotaUpperUsd);
+    }
+
+    [Fact]
     public async Task Refresh_monthly_quota_uses_latest_redeemed_reset_for_estimate()
     {
         using var home = new TemporaryDirectory();
@@ -232,6 +265,10 @@ public sealed class QuotaServiceTests
         Assert.Equal(75, update.Display!.RemainingPercent);
         Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
         Assert.Null(update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Contains(
+            "无法确定当前月额度片段",
+            update.Display.EstimateStatus,
+            StringComparison.Ordinal);
         Assert.Equal(2, handler.Requests.Count);
     }
 
@@ -577,7 +614,7 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
-    public async Task Zero_weekly_usage_records_baseline_without_analytics_or_local_credits()
+    public async Task Zero_weekly_usage_records_local_credit_baseline_without_analytics()
     {
         using var home = new TemporaryDirectory();
         var account = Accounts.Record("user-1::acct-1", "first@example.com");
@@ -605,7 +642,8 @@ public sealed class QuotaServiceTests
         Assert.Single(handler.Requests);
         var observation = Assert.Single(saved!.Accounts[account.AccountKey].Observations);
         Assert.Equal(0, observation.UsedPercent);
-        Assert.Equal(0m, observation.AttributedCredits);
+        Assert.Equal(100m, observation.AttributedCredits);
+        Assert.Equal(CodexCreditRateCard.Version, observation.RateCardVersion);
         Assert.Null(observation.LowerUsd);
         Assert.Null(observation.UpperUsd);
     }
@@ -656,7 +694,8 @@ public sealed class QuotaServiceTests
         var observation = Assert.Single(saved!.Accounts[account.AccountKey].Observations);
         Assert.Equal(redeemedAt, observation.Segment.SegmentStart);
         Assert.Equal(0, observation.UsedPercent);
-        Assert.Equal(0m, observation.AttributedCredits);
+        Assert.Equal(100m, observation.AttributedCredits);
+        Assert.Equal(CodexCreditRateCard.Version, observation.RateCardVersion);
     }
 
     [Fact]
@@ -825,6 +864,45 @@ public sealed class QuotaServiceTests
         Assert.Null(update.Error);
         Assert.Equal(75, update.Display!.RemainingPercent);
         Assert.Equal(QuotaEstimateSource.Local, update.Display.EstimateSource);
+    }
+
+    [Fact]
+    public async Task Estimator_save_failure_returns_successful_display_with_unsaved_warning()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult(
+                [LocalUsage(segmentStart.AddHours(1))],
+                0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                StateWithActivation(
+                    account,
+                    new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+                null)),
+            (_, _) => Task.FromException(new IOException("ledger-save-failure")),
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
+        Assert.Contains("未保存", update.Display.EstimateStatus, StringComparison.Ordinal);
     }
 
     [Fact]

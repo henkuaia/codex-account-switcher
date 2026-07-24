@@ -16,29 +16,39 @@ public static class QuotaEstimateMath
         decimal lowerCredits,
         decimal upperCredits,
         double usedPercent,
+        double percentResolution) =>
+        RoundEstimate(TryCreateFullIntervalPrecise(
+            lowerCredits,
+            upperCredits,
+            usedPercent,
+            percentResolution));
+
+    internal static PeriodQuotaEstimate? TryCreateFullIntervalPrecise(
+        decimal lowerCredits,
+        decimal upperCredits,
+        double usedPercent,
         double percentResolution)
     {
         if (lowerCredits < 0 ||
             upperCredits < lowerCredits ||
-            !IsValidPercentage(usedPercent) ||
-            !TryGetResolution(percentResolution, out var resolution))
+            !TryGetPercentageBounds(
+                usedPercent,
+                percentResolution,
+                out var percentLow,
+                out var percentHigh))
         {
             return null;
         }
 
         try
         {
-            var percent = (decimal)usedPercent;
-            var halfResolution = resolution / 2m;
-            var percentLow = percent - halfResolution;
-            var percentHigh = percent + halfResolution;
             if (percentLow <= 0)
             {
                 return null;
             }
 
-            var lowerUsd = RoundUsd(lowerCredits / (percentHigh / 100m) * UsdPerCredit);
-            var upperUsd = RoundUsd(upperCredits / (percentLow / 100m) * UsdPerCredit);
+            var lowerUsd = lowerCredits / (percentHigh / 100m) * UsdPerCredit;
+            var upperUsd = upperCredits / (percentLow / 100m) * UsdPerCredit;
             return new PeriodQuotaEstimate(lowerUsd, upperUsd);
         }
         catch (OverflowException)
@@ -52,36 +62,49 @@ public static class QuotaEstimateMath
         double earlierPercent,
         double earlierResolution,
         double laterPercent,
+        double laterResolution) =>
+        RoundEstimate(TryCreateDeltaIntervalPrecise(
+            deltaCredits,
+            earlierPercent,
+            earlierResolution,
+            laterPercent,
+            laterResolution));
+
+    internal static PeriodQuotaEstimate? TryCreateDeltaIntervalPrecise(
+        decimal deltaCredits,
+        double earlierPercent,
+        double earlierResolution,
+        double laterPercent,
         double laterResolution)
     {
         if (deltaCredits <= 0 ||
-            !IsValidPercentage(earlierPercent) ||
-            !IsValidPercentage(laterPercent) ||
-            !TryGetResolution(earlierResolution, out var earlierResolutionValue) ||
-            !TryGetResolution(laterResolution, out var laterResolutionValue))
+            !TryGetPercentageBounds(
+                earlierPercent,
+                earlierResolution,
+                out var earlierLow,
+                out var earlierHigh) ||
+            !TryGetPercentageBounds(
+                laterPercent,
+                laterResolution,
+                out var laterLow,
+                out var laterHigh))
         {
             return null;
         }
 
         try
         {
-            var earlier = (decimal)earlierPercent;
-            var later = (decimal)laterPercent;
-            var deltaPercentLow =
-                later - laterResolutionValue / 2m -
-                (earlier + earlierResolutionValue / 2m);
-            var deltaPercentHigh =
-                later + laterResolutionValue / 2m -
-                (earlier - earlierResolutionValue / 2m);
+            var deltaPercentLow = laterLow - earlierHigh;
+            var deltaPercentHigh = laterHigh - earlierLow;
             if (deltaPercentLow <= 0)
             {
                 return null;
             }
 
             var lowerUsd =
-                RoundUsd(deltaCredits / (deltaPercentHigh / 100m) * UsdPerCredit);
+                deltaCredits / (deltaPercentHigh / 100m) * UsdPerCredit;
             var upperUsd =
-                RoundUsd(deltaCredits / (deltaPercentLow / 100m) * UsdPerCredit);
+                deltaCredits / (deltaPercentLow / 100m) * UsdPerCredit;
             return new PeriodQuotaEstimate(lowerUsd, upperUsd);
         }
         catch (OverflowException)
@@ -107,6 +130,18 @@ public static class QuotaEstimateMath
                 observation.LowerUsd is >= 0 &&
                 observation.UpperUsd is >= 0 &&
                 observation.LowerUsd <= observation.UpperUsd)
+            .GroupBy(observation => new
+            {
+                observation.Segment,
+                observation.Source,
+                observation.UsedPercent,
+                observation.PercentResolution,
+                observation.AttributedCredits,
+                observation.LowerUsd,
+                observation.UpperUsd,
+            })
+            .Select(group => group.OrderByDescending(
+                observation => observation.ObservedAt).First())
             .OrderByDescending(observation => observation.ObservedAt))
         {
             var observationLower = observation.LowerUsd.GetValueOrDefault();
@@ -130,7 +165,9 @@ public static class QuotaEstimateMath
         }
 
         return new QuotaEstimateIntersection(
-            new PeriodQuotaEstimate(lowerUsd!.Value, upperUsd!.Value),
+            new PeriodQuotaEstimate(
+                RoundUsd(lowerUsd!.Value),
+                RoundUsd(upperUsd!.Value)),
             observationCount == 1
                 ? QuotaEstimateQuality.Initial
                 : QuotaEstimateQuality.MultiPoint,
@@ -140,6 +177,34 @@ public static class QuotaEstimateMath
 
     private static bool IsValidPercentage(double value) =>
         double.IsFinite(value) && value is >= 0 and <= 100;
+
+    private static bool TryGetPercentageBounds(
+        double value,
+        double percentResolution,
+        out decimal low,
+        out decimal high)
+    {
+        low = default;
+        high = default;
+        if (!IsValidPercentage(value) ||
+            !TryGetResolution(percentResolution, out var resolution))
+        {
+            return false;
+        }
+
+        try
+        {
+            var percent = (decimal)value;
+            var halfResolution = resolution / 2m;
+            low = Math.Max(0m, percent - halfResolution);
+            high = Math.Min(100m, percent + halfResolution);
+            return high >= low;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+    }
 
     private static bool TryGetResolution(double value, out decimal resolution)
     {
@@ -163,4 +228,12 @@ public static class QuotaEstimateMath
 
     private static decimal RoundUsd(decimal value) =>
         Math.Round(value, 2, MidpointRounding.AwayFromZero);
+
+    private static PeriodQuotaEstimate? RoundEstimate(
+        PeriodQuotaEstimate? estimate) =>
+        estimate is null
+            ? null
+            : new PeriodQuotaEstimate(
+                RoundUsd(estimate.LowerUsd),
+                RoundUsd(estimate.UpperUsd));
 }

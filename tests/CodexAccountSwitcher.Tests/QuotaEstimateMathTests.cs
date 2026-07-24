@@ -26,6 +26,7 @@ public sealed class QuotaEstimateMathTests
 
     [Theory]
     [InlineData(0)]
+    [InlineData(0.1)]
     [InlineData(0.5)]
     public void Full_interval_requires_a_positive_lower_percentage_bound(
         double usedPercent)
@@ -37,6 +38,25 @@ public sealed class QuotaEstimateMathTests
             percentResolution: 1);
 
         Assert.Null(result);
+    }
+
+    [Theory]
+    [InlineData(99.75, 4.00, 4.03)]
+    [InlineData(100, 4.00, 4.02)]
+    public void Full_interval_clamps_percentage_uncertainty_to_one_hundred(
+        double usedPercent,
+        double expectedLowerUsd,
+        double expectedUpperUsd)
+    {
+        var result = QuotaEstimateMath.TryCreateFullInterval(
+            lowerCredits: 100m,
+            upperCredits: 100m,
+            usedPercent,
+            percentResolution: 1);
+
+        Assert.NotNull(result);
+        Assert.Equal((decimal)expectedLowerUsd, result.LowerUsd);
+        Assert.Equal((decimal)expectedUpperUsd, result.UpperUsd);
     }
 
     [Fact]
@@ -78,6 +98,21 @@ public sealed class QuotaEstimateMathTests
         Assert.NotNull(result);
         Assert.Equal(15.38m, result.LowerUsd);
         Assert.Equal(28.57m, result.UpperUsd);
+    }
+
+    [Fact]
+    public void Delta_interval_clamps_both_percentage_endpoints()
+    {
+        var result = QuotaEstimateMath.TryCreateDeltaInterval(
+            deltaCredits: 50m,
+            earlierPercent: 0,
+            earlierResolution: 1,
+            laterPercent: 100,
+            laterResolution: 1);
+
+        Assert.NotNull(result);
+        Assert.Equal(2.00m, result.LowerUsd);
+        Assert.Equal(2.02m, result.UpperUsd);
     }
 
     [Fact]
@@ -144,6 +179,36 @@ public sealed class QuotaEstimateMathTests
     }
 
     [Fact]
+    public void Precise_interval_is_kept_until_intersection_then_rounded_for_display()
+    {
+        var precise = QuotaEstimateMath.TryCreateFullIntervalPrecise(
+            lowerCredits: 100m,
+            upperCredits: 100m,
+            usedPercent: 25,
+            percentResolution: 1);
+        Assert.NotNull(precise);
+        Assert.NotEqual(
+            Math.Round(precise.LowerUsd, 2, MidpointRounding.AwayFromZero),
+            precise.LowerUsd);
+        var observations = new[]
+        {
+            CreateObservation(
+                CurrentSegment,
+                "2026-07-24T01:00:00Z",
+                precise.LowerUsd,
+                precise.UpperUsd),
+        };
+
+        var result = QuotaEstimateMath.IntersectRecentCompatible(
+            observations,
+            CurrentSegment);
+
+        Assert.NotNull(result);
+        Assert.Equal(15.69m, result.Estimate.LowerUsd);
+        Assert.Equal(16.33m, result.Estimate.UpperUsd);
+    }
+
+    [Fact]
     public void Intersection_uses_maximum_lower_and_minimum_upper()
     {
         var observations = new[]
@@ -194,6 +259,28 @@ public sealed class QuotaEstimateMathTests
 
         var result = QuotaEstimateMath.IntersectRecentCompatible(
             observations,
+            CurrentSegment);
+
+        Assert.NotNull(result);
+        Assert.Equal(QuotaEstimateQuality.Initial, result.Quality);
+        Assert.Equal(1, result.ObservationCount);
+    }
+
+    [Fact]
+    public void Repeated_unchanged_observation_is_not_independent_multi_point_evidence()
+    {
+        var first = CreateObservation(
+            CurrentSegment,
+            "2026-07-24T01:00:00Z",
+            10m,
+            20m);
+        var repeated = first with
+        {
+            ObservedAt = DateTimeOffset.Parse("2026-07-24T02:00:00Z"),
+        };
+
+        var result = QuotaEstimateMath.IntersectRecentCompatible(
+            [first, repeated],
             CurrentSegment);
 
         Assert.NotNull(result);

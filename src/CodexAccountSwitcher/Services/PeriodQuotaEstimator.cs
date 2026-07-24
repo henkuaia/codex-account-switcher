@@ -59,21 +59,13 @@ public static class PeriodQuotaEstimator
             decimal startDayCredits = 0;
             foreach (var row in data.EnumerateArray())
             {
-                if (!TryReadCredits(row, out var credits))
+                if (!TryReadRow(row, out var rowDate, out var credits))
                 {
-                    continue;
+                    return InvalidResult();
                 }
 
                 includedCredits += credits;
-                if (row.TryGetProperty("date", out var date) &&
-                    date.ValueKind == JsonValueKind.String &&
-                    DateOnly.TryParseExact(
-                        date.GetString(),
-                        "yyyy-MM-dd",
-                        CultureInfo.InvariantCulture,
-                        DateTimeStyles.None,
-                        out var rowDate) &&
-                    rowDate == segmentStartDate)
+                if (rowDate == segmentStartDate)
                 {
                     startDayCredits += credits;
                 }
@@ -97,10 +89,22 @@ public static class PeriodQuotaEstimator
         }
     }
 
-    private static bool TryReadCredits(JsonElement row, out decimal credits)
+    private static bool TryReadRow(
+        JsonElement row,
+        out DateOnly date,
+        out decimal credits)
     {
+        date = default;
         credits = default;
         return row.ValueKind == JsonValueKind.Object &&
+            row.TryGetProperty("date", out var dateValue) &&
+            dateValue.ValueKind == JsonValueKind.String &&
+            DateOnly.TryParseExact(
+                dateValue.GetString(),
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out date) &&
             row.TryGetProperty("totals", out var totals) &&
             totals.ValueKind == JsonValueKind.Object &&
             totals.TryGetProperty("credits", out var value) &&

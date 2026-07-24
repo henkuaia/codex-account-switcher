@@ -25,7 +25,7 @@ public sealed class QuotaEstimateLedgerServiceTests
     }
 
     [Fact]
-    public async Task Version_one_round_trips_complete_state_without_temp_residue()
+    public async Task Current_version_round_trips_complete_state_and_checkpoints_without_temp_residue()
     {
         using var directory = new TemporaryDirectory();
         var path = Path.Combine(directory.Path, "quota-estimate-ledger.json");
@@ -63,10 +63,17 @@ public sealed class QuotaEstimateLedgerServiceTests
         Assert.Equal(6m, observation.UpperUsd);
         Assert.Equal(QuotaEstimateSource.Local, observation.Source);
         Assert.Equal(QuotaObservationKind.FullSegment, observation.Kind);
+        var checkpoint = Assert.Single(result.State.FileCheckpoints).Value;
+        Assert.Equal("2026/07/session.jsonl", checkpoint.RelativePath);
+        Assert.Equal(123, checkpoint.CompletedLineByteOffset);
+        Assert.Equal("gpt-5.4", checkpoint.Model);
+        Assert.Equal("priority", checkpoint.ServiceTier);
+        Assert.Equal(CodexCreditRateCard.Version, checkpoint.RateCardVersion);
+        Assert.Single(checkpoint.Aggregates);
         Assert.Empty(Directory.GetFiles(directory.Path, "*.tmp"));
 
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
-        Assert.Equal(1, document.RootElement.GetProperty("schemaVersion").GetInt32());
+        Assert.Equal(2, document.RootElement.GetProperty("schemaVersion").GetInt32());
     }
 
     [Fact]
@@ -81,8 +88,12 @@ public sealed class QuotaEstimateLedgerServiceTests
         using var document = JsonDocument.Parse(await File.ReadAllTextAsync(path));
         var propertyNames = EnumeratePropertyNames(document.RootElement).ToArray();
         var forbidden = new[] { "email", "token", "prompt", "response", "header", "raw", "json" };
-        Assert.DoesNotContain(propertyNames, name =>
-            forbidden.Any(term => name.Contains(term, StringComparison.OrdinalIgnoreCase)));
+        var forbiddenNames = propertyNames.Where(name =>
+            !name.EndsWith(".jsonl", StringComparison.OrdinalIgnoreCase) &&
+            forbidden.Any(term => name.Contains(term, StringComparison.OrdinalIgnoreCase))).ToArray();
+        Assert.True(
+            forbiddenNames.Length == 0,
+            $"Forbidden serialized properties: {string.Join(", ", forbiddenNames)}");
     }
 
     [Fact]
@@ -136,6 +147,30 @@ public sealed class QuotaEstimateLedgerServiceTests
 
         await Assert.ThrowsAsync<ArgumentException>(() =>
             service.SaveAsync(invalid, default));
+    }
+
+    [Fact]
+    public async Task Save_rejects_absolute_or_parent_traversal_checkpoint_paths()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new QuotaEstimateLedgerService(
+            Path.Combine(directory.Path, "quota-estimate-ledger.json"));
+        var checkpoint = CreateCheckpoint();
+
+        foreach (var relativePath in new[] { @"C:\secret\session.jsonl", "../session.jsonl" })
+        {
+            var invalid = QuotaEstimateLedgerState.Empty with
+            {
+                FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                    StringComparer.Ordinal)
+                {
+                    [relativePath] = checkpoint with { RelativePath = relativePath },
+                },
+            };
+
+            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+                service.SaveAsync(invalid, default));
+        }
     }
 
     [Fact]
@@ -379,6 +414,94 @@ public sealed class QuotaEstimateLedgerServiceTests
         Assert.Null(activation.EndedAt);
     }
 
+    [Fact]
+    public void Repeated_registry_observation_without_activation_marker_is_idempotent()
+    {
+        var registry = CreateRegistry("account-a", activatedAt: null);
+        var first = QuotaEstimateLedgerService.ObserveRegistry(
+            QuotaEstimateLedgerState.Empty,
+            registry,
+            DateTimeOffset.Parse("2026-07-24T05:00:00Z"));
+
+        var result = QuotaEstimateLedgerService.ObserveRegistry(
+            first,
+            registry,
+            DateTimeOffset.Parse("2026-07-24T05:30:00Z"));
+
+        var activation = Assert.Single(result.Accounts["account-a"].Activations);
+        Assert.Equal(DateTimeOffset.Parse("2026-07-24T05:00:00Z"), activation.StartedAt);
+        Assert.Null(activation.EndedAt);
+    }
+
+    [Fact]
+    public void Registry_observation_without_an_active_account_closes_the_open_interval()
+    {
+        var first = QuotaEstimateLedgerService.ObserveRegistry(
+            QuotaEstimateLedgerState.Empty,
+            CreateRegistry("account-a", DateTimeOffset.Parse("2026-07-24T04:00:00Z")),
+            DateTimeOffset.Parse("2026-07-24T05:00:00Z"));
+        var noActive = new AccountRegistry(
+            3,
+            null,
+            CreateRegistry("account-a", null).Accounts);
+        var observedAt = DateTimeOffset.Parse("2026-07-24T05:30:00Z");
+
+        var result = QuotaEstimateLedgerService.ObserveRegistry(
+            first,
+            noActive,
+            observedAt);
+
+        var activation = Assert.Single(result.Accounts["account-a"].Activations);
+        Assert.Equal(observedAt, activation.EndedAt);
+    }
+
+    [Fact]
+    public void Registry_observation_preserves_incremental_file_checkpoints()
+    {
+        var state = CreateState();
+        var noActive = new AccountRegistry(
+            3,
+            null,
+            CreateRegistry("account-a", null).Accounts);
+
+        var result = QuotaEstimateLedgerService.ObserveRegistry(
+            state,
+            noActive,
+            DateTimeOffset.Parse("2026-07-24T05:30:00Z"));
+
+        Assert.Same(
+            state.FileCheckpoints["2026/07/session.jsonl"],
+            result.FileCheckpoints["2026/07/session.jsonl"]);
+    }
+
+    [Fact]
+    public void Newer_same_account_activation_marker_closes_and_reopens_the_interval()
+    {
+        var first = QuotaEstimateLedgerService.ObserveRegistry(
+            QuotaEstimateLedgerState.Empty,
+            CreateRegistry("account-a", DateTimeOffset.Parse("2026-07-24T04:00:00Z")),
+            DateTimeOffset.Parse("2026-07-24T05:00:00Z"));
+        var reactivatedAt = DateTimeOffset.Parse("2026-07-24T05:30:00Z");
+
+        var result = QuotaEstimateLedgerService.ObserveRegistry(
+            first,
+            CreateRegistry("account-a", reactivatedAt),
+            reactivatedAt.AddMinutes(1));
+
+        Assert.Collection(
+            result.Accounts["account-a"].Activations,
+            activation =>
+            {
+                Assert.Equal(DateTimeOffset.Parse("2026-07-24T04:00:00Z"), activation.StartedAt);
+                Assert.Equal(reactivatedAt, activation.EndedAt);
+            },
+            activation =>
+            {
+                Assert.Equal(reactivatedAt, activation.StartedAt);
+                Assert.Null(activation.EndedAt);
+            });
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -411,7 +534,36 @@ public sealed class QuotaEstimateLedgerServiceTests
                         DateTimeOffset.Parse("2026-07-20T03:00:00Z"),
                         null),
                 ],
-                [CreateObservation()]));
+                [CreateObservation()])) with
+        {
+            FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                StringComparer.Ordinal)
+            {
+                ["2026/07/session.jsonl"] = CreateCheckpoint(),
+            },
+        };
+
+    private static LocalUsageFileCheckpoint CreateCheckpoint() => new(
+        RelativePath: "2026/07/session.jsonl",
+        CompletedLineByteOffset: 123,
+        LastKnownLength: 123,
+        CreationTimeUtc: DateTimeOffset.Parse("2026-07-24T04:00:00Z"),
+        LastWriteTimeUtc: DateTimeOffset.Parse("2026-07-24T05:00:00Z"),
+        PrefixLength: 64,
+        PrefixSha256: new string('a', 64),
+        CompletedTailLength: 64,
+        CompletedTailSha256: new string('b', 64),
+        Model: "gpt-5.4",
+        ServiceTier: "priority",
+        Aggregates:
+        [
+            new LocalUsageAggregate(
+                DateTimeOffset.Parse("2026-07-24T04:30:00Z"),
+                Credits: 1.25m,
+                CreditPricingFailureReason.None),
+        ],
+        InvalidLineCount: 0,
+        RateCardVersion: CodexCreditRateCard.Version);
 
     private static QuotaUsageObservation CreateObservation() => new(
         new QuotaSegment(QuotaPeriod.Weekly, SegmentStart, Reset),

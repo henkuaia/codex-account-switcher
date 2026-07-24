@@ -6,6 +6,14 @@ public enum QuotaEstimateQuality { None, Initial, MultiPoint }
 
 public enum QuotaObservationKind { FullSegment, Delta }
 
+public enum CreditPricingFailureReason
+{
+    None,
+    UnknownModel,
+    UnknownServiceTier,
+    InvalidUsage,
+}
+
 public sealed record LocalUsageEvent(
     DateTimeOffset Timestamp,
     string Model,
@@ -13,6 +21,27 @@ public sealed record LocalUsageEvent(
     long InputTokens,
     long CachedInputTokens,
     long OutputTokens);
+
+public sealed record LocalUsageAggregate(
+    DateTimeOffset Timestamp,
+    decimal Credits,
+    CreditPricingFailureReason FailureReason);
+
+public sealed record LocalUsageFileCheckpoint(
+    string RelativePath,
+    long CompletedLineByteOffset,
+    long LastKnownLength,
+    DateTimeOffset CreationTimeUtc,
+    DateTimeOffset LastWriteTimeUtc,
+    int PrefixLength,
+    string PrefixSha256,
+    int CompletedTailLength,
+    string CompletedTailSha256,
+    string Model,
+    string ServiceTier,
+    IReadOnlyList<LocalUsageAggregate> Aggregates,
+    int InvalidLineCount,
+    string RateCardVersion);
 
 public sealed record AccountActivationInterval(
     DateTimeOffset StartedAt,
@@ -33,7 +62,18 @@ public sealed record QuotaUsageObservation(
     decimal? LowerUsd,
     decimal? UpperUsd,
     QuotaEstimateSource Source,
-    QuotaObservationKind Kind);
+    QuotaObservationKind Kind)
+{
+    public bool IsLocalScanComplete { get; init; } = true;
+
+    public int MalformedLineCount { get; init; }
+
+    public int SkippedFileCount { get; init; }
+
+    public string? RateCardVersion { get; init; }
+
+    public DateTimeOffset? ActivationStartedAt { get; init; }
+}
 
 public sealed record AccountQuotaEstimateLedger(
     IReadOnlyList<AccountActivationInterval> Activations,
@@ -42,6 +82,9 @@ public sealed record AccountQuotaEstimateLedger(
 public sealed record QuotaEstimateLedgerState(
     IReadOnlyDictionary<string, AccountQuotaEstimateLedger> Accounts)
 {
+    public IReadOnlyDictionary<string, LocalUsageFileCheckpoint> FileCheckpoints { get; init; } =
+        new Dictionary<string, LocalUsageFileCheckpoint>(StringComparer.Ordinal);
+
     public static QuotaEstimateLedgerState Empty { get; } = new(
         new Dictionary<string, AccountQuotaEstimateLedger>(StringComparer.Ordinal));
 }

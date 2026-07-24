@@ -402,6 +402,9 @@ public sealed class MainWindowViewModel : ObservableObject
             _registry.Accounts.ToArray(),
             new InlineProgress<QuotaUpdate>(updates.Add),
             cancellationToken);
+        var refreshWarning = updates
+            .Select(update => update.Warning)
+            .LastOrDefault(warning => !string.IsNullOrWhiteSpace(warning));
         await _dispatcher.InvokeAsync(
             () =>
             {
@@ -413,7 +416,7 @@ public sealed class MainWindowViewModel : ObservableObject
                         StringComparison.Ordinal))?.ApplyQuota(update);
                 }
 
-                StatusText = "额度刷新完成。";
+                StatusText = refreshWarning ?? "额度刷新完成。";
             },
             cancellationToken);
 
@@ -445,7 +448,9 @@ public sealed class MainWindowViewModel : ObservableObject
             exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             await _dispatcher.InvokeAsync(
-                () => StatusText = "额度刷新完成，但本地缓存失败。",
+                () => StatusText = refreshWarning is null
+                    ? "额度刷新完成，但本地缓存失败。"
+                    : $"{refreshWarning}；额度刷新完成，但本地缓存失败。",
                 CancellationToken.None);
         }
     }

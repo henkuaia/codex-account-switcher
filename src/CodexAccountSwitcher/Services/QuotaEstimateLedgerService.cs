@@ -10,7 +10,8 @@ public sealed record QuotaEstimateLedgerLoadResult(
 
 public sealed class QuotaEstimateLedgerService
 {
-    private const int CurrentSchemaVersion = 1;
+    private const int CurrentSchemaVersion = 2;
+    private const int LegacySchemaVersion = 1;
     private const string InvalidFileError = "本地额度估算账本无效，原文件已保留。";
     private const string UnsupportedVersionError = "本地额度估算账本版本不受支持，原文件已保留。";
     private const string ReadError = "本地额度估算账本暂时无法读取，原文件已保留。";
@@ -64,9 +65,15 @@ public sealed class QuotaEstimateLedgerService
                 return Blocked(InvalidFileError);
             }
 
-            if (document.SchemaVersion != CurrentSchemaVersion)
+            if (document.SchemaVersion is not CurrentSchemaVersion and not LegacySchemaVersion)
             {
                 return Blocked(UnsupportedVersionError);
+            }
+
+            if (document.SchemaVersion == CurrentSchemaVersion &&
+                document.FileCheckpoints is null)
+            {
+                return Blocked(InvalidFileError);
             }
 
             var accounts = new Dictionary<string, AccountQuotaEstimateLedger>(
@@ -79,7 +86,16 @@ public sealed class QuotaEstimateLedgerService
                 }
             }
 
-            var state = new QuotaEstimateLedgerState(accounts);
+            var checkpoints = document.FileCheckpoints is null
+                ? new Dictionary<string, LocalUsageFileCheckpoint>(StringComparer.Ordinal)
+                : document.FileCheckpoints.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.Ordinal);
+            var state = new QuotaEstimateLedgerState(accounts)
+            {
+                FileCheckpoints = checkpoints,
+            };
             if (!IsValid(state))
             {
                 return Blocked(InvalidFileError);
@@ -144,6 +160,10 @@ public sealed class QuotaEstimateLedgerService
                     pair => pair.Key,
                     pair => (AccountQuotaEstimateLedger?)pair.Value,
                     StringComparer.Ordinal),
+                FileCheckpoints = state.FileCheckpoints.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value,
+                    StringComparer.Ordinal),
             };
             await using (var stream = new FileStream(
                 temporaryPath,
@@ -193,9 +213,15 @@ public sealed class QuotaEstimateLedgerService
                 "Quota estimate ledger values are invalid.");
         }
 
+        var openActivation = state.Accounts
+            .SelectMany(pair => pair.Value.Activations.Select(
+                (activation, index) => new ActivationLocation(pair.Key, index, activation)))
+            .SingleOrDefault(item => item.Activation.EndedAt is null);
         if (registry.ActiveAccountKey is null)
         {
-            return state;
+            return openActivation is null
+                ? state
+                : CloseOpenActivation(state, openActivation, observedAt);
         }
 
         if (string.IsNullOrWhiteSpace(registry.ActiveAccountKey) ||
@@ -209,24 +235,23 @@ public sealed class QuotaEstimateLedgerService
                 nameof(registry));
         }
 
-        var openActivation = state.Accounts
-            .SelectMany(pair => pair.Value.Activations.Select(
-                (activation, index) => new ActivationLocation(pair.Key, index, activation)))
-            .SingleOrDefault(item => item.Activation.EndedAt is null);
+        var validRegistryActivatedAt = registry.ActiveAccountActivatedAt is { } registryActivatedAt &&
+            IsUtcTimestamp(registryActivatedAt) &&
+            registryActivatedAt <= observedAt
+                ? registryActivatedAt
+                : (DateTimeOffset?)null;
         if (openActivation is not null &&
             string.Equals(
                 openActivation.AccountKey,
                 registry.ActiveAccountKey,
-                StringComparison.Ordinal))
+                StringComparison.Ordinal) &&
+            (validRegistryActivatedAt is null ||
+             validRegistryActivatedAt <= openActivation.Activation.StartedAt))
         {
             return state;
         }
 
-        var activatedAt = registry.ActiveAccountActivatedAt is { } registryActivatedAt &&
-            IsUtcTimestamp(registryActivatedAt) &&
-            registryActivatedAt <= observedAt
-                ? registryActivatedAt
-                : observedAt;
+        var activatedAt = validRegistryActivatedAt ?? observedAt;
         var earliestAllowed = openActivation?.Activation.StartedAt ??
             state.Accounts
                 .SelectMany(pair => pair.Value.Activations)
@@ -270,7 +295,32 @@ public sealed class QuotaEstimateLedgerService
                 .Append(new AccountActivationInterval(activatedAt, null))
                 .ToArray(),
         };
-        return new QuotaEstimateLedgerState(accounts);
+        return state with { Accounts = accounts };
+    }
+
+    private static QuotaEstimateLedgerState CloseOpenActivation(
+        QuotaEstimateLedgerState state,
+        ActivationLocation openActivation,
+        DateTimeOffset endedAt)
+    {
+        if (endedAt <= openActivation.Activation.StartedAt)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(endedAt),
+                "Registry observations must advance activation history.");
+        }
+
+        var accounts = state.Accounts.ToDictionary(
+            pair => pair.Key,
+            pair => pair.Value,
+            StringComparer.Ordinal);
+        var previousLedger = accounts[openActivation.AccountKey];
+        var activations = previousLedger.Activations.ToArray();
+        activations[openActivation.Index] =
+            openActivation.Activation with { EndedAt = endedAt };
+        accounts[openActivation.AccountKey] =
+            previousLedger with { Activations = activations };
+        return state with { Accounts = accounts };
     }
 
     private static QuotaEstimateLedgerLoadResult Empty() =>
@@ -295,7 +345,9 @@ public sealed class QuotaEstimateLedgerService
 
     private static bool IsValid(QuotaEstimateLedgerState state)
     {
-        if (state.Accounts is null)
+        if (state.Accounts is null ||
+            state.FileCheckpoints is null ||
+            !AreValidCheckpoints(state.FileCheckpoints))
         {
             return false;
         }
@@ -371,8 +423,12 @@ public sealed class QuotaEstimateLedgerService
                 observation.UsedPercent is < 0 or > 100 ||
                 !double.IsFinite(observation.PercentResolution) ||
                 observation.PercentResolution <= 0 ||
-                observation.AttributedCredits < 0 ||
-                !HasValidBounds(observation.LowerUsd, observation.UpperUsd) ||
+                 observation.AttributedCredits < 0 ||
+                 observation.MalformedLineCount < 0 ||
+                 observation.SkippedFileCount < 0 ||
+                 observation.ActivationStartedAt is { } activationStartedAt &&
+                 !IsUtcTimestamp(activationStartedAt) ||
+                 !HasValidBounds(observation.LowerUsd, observation.UpperUsd) ||
                 !Enum.IsDefined(observation.Source) ||
                 !Enum.IsDefined(observation.Kind))
             {
@@ -383,6 +439,67 @@ public sealed class QuotaEstimateLedgerService
         }
 
         return true;
+    }
+
+    private static bool AreValidCheckpoints(
+        IReadOnlyDictionary<string, LocalUsageFileCheckpoint> checkpoints)
+    {
+        foreach (var (relativePath, checkpoint) in checkpoints)
+        {
+            if (checkpoint is null ||
+                !string.Equals(
+                    relativePath,
+                    checkpoint.RelativePath,
+                    StringComparison.Ordinal) ||
+                !IsSafeRelativePath(relativePath) ||
+                checkpoint.CompletedLineByteOffset < 0 ||
+                checkpoint.LastKnownLength < checkpoint.CompletedLineByteOffset ||
+                !IsUtcTimestamp(checkpoint.CreationTimeUtc) ||
+                !IsUtcTimestamp(checkpoint.LastWriteTimeUtc) ||
+                checkpoint.PrefixLength < 0 ||
+                checkpoint.PrefixLength > checkpoint.LastKnownLength ||
+                checkpoint.PrefixSha256 is null ||
+                checkpoint.PrefixSha256.Length != 64 ||
+                checkpoint.PrefixSha256.Any(character => !Uri.IsHexDigit(character)) ||
+                checkpoint.CompletedTailLength < 0 ||
+                checkpoint.CompletedTailLength > checkpoint.CompletedLineByteOffset ||
+                checkpoint.CompletedTailSha256 is null ||
+                checkpoint.CompletedTailSha256.Length != 64 ||
+                checkpoint.CompletedTailSha256.Any(character => !Uri.IsHexDigit(character)) ||
+                checkpoint.Model is null ||
+                checkpoint.ServiceTier is null ||
+                checkpoint.Aggregates is null ||
+                checkpoint.InvalidLineCount < 0 ||
+                string.IsNullOrWhiteSpace(checkpoint.RateCardVersion) ||
+                checkpoint.Aggregates.Any(aggregate =>
+                    aggregate is null ||
+                    !IsUtcTimestamp(aggregate.Timestamp) ||
+                    aggregate.Credits < 0 ||
+                    !Enum.IsDefined(aggregate.FailureReason) ||
+                    aggregate.FailureReason != CreditPricingFailureReason.None &&
+                    aggregate.Credits != 0))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool IsSafeRelativePath(string relativePath)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath) ||
+            Path.IsPathRooted(relativePath) ||
+            relativePath.Contains('\\', StringComparison.Ordinal) ||
+            relativePath.Contains(':', StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var segments = relativePath.Split('/');
+        return segments.All(segment =>
+            !string.IsNullOrWhiteSpace(segment) &&
+            segment is not "." and not "..");
     }
 
     private static bool HasValidBounds(decimal? lower, decimal? upper) =>
@@ -399,6 +516,8 @@ public sealed class QuotaEstimateLedgerService
         public int SchemaVersion { get; set; }
 
         public Dictionary<string, AccountQuotaEstimateLedger?>? Accounts { get; set; }
+
+        public Dictionary<string, LocalUsageFileCheckpoint>? FileCheckpoints { get; set; }
     }
 
     private sealed record ActivationLocation(

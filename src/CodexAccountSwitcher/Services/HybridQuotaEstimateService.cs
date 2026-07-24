@@ -17,6 +17,8 @@ public sealed record HybridQuotaRefreshContext(
     public QuotaEstimateLedgerState Ledger { get; internal set; } = Ledger;
 
     internal bool HasChanges { get; set; }
+
+    internal string? PersistenceWarning { get; set; }
 }
 
 public sealed class HybridQuotaEstimateService
@@ -27,6 +29,7 @@ public sealed class HybridQuotaEstimateService
 
     private readonly Func<
         DateTimeOffset,
+        IReadOnlyDictionary<string, LocalUsageFileCheckpoint>,
         CancellationToken,
         Task<LocalUsageCollectionResult>> _collectAsync;
     private readonly Func<
@@ -39,9 +42,11 @@ public sealed class HybridQuotaEstimateService
     private readonly CodexCreditRateCard _rateCard;
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly SemaphoreSlim _registryLock = new(1, 1);
+    private readonly List<PendingRegistryObservation> _pendingRegistryObservations = [];
     private QuotaEstimateLedgerState? _registryLedger;
     private string? _registryLoadError;
     private bool _registryLoadAttempted;
+    private bool _hasPendingSave;
 
     public HybridQuotaEstimateService(
         LocalCodexUsageCollector collector,
@@ -73,6 +78,31 @@ public sealed class HybridQuotaEstimateService
         CodexCreditRateCard rateCard,
         Func<DateTimeOffset>? utcNow = null)
     {
+        ArgumentNullException.ThrowIfNull(collectAsync);
+        _collectAsync = (earliestUtc, _, cancellationToken) =>
+            collectAsync(earliestUtc, cancellationToken);
+        _loadAsync = loadAsync ?? throw new ArgumentNullException(nameof(loadAsync));
+        _saveAsync = saveAsync ?? throw new ArgumentNullException(nameof(saveAsync));
+        _rateCard = rateCard ?? throw new ArgumentNullException(nameof(rateCard));
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    internal HybridQuotaEstimateService(
+        Func<
+            DateTimeOffset,
+            IReadOnlyDictionary<string, LocalUsageFileCheckpoint>,
+            CancellationToken,
+            Task<LocalUsageCollectionResult>> collectAsync,
+        Func<
+            CancellationToken,
+            Task<QuotaEstimateLedgerLoadResult>> loadAsync,
+        Func<
+            QuotaEstimateLedgerState,
+            CancellationToken,
+            Task> saveAsync,
+        CodexCreditRateCard rateCard,
+        Func<DateTimeOffset>? utcNow = null)
+    {
         _collectAsync = collectAsync ?? throw new ArgumentNullException(nameof(collectAsync));
         _loadAsync = loadAsync ?? throw new ArgumentNullException(nameof(loadAsync));
         _saveAsync = saveAsync ?? throw new ArgumentNullException(nameof(saveAsync));
@@ -84,9 +114,35 @@ public sealed class HybridQuotaEstimateService
         CancellationToken cancellationToken)
     {
         var now = RequireUtc(_utcNow());
-        var localUsage = await _collectAsync(now.AddDays(-32), cancellationToken);
-        var loaded = await _loadAsync(cancellationToken);
-        return new HybridQuotaRefreshContext(localUsage, loaded.State);
+        QuotaEstimateLedgerState loadedState;
+        string? loadError;
+        await _registryLock.WaitAsync(cancellationToken);
+        try
+        {
+            await EnsureRegistryLedgerLoadedAsync(cancellationToken);
+            loadedState = _registryLedger!;
+            loadError = _registryLoadError;
+        }
+        finally
+        {
+            _registryLock.Release();
+        }
+
+        var localUsage = await _collectAsync(
+            now.AddDays(-32),
+            loadedState.FileCheckpoints,
+            cancellationToken);
+        var ledger = loadedState with
+        {
+            FileCheckpoints = localUsage.FileCheckpoints,
+        };
+        return new HybridQuotaRefreshContext(localUsage, ledger)
+        {
+            HasChanges = localUsage.HasCheckpointChanges,
+            PersistenceWarning = loadError is null
+                ? null
+                : $"{loadError} 本次本地估算结果尚未保存。",
+        };
     }
 
     public QuotaDisplay ApplyObservation(
@@ -114,6 +170,10 @@ public sealed class HybridQuotaEstimateService
 
         var observedAt = RequireUtc(serverNow);
         var statuses = new List<string>();
+        if (!string.IsNullOrWhiteSpace(context.PersistenceWarning))
+        {
+            statuses.Add(context.PersistenceWarning);
+        }
         var source = QuotaEstimateSource.Local;
         QuotaUsageObservation observation;
 
@@ -122,7 +182,7 @@ public sealed class HybridQuotaEstimateService
         {
             source = QuotaEstimateSource.Analytics;
             var estimate = analytics.UpperCredits > 0
-                ? QuotaEstimateMath.TryCreateFullInterval(
+                ? QuotaEstimateMath.TryCreateFullIntervalPrecise(
                     analytics.LowerCredits,
                     analytics.UpperCredits,
                     display.UsedPercent,
@@ -140,22 +200,13 @@ public sealed class HybridQuotaEstimateService
         }
         else if (analyticsAvailability == AnalyticsAvailability.NotRequested)
         {
-            var hasFullCoverage = HasFullSegmentCoverage(
-                context.Ledger,
-                account.AccountKey,
-                segment.SegmentStart,
-                observedAt);
-            observation = CreateObservation(
+            observation = CreateLocalObservation(
+                context,
+                account,
+                display,
                 segment,
                 observedAt,
-                display.UsedPercent,
-                attributedCredits: 0m,
-                hasFullCoverage,
-                estimate: null,
-                source,
-                hasFullCoverage
-                    ? QuotaObservationKind.FullSegment
-                    : QuotaObservationKind.Delta);
+                statuses);
         }
         else
         {
@@ -171,11 +222,22 @@ public sealed class HybridQuotaEstimateService
 
         AppendObservation(context, account.AccountKey, observation);
         var accountLedger = context.Ledger.Accounts[account.AccountKey];
-        var intersection = QuotaEstimateMath.IntersectRecentCompatible(
-            accountLedger.Observations
-                .Where(item => item.Source == source)
-                .ToArray(),
-            segment);
+        var intersection =
+            source == QuotaEstimateSource.Local &&
+            !observation.IsLocalScanComplete
+                ? null
+                : QuotaEstimateMath.IntersectRecentCompatible(
+                    accountLedger.Observations
+                        .Where(item =>
+                            item.Source == source &&
+                            (source != QuotaEstimateSource.Local ||
+                             string.Equals(
+                                 item.RateCardVersion,
+                                 observation.RateCardVersion,
+                                 StringComparison.Ordinal) &&
+                             item.ActivationStartedAt == observation.ActivationStartedAt))
+                        .ToArray(),
+                    segment);
         if (intersection?.IgnoredConflictingHistory == true)
         {
             statuses.Add("历史观测不一致，已忽略较早冲突记录");
@@ -194,31 +256,51 @@ public sealed class HybridQuotaEstimateService
         };
     }
 
-    public async Task CompleteRefreshAsync(
+    public async Task<string?> CompleteRefreshAsync(
         HybridQuotaRefreshContext context,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
-        if (context.HasChanges)
+        if (!context.HasChanges && !_hasPendingSave)
         {
-            await _registryLock.WaitAsync(cancellationToken);
+            return context.PersistenceWarning;
+        }
+
+        await _registryLock.WaitAsync(cancellationToken);
+        try
+        {
+            var stateToSave = _registryLedger is not null
+                ? MergeObservations(_registryLedger, context.Ledger)
+                : context.Ledger;
+            context.Ledger = stateToSave;
+            _registryLedger = stateToSave;
+            _registryLoadAttempted = true;
+            _hasPendingSave = true;
             try
             {
-                var stateToSave = _registryLoadAttempted &&
-                    _registryLedger is not null
-                        ? MergeObservations(_registryLedger, context.Ledger)
-                        : context.Ledger;
                 await _saveAsync(stateToSave, cancellationToken);
-                context.Ledger = stateToSave;
-                _registryLedger = stateToSave;
-                _registryLoadError = null;
-                _registryLoadAttempted = true;
-                context.HasChanges = false;
             }
-            finally
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                _registryLock.Release();
+                throw;
             }
+            catch (Exception exception) when (IsPersistenceFailure(exception))
+            {
+                context.PersistenceWarning =
+                    $"{LedgerSaveError} 本次本地估算结果未保存，将稍后重试。";
+                return context.PersistenceWarning;
+            }
+
+            _registryLoadError = null;
+            _hasPendingSave = false;
+            _pendingRegistryObservations.Clear();
+            context.HasChanges = false;
+            context.PersistenceWarning = null;
+            return null;
+        }
+        finally
+        {
+            _registryLock.Release();
         }
     }
 
@@ -230,31 +312,50 @@ public sealed class HybridQuotaEstimateService
         await _registryLock.WaitAsync(cancellationToken);
         try
         {
-            if (!_registryLoadAttempted)
+            await EnsureRegistryLedgerLoadedAsync(cancellationToken);
+
+            var previous = _registryLedger!;
+            var observedAt = RequireUtc(_utcNow());
+            var hadLoadError = _registryLoadError is not null;
+            var updated = QuotaEstimateLedgerService.ObserveRegistry(
+                previous,
+                registry,
+                observedAt);
+            if (hadLoadError)
             {
-                var loaded = await _loadAsync(cancellationToken);
-                _registryLedger = loaded.State;
-                _registryLoadError = loaded.Error;
-                _registryLoadAttempted = true;
+                _pendingRegistryObservations.Add(
+                    new PendingRegistryObservation(registry, observedAt));
             }
 
-            if (_registryLoadError is not null)
+            if (!ReferenceEquals(previous, updated))
+            {
+                _registryLedger = updated;
+                _hasPendingSave = true;
+            }
+
+            if (!_hasPendingSave)
             {
                 return _registryLoadError;
             }
 
-            var previous = _registryLedger!;
-            var updated = QuotaEstimateLedgerService.ObserveRegistry(
-                previous,
-                registry,
-                RequireUtc(_utcNow()));
-            if (ReferenceEquals(previous, updated))
+            try
             {
-                return null;
+                await _saveAsync(_registryLedger!, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception) when (IsPersistenceFailure(exception))
+            {
+                return AppendStatus(
+                    _registryLoadError,
+                    $"{LedgerSaveError} 本次本地状态未保存，将稍后重试。");
             }
 
-            await _saveAsync(updated, cancellationToken);
-            _registryLedger = updated;
+            _hasPendingSave = false;
+            _registryLoadError = null;
+            _pendingRegistryObservations.Clear();
             return null;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -279,6 +380,38 @@ public sealed class HybridQuotaEstimateService
         }
     }
 
+    private async Task EnsureRegistryLedgerLoadedAsync(
+        CancellationToken cancellationToken)
+    {
+        if (_registryLoadAttempted && _registryLoadError is null)
+        {
+            return;
+        }
+
+        var loaded = await _loadAsync(cancellationToken);
+        if (!_registryLoadAttempted || _registryLedger is null)
+        {
+            _registryLedger = loaded.State;
+        }
+        else if (loaded.Error is null)
+        {
+            var recovered = loaded.State;
+            foreach (var pending in _pendingRegistryObservations)
+            {
+                recovered = QuotaEstimateLedgerService.ObserveRegistry(
+                    recovered,
+                    pending.Registry,
+                    pending.ObservedAt);
+            }
+
+            _registryLedger = MergeObservations(recovered, _registryLedger);
+            _pendingRegistryObservations.Clear();
+        }
+
+        _registryLoadError = loaded.Error;
+        _registryLoadAttempted = true;
+    }
+
     private QuotaUsageObservation CreateLocalObservation(
         HybridQuotaRefreshContext context,
         AccountRecord account,
@@ -289,7 +422,9 @@ public sealed class HybridQuotaEstimateService
     {
         var attributedCredits = 0m;
         var pricedCount = 0;
-        var unpricedCount = 0;
+        var unknownModelCount = 0;
+        var unknownTierCount = 0;
+        var invalidUsageCount = 0;
         if (!context.Ledger.Accounts.TryGetValue(
                 account.AccountKey,
                 out var existingLedger) ||
@@ -298,47 +433,64 @@ public sealed class HybridQuotaEstimateService
             statuses.Add("账号历史归属不明确，将从本次刷新开始记录");
         }
 
-        foreach (var usage in context.LocalUsage.Events)
+        foreach (var aggregate in GetAggregates(context.LocalUsage))
         {
-            if (usage.Timestamp < segment.SegmentStart ||
-                usage.Timestamp > observedAt ||
+            if (aggregate.Timestamp < segment.SegmentStart ||
+                aggregate.Timestamp > observedAt ||
                 !IsUnambiguouslyAttributed(
                     context.Ledger,
                     account.AccountKey,
-                    usage.Timestamp))
+                    aggregate.Timestamp))
             {
                 continue;
             }
 
-            if (_rateCard.TryCalculateCredits(usage, out var credits))
+            switch (aggregate.FailureReason)
             {
-                attributedCredits += credits;
-                pricedCount++;
-            }
-            else
-            {
-                unpricedCount++;
+                case CreditPricingFailureReason.None:
+                    attributedCredits += aggregate.Credits;
+                    pricedCount++;
+                    break;
+                case CreditPricingFailureReason.UnknownModel:
+                    unknownModelCount++;
+                    break;
+                case CreditPricingFailureReason.UnknownServiceTier:
+                    unknownTierCount++;
+                    break;
+                default:
+                    invalidUsageCount++;
+                    break;
             }
         }
 
-        var hasFullCoverage = HasFullSegmentCoverage(
+        var activation = FindUnambiguousActivation(
+            context.Ledger,
+            account.AccountKey,
+            observedAt);
+        var hasActivationCoverage = HasFullSegmentCoverage(
             context.Ledger,
             account.AccountKey,
             segment.SegmentStart,
             observedAt);
+        var hasFullCoverage =
+            context.LocalUsage.IsComplete && hasActivationCoverage;
         PeriodQuotaEstimate? estimate = null;
         var kind = hasFullCoverage
             ? QuotaObservationKind.FullSegment
             : QuotaObservationKind.Delta;
-        if (attributedCredits > 0 && hasFullCoverage)
+        if (context.LocalUsage.IsComplete &&
+            attributedCredits > 0 &&
+            hasFullCoverage)
         {
-            estimate = QuotaEstimateMath.TryCreateFullInterval(
+            estimate = QuotaEstimateMath.TryCreateFullIntervalPrecise(
                 attributedCredits,
                 attributedCredits,
                 display.UsedPercent,
                 PercentResolution);
         }
-        else if (attributedCredits > 0)
+        else if (context.LocalUsage.IsComplete &&
+            attributedCredits > 0 &&
+            activation is not null)
         {
             var earlier = context.Ledger.Accounts
                 .GetValueOrDefault(account.AccountKey)?
@@ -346,12 +498,18 @@ public sealed class HybridQuotaEstimateService
                 .Where(item =>
                     item.Segment == segment &&
                     item.Source == QuotaEstimateSource.Local &&
+                    item.IsLocalScanComplete &&
+                    string.Equals(
+                        item.RateCardVersion,
+                        CodexCreditRateCard.Version,
+                        StringComparison.Ordinal) &&
+                    item.ActivationStartedAt == activation?.StartedAt &&
                     item.ObservedAt < observedAt)
                 .OrderByDescending(item => item.ObservedAt)
                 .FirstOrDefault();
             if (earlier is not null)
             {
-                estimate = QuotaEstimateMath.TryCreateDeltaInterval(
+                estimate = QuotaEstimateMath.TryCreateDeltaIntervalPrecise(
                     attributedCredits - earlier.AttributedCredits,
                     earlier.UsedPercent,
                     earlier.PercentResolution,
@@ -360,9 +518,32 @@ public sealed class HybridQuotaEstimateService
             }
         }
 
+        if (!context.LocalUsage.IsComplete)
+        {
+            var partialDetails = new List<string>();
+            if (context.LocalUsage.SkippedFileCount > 0)
+            {
+                partialDetails.Add($"跳过 {context.LocalUsage.SkippedFileCount} 个文件");
+            }
+
+            if (context.LocalUsage.InvalidLineCount > 0)
+            {
+                partialDetails.Add($"忽略 {context.LocalUsage.InvalidLineCount} 行异常记录");
+            }
+
+            statuses.Add(partialDetails.Count == 0
+                ? "本机用量扫描不完整"
+                : $"本机用量扫描不完整（{string.Join("，", partialDetails)}）");
+        }
+
+        if (unknownTierCount > 0)
+        {
+            statuses.Add("速度模式未知，部分用量无法计价");
+        }
+
         if (pricedCount == 0)
         {
-            statuses.Add(unpricedCount > 0
+            statuses.Add(unknownModelCount > 0 && unknownTierCount == 0
                 ? "当前模型暂无官方费率"
                 : "当前片段没有可计价的本机用量");
         }
@@ -371,7 +552,8 @@ public sealed class HybridQuotaEstimateService
             statuses.Add("已建立估算基线，继续使用后再次刷新");
         }
 
-        if (pricedCount > 0 && unpricedCount > 0)
+        if (pricedCount > 0 &&
+            unknownModelCount + unknownTierCount + invalidUsageCount > 0)
         {
             statuses.Add("部分用量无法计价，区间可能偏低");
         }
@@ -384,7 +566,12 @@ public sealed class HybridQuotaEstimateService
             hasFullCoverage,
             estimate,
             QuotaEstimateSource.Local,
-            kind);
+            kind,
+            context.LocalUsage.IsComplete,
+            context.LocalUsage.InvalidLineCount,
+            context.LocalUsage.SkippedFileCount,
+            CodexCreditRateCard.Version,
+            activation?.StartedAt);
     }
 
     private static QuotaUsageObservation CreateObservation(
@@ -395,7 +582,12 @@ public sealed class HybridQuotaEstimateService
         bool hasFullSegmentCoverage,
         PeriodQuotaEstimate? estimate,
         QuotaEstimateSource source,
-        QuotaObservationKind kind) =>
+        QuotaObservationKind kind,
+        bool isLocalScanComplete = true,
+        int malformedLineCount = 0,
+        int skippedFileCount = 0,
+        string? rateCardVersion = null,
+        DateTimeOffset? activationStartedAt = null) =>
         new(
             segment,
             observedAt,
@@ -406,7 +598,14 @@ public sealed class HybridQuotaEstimateService
             estimate?.LowerUsd,
             estimate?.UpperUsd,
             source,
-            kind);
+            kind)
+        {
+            IsLocalScanComplete = isLocalScanComplete,
+            MalformedLineCount = malformedLineCount,
+            SkippedFileCount = skippedFileCount,
+            RateCardVersion = rateCardVersion,
+            ActivationStartedAt = activationStartedAt,
+        };
 
     private static void AppendObservation(
         HybridQuotaRefreshContext context,
@@ -427,7 +626,7 @@ public sealed class HybridQuotaEstimateService
                 .OrderBy(item => item.ObservedAt)
                 .ToArray(),
         };
-        context.Ledger = new QuotaEstimateLedgerState(accounts);
+        context.Ledger = context.Ledger with { Accounts = accounts };
         context.HasChanges = true;
     }
 
@@ -447,6 +646,44 @@ public sealed class HybridQuotaEstimateService
             .ToArray();
         return matches.Length == 1 &&
             string.Equals(matches[0].Key, accountKey, StringComparison.Ordinal);
+    }
+
+    private IEnumerable<LocalUsageAggregate> GetAggregates(
+        LocalUsageCollectionResult localUsage)
+    {
+        if (localUsage.Aggregates.Count > 0 || localUsage.Events.Count == 0)
+        {
+            return localUsage.Aggregates;
+        }
+
+        return localUsage.Events.Select(usage =>
+        {
+            var calculation = _rateCard.CalculateCredits(usage);
+            return new LocalUsageAggregate(
+                usage.Timestamp,
+                calculation.Credits,
+                calculation.FailureReason);
+        });
+    }
+
+    private static AccountActivationInterval? FindUnambiguousActivation(
+        QuotaEstimateLedgerState ledger,
+        string accountKey,
+        DateTimeOffset timestamp)
+    {
+        var matches = ledger.Accounts
+            .SelectMany(pair => pair.Value.Activations.Select(
+                activation => (pair.Key, Activation: activation)))
+            .Where(item =>
+                item.Activation.StartedAt <= timestamp &&
+                (item.Activation.EndedAt is null ||
+                 timestamp < item.Activation.EndedAt.Value))
+            .Take(2)
+            .ToArray();
+        return matches.Length == 1 &&
+            string.Equals(matches[0].Key, accountKey, StringComparison.Ordinal)
+                ? matches[0].Activation
+                : null;
     }
 
     private static bool HasFullSegmentCoverage(
@@ -471,7 +708,7 @@ public sealed class HybridQuotaEstimateService
         }
 
         var covering = matchesAtStart[0].Activation;
-        if (covering.EndedAt is { } endedAt && endedAt < observedAt)
+        if (covering.EndedAt is { } endedAt && endedAt <= observedAt)
         {
             return false;
         }
@@ -537,13 +774,26 @@ public sealed class HybridQuotaEstimateService
             };
         }
 
-        return new QuotaEstimateLedgerState(accounts);
+        return new QuotaEstimateLedgerState(accounts)
+        {
+            FileCheckpoints = batch.FileCheckpoints,
+        };
     }
 
     private static string AppendStatus(string? existing, string status) =>
         string.IsNullOrWhiteSpace(existing)
             ? status
             : $"{existing}；{status}";
+
+    private static bool IsPersistenceFailure(Exception exception) =>
+        exception is IOException or
+            UnauthorizedAccessException or
+            InvalidOperationException or
+            OperationCanceledException;
+
+    private sealed record PendingRegistryObservation(
+        AccountRegistry Registry,
+        DateTimeOffset ObservedAt);
 
     private static DateTimeOffset RequireUtc(DateTimeOffset value)
     {

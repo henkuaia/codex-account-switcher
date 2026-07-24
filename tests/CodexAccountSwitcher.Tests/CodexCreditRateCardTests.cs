@@ -81,6 +81,21 @@ public sealed class CodexCreditRateCardTests
         Assert.Equal(0m, credits);
     }
 
+    [Fact]
+    public void Detailed_result_distinguishes_unknown_tier_from_unknown_model()
+    {
+        var card = new CodexCreditRateCard();
+
+        var unknownTier = card.CalculateCredits(
+            Usage("gpt-5.4", string.Empty, 1, 0, 1));
+        var unknownModel = card.CalculateCredits(
+            Usage("gpt-unknown", "default", 1, 0, 1));
+
+        Assert.False(string.IsNullOrWhiteSpace(CodexCreditRateCard.Version));
+        Assert.Equal(CreditPricingFailureReason.UnknownServiceTier, unknownTier.FailureReason);
+        Assert.Equal(CreditPricingFailureReason.UnknownModel, unknownModel.FailureReason);
+    }
+
     [Theory]
     [InlineData(10, 11, 0)]
     [InlineData(-1, 0, 0)]

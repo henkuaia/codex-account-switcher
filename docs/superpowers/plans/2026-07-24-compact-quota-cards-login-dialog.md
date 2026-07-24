@@ -295,7 +295,7 @@ spinner visibility, header close, and cancel control. Use WPF layout/runtime
 tests to cover 100%, 125%, and 150% scale constraints; do not change the user's
 Windows display settings.
 
-- [ ] **Step 5: Commit, push, and preserve the feature branch**
+- [x] **Step 5: Commit, push, and preserve the feature branch**
 
 ```powershell
 git add docs/superpowers/plans/2026-07-24-compact-quota-cards-login-dialog.md

@@ -34,7 +34,7 @@
 - Produces: `Task<QuotaCacheLoadResult> LoadAsync(CancellationToken cancellationToken)`.
 - Produces: `Task SaveAsync(IReadOnlyDictionary<string, QuotaCacheEntry> accounts, CancellationToken cancellationToken)`.
 
-- [ ] **Step 1: Write failing round-trip and preservation tests**
+- [x] **Step 1: Write failing round-trip and preservation tests**
 
 Create tests that construct a Monthly `QuotaDisplay` containing reset count,
 official limit, server time, and estimate bounds, then assert every field and
@@ -63,7 +63,7 @@ Cover a missing file, malformed JSON, empty account keys, invalid percentages,
 negative monetary values, inconsistent estimate bounds, and atomic save without
 temporary-file residue.
 
-- [ ] **Step 2: Run the cache tests and verify RED**
+- [x] **Step 2: Run the cache tests and verify RED**
 
 Run:
 
@@ -73,7 +73,7 @@ Run:
 
 Expected: compilation fails because the cache models and service do not exist.
 
-- [ ] **Step 3: Implement the minimal cache models and service**
+- [x] **Step 3: Implement the minimal cache models and service**
 
 Use schema version `1` and the default path:
 
@@ -89,13 +89,13 @@ writes, `FlushAsync`, atomic `File.Move(..., overwrite: true)`, and save blockin
 after an invalid existing document. Validate the complete graph before returning
 or saving it.
 
-- [ ] **Step 4: Run the cache tests and verify GREEN**
+- [x] **Step 4: Run the cache tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all `QuotaCacheServiceTests` pass.
 
-- [ ] **Step 5: Commit the cache service**
+- [x] **Step 5: Commit the cache service**
 
 ```powershell
 git add src/CodexAccountSwitcher/Models/QuotaCacheModels.cs src/CodexAccountSwitcher/Services/QuotaCacheService.cs tests/CodexAccountSwitcher.Tests/QuotaCacheServiceTests.cs
@@ -115,7 +115,7 @@ git commit -m "feat: persist successful quota snapshots"
 - Produces: `AccountRowViewModel.ApplyCachedQuota(QuotaCacheEntry entry, DateTimeOffset now)`.
 - A normal `ApplyQuota(QuotaUpdate)` call clears all cached/expired state.
 
-- [ ] **Step 1: Write failing row display tests**
+- [x] **Step 1: Write failing row display tests**
 
 Add tests for a future reset:
 
@@ -136,7 +136,7 @@ Add a reset at or before `now` and assert exact prefix
 `缓存已过期，需要刷新`. Then apply a live `QuotaUpdate` and assert the cached
 and expired text disappears.
 
-- [ ] **Step 2: Run the row tests and verify RED**
+- [x] **Step 2: Run the row tests and verify RED**
 
 Run:
 
@@ -146,7 +146,7 @@ Run:
 
 Expected: compilation fails because `ApplyCachedQuota` does not exist.
 
-- [ ] **Step 3: Implement cached quota display state**
+- [x] **Step 3: Implement cached quota display state**
 
 Make `ApplyCachedQuota` call the existing quota application path, then format:
 
@@ -163,13 +163,13 @@ when `ResetsAt <= now`; otherwise format:
 Do not change XAML layout. Ensure the next live `ApplyQuota` restores the
 existing live status and tooltip.
 
-- [ ] **Step 4: Run the row tests and verify GREEN**
+- [x] **Step 4: Run the row tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all `MainWindowViewModelTests` pass.
 
-- [ ] **Step 5: Commit the row behavior**
+- [x] **Step 5: Commit the row behavior**
 
 ```powershell
 git add src/CodexAccountSwitcher/ViewModels/AccountRowViewModel.cs tests/CodexAccountSwitcher.Tests/MainWindowViewModelTests.cs
@@ -191,7 +191,7 @@ git commit -m "feat: mark restored quota snapshots"
   - `Func<IReadOnlyDictionary<string, QuotaCacheEntry>, CancellationToken, Task> saveQuotaCacheAsync`.
 - Produces the same public commands and existing constructor behavior.
 
-- [ ] **Step 1: Write failing startup and refresh persistence tests**
+- [x] **Step 1: Write failing startup and refresh persistence tests**
 
 Add one startup test whose refresh delegate increments a counter. Load a cached
 entry, call `LoadAsync`, and assert:
@@ -212,7 +212,7 @@ Add refresh tests proving:
    cached entry;
 5. a renamed account restores by stable account key.
 
-- [ ] **Step 2: Run focused view-model tests and verify RED**
+- [x] **Step 2: Run focused view-model tests and verify RED**
 
 Run:
 
@@ -223,7 +223,7 @@ Run:
 Expected: constructor/cache assertions fail because the main view model does not
 load or save quota cache entries.
 
-- [ ] **Step 3: Implement startup restore and refresh merge**
+- [x] **Step 3: Implement startup restore and refresh merge**
 
 In `LoadRegistryAsync`, load registry, metadata, and cache without invoking the
 refresh delegate. Apply cached entries only to newly created rows or rows whose
@@ -242,13 +242,13 @@ failures (`IOException`, `UnauthorizedAccessException`,
 `InvalidOperationException`) so cancellation and programming errors are not
 hidden. Preserve the live display on failure.
 
-- [ ] **Step 4: Run focused view-model tests and verify GREEN**
+- [x] **Step 4: Run focused view-model tests and verify GREEN**
 
 Run the command from Step 2.
 
 Expected: all `MainWindowViewModelTests` pass.
 
-- [ ] **Step 5: Commit view-model orchestration**
+- [x] **Step 5: Commit view-model orchestration**
 
 ```powershell
 git add src/CodexAccountSwitcher/ViewModels/MainWindowViewModel.cs tests/CodexAccountSwitcher.Tests/MainWindowViewModelTests.cs
@@ -270,7 +270,7 @@ git commit -m "feat: restore cached quota on startup"
 - Consumes: `QuotaCacheService.CreateDefault()`.
 - Preserves the existing nine-file published artifact contract.
 
-- [ ] **Step 1: Write the failing production-wiring test**
+- [x] **Step 1: Write the failing production-wiring test**
 
 Update the WPF runtime construction test to require a `QuotaCacheService`
 dependency and assert initial loading does not invoke quota refresh. Run:
@@ -282,12 +282,12 @@ dependency and assert initial loading does not invoke quota refresh. Run:
 Expected: the wiring assertion fails until `App` creates and passes the cache
 service.
 
-- [ ] **Step 2: Wire the default cache service**
+- [x] **Step 2: Wire the default cache service**
 
 Create one `QuotaCacheService` during application startup and pass it into
 `MainWindowViewModel`. Add no background timer or startup refresh.
 
-- [ ] **Step 3: Run the complete Release suite**
+- [x] **Step 3: Run the complete Release suite**
 
 Run:
 
@@ -297,7 +297,7 @@ Run:
 
 Expected: every test passes with zero failures and zero skips.
 
-- [ ] **Step 4: Publish and verify artifacts**
+- [x] **Step 4: Publish and verify artifacts**
 
 Record SHA-256 for `%USERPROFILE%\.codex\auth.json` and existing account
 snapshots, then run:
@@ -309,7 +309,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\publish.ps1
 Verify exactly nine published files, helper/manifest hash agreement, no
 staging/backup residue, and unchanged authentication hashes.
 
-- [ ] **Step 5: Replace the installed build**
+- [x] **Step 5: Replace the installed build**
 
 Stop only `CodexAccountSwitcher.exe`, rename the existing installation to a
 timestamped sibling backup, copy the verified `dist\CodexAccountSwitcher` into
@@ -325,7 +325,7 @@ still shows `Not queried`. The user performs one manual refresh later; after tha
 refresh, a second application restart must restore the saved values without
 another endpoint call.
 
-- [ ] **Step 7: Commit, push, and preserve the feature branch**
+- [x] **Step 7: Commit, push, and preserve the feature branch**
 
 ```powershell
 git add src tests docs/superpowers/plans/2026-07-24-quota-cache-persistence.md
@@ -335,4 +335,3 @@ git -c http.proxy=http://127.0.0.1:7897 -c https.proxy=http://127.0.0.1:7897 pus
 
 Verify remote `main` equals local `HEAD`, the worktree is clean, and the local
 feature branch remains present.
-

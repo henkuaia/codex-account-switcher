@@ -54,6 +54,18 @@ public sealed class QuotaEstimateMathTests
     }
 
     [Fact]
+    public void Full_interval_returns_null_for_finite_unrepresentable_resolution()
+    {
+        var result = QuotaEstimateMath.TryCreateFullInterval(
+            lowerCredits: 100m,
+            upperCredits: 100m,
+            usedPercent: 25,
+            percentResolution: (double)decimal.MaxValue);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
     public void Delta_interval_sums_both_endpoint_uncertainties()
     {
         var result = QuotaEstimateMath.TryCreateDeltaInterval(
@@ -66,6 +78,35 @@ public sealed class QuotaEstimateMathTests
         Assert.NotNull(result);
         Assert.Equal(15.38m, result.LowerUsd);
         Assert.Equal(28.57m, result.UpperUsd);
+    }
+
+    [Fact]
+    public void Delta_interval_returns_null_for_finite_unrepresentable_resolution()
+    {
+        var result = QuotaEstimateMath.TryCreateDeltaInterval(
+            deltaCredits: 50m,
+            earlierPercent: 20,
+            earlierResolution: (double)decimal.MaxValue,
+            laterPercent: 30,
+            laterResolution: 1);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public void Delta_interval_handles_largest_nearby_convertible_resolutions()
+    {
+        var largeConvertibleResolution =
+            double.BitDecrement((double)decimal.MaxValue);
+
+        var result = QuotaEstimateMath.TryCreateDeltaInterval(
+            deltaCredits: 50m,
+            earlierPercent: 0,
+            earlierResolution: largeConvertibleResolution,
+            laterPercent: 100,
+            laterResolution: largeConvertibleResolution);
+
+        Assert.Null(result);
     }
 
     [Theory]

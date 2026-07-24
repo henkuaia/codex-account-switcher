@@ -26,17 +26,17 @@ public static class QuotaEstimateMath
             return null;
         }
 
-        var percent = (decimal)usedPercent;
-        var halfResolution = resolution / 2m;
-        var percentLow = percent - halfResolution;
-        var percentHigh = percent + halfResolution;
-        if (percentLow <= 0)
-        {
-            return null;
-        }
-
         try
         {
+            var percent = (decimal)usedPercent;
+            var halfResolution = resolution / 2m;
+            var percentLow = percent - halfResolution;
+            var percentHigh = percent + halfResolution;
+            if (percentLow <= 0)
+            {
+                return null;
+            }
+
             var lowerUsd = RoundUsd(lowerCredits / (percentHigh / 100m) * UsdPerCredit);
             var upperUsd = RoundUsd(upperCredits / (percentLow / 100m) * UsdPerCredit);
             return new PeriodQuotaEstimate(lowerUsd, upperUsd);
@@ -63,21 +63,21 @@ public static class QuotaEstimateMath
             return null;
         }
 
-        var earlier = (decimal)earlierPercent;
-        var later = (decimal)laterPercent;
-        var deltaPercentLow =
-            later - laterResolutionValue / 2m -
-            (earlier + earlierResolutionValue / 2m);
-        var deltaPercentHigh =
-            later + laterResolutionValue / 2m -
-            (earlier - earlierResolutionValue / 2m);
-        if (deltaPercentLow <= 0)
-        {
-            return null;
-        }
-
         try
         {
+            var earlier = (decimal)earlierPercent;
+            var later = (decimal)laterPercent;
+            var deltaPercentLow =
+                later - laterResolutionValue / 2m -
+                (earlier + earlierResolutionValue / 2m);
+            var deltaPercentHigh =
+                later + laterResolutionValue / 2m -
+                (earlier - earlierResolutionValue / 2m);
+            if (deltaPercentLow <= 0)
+            {
+                return null;
+            }
+
             var lowerUsd =
                 RoundUsd(deltaCredits / (deltaPercentHigh / 100m) * UsdPerCredit);
             var upperUsd =
@@ -145,14 +145,20 @@ public static class QuotaEstimateMath
     {
         resolution = default;
         if (!double.IsFinite(value) ||
-            value <= 0 ||
-            value > (double)decimal.MaxValue)
+            value <= 0)
         {
             return false;
         }
 
-        resolution = (decimal)value;
-        return true;
+        try
+        {
+            resolution = (decimal)value;
+            return true;
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
     }
 
     private static decimal RoundUsd(decimal value) =>

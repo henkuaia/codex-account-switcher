@@ -4,21 +4,39 @@ using CodexAccountSwitcher.Models;
 
 namespace CodexAccountSwitcher.Services;
 
+public enum AnalyticsUsageState { Valid, Empty, Invalid }
+
+public sealed record AnalyticsUsageParseResult(
+    AnalyticsUsageState State,
+    decimal LowerCredits,
+    decimal UpperCredits);
+
 public static class PeriodQuotaEstimator
 {
-    private const decimal UsdPerCredit = 40m / 1000m;
-
     public static PeriodQuotaEstimate? TryEstimate(
         string json,
         double usedPercent,
         DateOnly segmentStartDate,
         bool includeStartDayInLower)
     {
-        if (!double.IsFinite(usedPercent) || usedPercent <= 0 || usedPercent > 100)
-        {
-            return null;
-        }
+        var usage = Parse(json, segmentStartDate, includeStartDayInLower);
+        return usage.State != AnalyticsUsageState.Valid
+            ? null
+            : QuotaEstimateMath.TryCreateFullInterval(
+                usage.LowerCredits,
+                usage.UpperCredits,
+                usedPercent,
+                percentResolution: 1);
+    }
 
+    public static AnalyticsUsageParseResult Parse(string json) =>
+        Parse(json, default, includeStartDayInLower: true);
+
+    public static AnalyticsUsageParseResult Parse(
+        string json,
+        DateOnly segmentStartDate,
+        bool includeStartDayInLower)
+    {
         try
         {
             using var document = JsonDocument.Parse(json);
@@ -26,7 +44,15 @@ public static class PeriodQuotaEstimator
                 !document.RootElement.TryGetProperty("data", out var data) ||
                 data.ValueKind != JsonValueKind.Array)
             {
-                return null;
+                return InvalidResult();
+            }
+
+            if (data.GetArrayLength() == 0)
+            {
+                return new AnalyticsUsageParseResult(
+                    AnalyticsUsageState.Empty,
+                    LowerCredits: 0,
+                    UpperCredits: 0);
             }
 
             decimal includedCredits = 0;
@@ -53,23 +79,21 @@ public static class PeriodQuotaEstimator
                 }
             }
 
-            var usedRatio = (decimal)usedPercent / 100m;
             var lowerCredits = includeStartDayInLower
                 ? includedCredits
                 : Math.Max(0, includedCredits - startDayCredits);
-            var lowerUsd = RoundUsd(lowerCredits / usedRatio * UsdPerCredit);
-            var upperUsd = RoundUsd(includedCredits / usedRatio * UsdPerCredit);
-            return new PeriodQuotaEstimate(
-                Math.Min(lowerUsd, upperUsd),
-                Math.Max(lowerUsd, upperUsd));
+            return new AnalyticsUsageParseResult(
+                AnalyticsUsageState.Valid,
+                lowerCredits,
+                includedCredits);
         }
         catch (JsonException)
         {
-            return null;
+            return InvalidResult();
         }
         catch (OverflowException)
         {
-            return null;
+            return InvalidResult();
         }
     }
 
@@ -85,6 +109,6 @@ public static class PeriodQuotaEstimator
             credits >= 0;
     }
 
-    private static decimal RoundUsd(decimal value) =>
-        Math.Round(value, 2, MidpointRounding.AwayFromZero);
+    private static AnalyticsUsageParseResult InvalidResult() =>
+        new(AnalyticsUsageState.Invalid, LowerCredits: 0, UpperCredits: 0);
 }

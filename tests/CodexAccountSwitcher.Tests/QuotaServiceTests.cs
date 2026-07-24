@@ -62,8 +62,8 @@ public sealed class QuotaServiceTests
         var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
 
         Assert.Null(update.Error);
-        Assert.Equal(8m, update.Display!.EstimatedPeriodQuotaLowerUsd);
-        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(7.84m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24.49m, update.Display.EstimatedPeriodQuotaUpperUsd);
         var requests = handler.Requests.ToArray();
         Assert.Equal(2, requests.Length);
         Assert.Equal(
@@ -122,8 +122,8 @@ public sealed class QuotaServiceTests
 
         Assert.Null(update.Error);
         Assert.Equal(75, update.Display!.RemainingPercent);
-        Assert.Equal(16m, update.Display.EstimatedPeriodQuotaLowerUsd);
-        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(15.69m, update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24.49m, update.Display.EstimatedPeriodQuotaUpperUsd);
         var requests = handler.Requests.ToArray();
         Assert.Equal(3, requests.Length);
         Assert.Equal(
@@ -181,8 +181,8 @@ public sealed class QuotaServiceTests
         var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
 
         Assert.Null(update.Error);
-        Assert.Equal(24m, update.Display!.EstimatedPeriodQuotaLowerUsd);
-        Assert.Equal(24m, update.Display.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(23.53m, update.Display!.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(24.49m, update.Display.EstimatedPeriodQuotaUpperUsd);
         var requests = handler.Requests.ToArray();
         Assert.Equal(3, requests.Length);
         Assert.Equal(

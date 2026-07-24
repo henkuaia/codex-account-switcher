@@ -23,8 +23,8 @@ public sealed class PeriodQuotaEstimatorTests
             includeStartDayInLower: false);
 
         Assert.NotNull(estimate);
-        Assert.Equal(16m, estimate.LowerUsd);
-        Assert.Equal(24m, estimate.UpperUsd);
+        Assert.Equal(15.69m, estimate.LowerUsd);
+        Assert.Equal(24.49m, estimate.UpperUsd);
     }
 
     [Fact]
@@ -37,8 +37,8 @@ public sealed class PeriodQuotaEstimatorTests
             includeStartDayInLower: true);
 
         Assert.NotNull(estimate);
-        Assert.Equal(24m, estimate.LowerUsd);
-        Assert.Equal(24m, estimate.UpperUsd);
+        Assert.Equal(23.53m, estimate.LowerUsd);
+        Assert.Equal(24.49m, estimate.UpperUsd);
     }
 
     [Theory]
@@ -67,5 +67,45 @@ public sealed class PeriodQuotaEstimatorTests
             includeStartDayInLower: false);
 
         Assert.Null(estimate);
+    }
+
+    [Fact]
+    public void Parse_distinguishes_empty_invalid_and_valid_payloads()
+    {
+        Assert.Equal(
+            AnalyticsUsageState.Empty,
+            PeriodQuotaEstimator.Parse("""{"data":[]}""").State);
+        Assert.Equal(
+            AnalyticsUsageState.Invalid,
+            PeriodQuotaEstimator.Parse("""{"data":{}}""").State);
+        Assert.Equal(
+            AnalyticsUsageState.Valid,
+            PeriodQuotaEstimator.Parse(AnalyticsJson).State);
+    }
+
+    [Fact]
+    public void Parse_excludes_non_midnight_start_day_only_from_lower_credits()
+    {
+        var result = PeriodQuotaEstimator.Parse(
+            AnalyticsJson,
+            segmentStartDate: new DateOnly(2026, 7, 23),
+            includeStartDayInLower: false);
+
+        Assert.Equal(AnalyticsUsageState.Valid, result.State);
+        Assert.Equal(100m, result.LowerCredits);
+        Assert.Equal(150m, result.UpperCredits);
+    }
+
+    [Fact]
+    public void Parse_includes_midnight_start_day_in_both_credit_bounds()
+    {
+        var result = PeriodQuotaEstimator.Parse(
+            AnalyticsJson,
+            segmentStartDate: new DateOnly(2026, 7, 23),
+            includeStartDayInLower: true);
+
+        Assert.Equal(AnalyticsUsageState.Valid, result.State);
+        Assert.Equal(150m, result.LowerCredits);
+        Assert.Equal(150m, result.UpperCredits);
     }
 }

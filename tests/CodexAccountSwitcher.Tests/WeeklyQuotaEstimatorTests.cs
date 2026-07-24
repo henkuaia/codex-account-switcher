@@ -20,8 +20,8 @@ public sealed class WeeklyQuotaEstimatorTests
             resetDate: new DateOnly(2026, 7, 20));
 
         Assert.NotNull(estimate);
-        Assert.Equal(8m, estimate.LowerUsd);
-        Assert.Equal(24m, estimate.UpperUsd);
+        Assert.Equal(7.84m, estimate.LowerUsd);
+        Assert.Equal(24.49m, estimate.UpperUsd);
     }
 
     [Fact]

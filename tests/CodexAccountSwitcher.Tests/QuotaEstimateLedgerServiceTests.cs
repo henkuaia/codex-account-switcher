@@ -215,6 +215,49 @@ public sealed class QuotaEstimateLedgerServiceTests
     }
 
     [Fact]
+    public async Task Save_rejects_unknown_period()
+    {
+        using var directory = new TemporaryDirectory();
+        var service = new QuotaEstimateLedgerService(
+            Path.Combine(directory.Path, "quota-estimate-ledger.json"));
+        var unknown = CreateObservation() with
+        {
+            Segment = CreateObservation().Segment with { Period = QuotaPeriod.Unknown },
+        };
+        var invalid = StateWithAccount(
+            "account-a",
+            new AccountQuotaEstimateLedger([], [unknown]));
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            service.SaveAsync(invalid, default));
+    }
+
+    [Fact]
+    public async Task Load_rejects_unknown_period_preserves_file_and_blocks_overwrite()
+    {
+        using var directory = new TemporaryDirectory();
+        var path = Path.Combine(directory.Path, "quota-estimate-ledger.json");
+        var unknown = CreateObservation() with
+        {
+            Segment = CreateObservation().Segment with { Period = QuotaPeriod.Unknown },
+        };
+        var invalid = StateWithAccount(
+            "account-a",
+            new AccountQuotaEstimateLedger([], [unknown]));
+        await WriteDocumentAsync(path, invalid);
+        var originalBytes = await File.ReadAllBytesAsync(path);
+        var service = new QuotaEstimateLedgerService(path);
+
+        var loaded = await service.LoadAsync(default);
+
+        Assert.NotNull(loaded.Error);
+        Assert.Empty(loaded.State.Accounts);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.SaveAsync(QuotaEstimateLedgerState.Empty, default));
+        Assert.Equal(originalBytes, await File.ReadAllBytesAsync(path));
+    }
+
+    [Fact]
     public async Task Save_rejects_observations_out_of_order()
     {
         using var directory = new TemporaryDirectory();

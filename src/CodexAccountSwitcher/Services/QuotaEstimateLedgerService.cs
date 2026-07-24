@@ -361,7 +361,7 @@ public sealed class QuotaEstimateLedgerService
         foreach (var observation in observations)
         {
             if (observation?.Segment is not { } segment ||
-                !Enum.IsDefined(segment.Period) ||
+                segment.Period is not QuotaPeriod.Weekly and not QuotaPeriod.Monthly ||
                 !IsUtcTimestamp(segment.SegmentStart) ||
                 !IsUtcTimestamp(segment.ResetsAt) ||
                 segment.SegmentStart >= segment.ResetsAt ||

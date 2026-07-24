@@ -178,6 +178,24 @@ public sealed class AccountRowViewModel : ObservableObject
         UpdateMetadataDisplay();
     }
 
+    internal void ApplyCachedQuota(QuotaCacheEntry entry, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ApplyQuota(new QuotaUpdate(Account.AccountKey, entry.Display, null));
+
+        var refreshed = $"上次刷新 {entry.RefreshedAt.UtcDateTime:yyyy-MM-dd HH:mm 'UTC'}";
+        var expired = entry.Display.ResetsAt is { } resetsAt && resetsAt <= now;
+        QuotaStatusText = expired
+            ? $"缓存已过期，需要刷新 · {refreshed}"
+            : string.IsNullOrEmpty(QuotaStatusText)
+                ? refreshed
+                : $"{QuotaStatusText} · {refreshed}";
+        QuotaToolTip = string.IsNullOrEmpty(QuotaToolTip)
+            ? QuotaStatusText
+            : $"{QuotaToolTip}; {QuotaStatusText}";
+        HasQuotaStatus = true;
+    }
+
     internal void ApplyMetadata(AccountMetadata metadata)
     {
         ArgumentNullException.ThrowIfNull(metadata);

@@ -1135,6 +1135,73 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Cached_quota_shows_last_refresh_time_before_server_reset()
+    {
+        var row = new AccountRowViewModel(
+            Accounts.Record("key", "first@example.com"),
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+        var display = new QuotaDisplay(
+            QuotaPeriod.Monthly,
+            64,
+            DateTimeOffset.Parse("2026-08-01T00:00:00Z"),
+            TimeSpan.FromDays(30),
+            "Monthly: 64% remaining");
+
+        row.ApplyCachedQuota(
+            new QuotaCacheEntry(
+                display,
+                DateTimeOffset.Parse("2026-07-24T12:00:00Z")),
+            DateTimeOffset.Parse("2026-07-25T00:00:00Z"));
+
+        Assert.Equal(display, row.QuotaDisplay);
+        Assert.Equal(
+            "Resets 2026-08-01 00:00 UTC · 上次刷新 2026-07-24 12:00 UTC",
+            row.QuotaStatusText);
+        Assert.DoesNotContain("缓存已过期", row.QuotaStatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Expired_cached_quota_warns_until_a_live_update_replaces_it()
+    {
+        var row = new AccountRowViewModel(
+            Accounts.Record("key", "first@example.com"),
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+        var cachedDisplay = new QuotaDisplay(
+            QuotaPeriod.Weekly,
+            20,
+            DateTimeOffset.Parse("2026-07-24T00:00:00Z"),
+            TimeSpan.FromDays(7),
+            "Weekly: 20% remaining");
+
+        row.ApplyCachedQuota(
+            new QuotaCacheEntry(
+                cachedDisplay,
+                DateTimeOffset.Parse("2026-07-23T12:00:00Z")),
+            DateTimeOffset.Parse("2026-07-24T00:00:00Z"));
+
+        Assert.Equal(
+            "缓存已过期，需要刷新 · 上次刷新 2026-07-23 12:00 UTC",
+            row.QuotaStatusText);
+
+        row.ApplyQuota(new QuotaUpdate(
+            row.Account.AccountKey,
+            cachedDisplay with
+            {
+                RemainingPercent = 100,
+                ResetsAt = DateTimeOffset.Parse("2026-07-31T00:00:00Z"),
+            },
+            null));
+
+        Assert.Equal("Resets 2026-07-31 00:00 UTC", row.QuotaStatusText);
+        Assert.DoesNotContain("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
+        Assert.DoesNotContain("缓存已过期", row.QuotaStatusText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Account_row_formats_server_reset_snapshot_and_local_metadata_separately()
     {
         var account = Accounts.Record("first-key", "first@example.com");

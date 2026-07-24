@@ -185,3 +185,113 @@ controller:
 - take pre/post live auth and stored-account snapshot hashes;
 - perform any permitted live tray/DPI smoke only if it does not interfere with
   the user-owned process.
+
+---
+
+## Hybrid rereview remediation
+
+Date: 2026-07-25 (Asia/Shanghai)
+Reviewed findings: `.superpowers/sdd/hybrid-rereview-findings.md`
+Implementation commit: `14118f8b5a72dbd22992e052c89a64c6526076f8`
+Result: **PASS for all five rereview findings, focused tests, full Release
+tests, and diff checks**
+
+### Finding-by-finding corrections
+
+| # | Correction |
+|---:|---|
+| 1 | A missing, unreadable, or malformed-only recent session file now leaves an explicit incomplete tombstone. The tombstone remains relevant through the retained window and prevents older bounded observations from reviving as complete history. |
+| 2 | Per-event checkpoint aggregates were replaced by UTC-hour compact buckets with first/last event timestamps, priced Credits, and pricing-failure counts. Schema 2 checkpoints migrate to schema 3 buckets. Refresh builds one reusable account attribution index, and a 25,000-event/48-hour regression verifies bounded bucket count and serialized ledger size without a wall-clock threshold. |
+| 3 | Nonadvancing-clock registry validation errors are contained at the estimator boundary and return a sanitized warning; successful login, switch, and logout operations remain successful. Cancellation remains primary. |
+| 4 | Refresh completion emits exactly one `QuotaUpdate` per account. Completion warnings are merged into the pending final update, and repeated failed refresh rendering prefixes cached status/tooltip text only once. |
+| 5 | Enterprise accounts now disclose that local metadata cannot identify legacy token-rate eligibility. Business, Team, and Plus accounts do not receive that disclosure. |
+
+Hour buckets that cross an account-activation or quota-segment boundary are not
+split or assigned a midpoint. They contribute explicit lower/upper Credits
+bounds and a conservative boundary-uncertainty status.
+
+### Additional TDD evidence
+
+Representative RED evidence recorded before the corresponding production
+changes:
+
+- malformed-only file deletion incorrectly allowed historical bounded output;
+- a current unreadable file failed to retain/renew an incomplete checkpoint;
+- login, switch, and logout each propagated `ArgumentOutOfRangeException` under
+  a nonadvancing injected clock;
+- the large-history regression initially failed to compile because compact
+  buckets did not exist;
+- lower/upper delta interval and boundary-attribution tests initially failed to
+  compile because range properties/overloads did not exist;
+- an invalid observation with upper Credits below lower Credits was accepted;
+- completion emitted two updates for one account, and repeated failure
+  rendering duplicated its prefix;
+- Enterprise lacked the legacy-rate eligibility disclosure.
+
+Focused GREEN milestones:
+
+- malformed/tombstone lifecycle: **2 passed**, plus current-failure renewal:
+  **1 passed**;
+- nonadvancing login/switch/logout: **3 passed**;
+- 25,000-event bounded-history regression: **1 passed**;
+- collector and ledger focused set: **37 passed**;
+- reset boundary, activation boundary, and single-enumeration index:
+  **3 passed**;
+- single-update, idempotent failure rendering, and cancellation preservation:
+  **3 passed**;
+- Enterprise/Business/Team/Plus plan disclosure matrix: **4 passed**.
+
+### Final verification
+
+Focused touched-area Release aggregate:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test `
+  tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj `
+  -c Release --no-restore `
+  --filter "FullyQualifiedName~CodexCreditRateCardTests|FullyQualifiedName~LocalCodexUsageCollectorTests|FullyQualifiedName~QuotaEstimateLedgerServiceTests|FullyQualifiedName~QuotaEstimateMathTests|FullyQualifiedName~PeriodQuotaEstimatorTests|FullyQualifiedName~HybridQuotaEstimateServiceTests|FullyQualifiedName~QuotaServiceTests|FullyQualifiedName~QuotaCacheServiceTests|FullyQualifiedName~MainWindowViewModelTests|FullyQualifiedName~WpfInterfaceContractTests|FullyQualifiedName~WpfRuntimeTests" `
+  --logger "console;verbosity=minimal"
+```
+
+Result: **308 passed, 0 failed, 0 skipped** in the reported **3 s** test
+duration.
+
+Full Release suite:
+
+```powershell
+.\.tools\dotnet\dotnet.exe test `
+  tests\CodexAccountSwitcher.Tests\CodexAccountSwitcher.Tests.csproj `
+  -c Release --no-restore `
+  --logger "console;verbosity=minimal"
+```
+
+Result: **664 passed, 0 failed, 0 skipped** in the reported **10 s** test
+duration.
+
+`git diff --check` exited `0`; Git emitted only the repository's standard
+LF-to-CRLF working-copy notices.
+
+### Files changed in this remediation
+
+Production:
+
+- `src/CodexAccountSwitcher/Models/QuotaEstimateModels.cs`
+- `src/CodexAccountSwitcher/Services/HybridQuotaEstimateService.cs`
+- `src/CodexAccountSwitcher/Services/LocalCodexUsageCollector.cs`
+- `src/CodexAccountSwitcher/Services/QuotaEstimateLedgerService.cs`
+- `src/CodexAccountSwitcher/Services/QuotaEstimateMath.cs`
+- `src/CodexAccountSwitcher/Services/QuotaService.cs`
+- `src/CodexAccountSwitcher/ViewModels/AccountRowViewModel.cs`
+
+Tests:
+
+- `tests/CodexAccountSwitcher.Tests/HybridQuotaEstimateServiceTests.cs`
+- `tests/CodexAccountSwitcher.Tests/LocalCodexUsageCollectorTests.cs`
+- `tests/CodexAccountSwitcher.Tests/MainWindowViewModelTests.cs`
+- `tests/CodexAccountSwitcher.Tests/QuotaEstimateLedgerServiceTests.cs`
+- `tests/CodexAccountSwitcher.Tests/QuotaEstimateMathTests.cs`
+- `tests/CodexAccountSwitcher.Tests/QuotaServiceTests.cs`
+
+No source or test blocker remains. No live login, quota refresh, account switch,
+logout, account removal, process control, publish, install, or user-owned
+session mutation was performed.

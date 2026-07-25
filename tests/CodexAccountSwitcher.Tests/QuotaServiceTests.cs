@@ -459,16 +459,82 @@ public sealed class QuotaServiceTests
                 : JsonResponse();
         });
         using var client = new HttpClient(handler);
-        var progress = new CollectingProgress<QuotaUpdate>();
+        var reports = new List<QuotaUpdate>();
 
-        await new QuotaService(client).RefreshAllAsync(accounts, home.Path, progress, default);
+        await new QuotaService(client).RefreshAllAsync(
+            accounts,
+            home.Path,
+            (update, _) =>
+            {
+                reports.Add(update);
+                return Task.CompletedTask;
+            },
+            default);
 
         Assert.Equal(3, handler.Requests.Count);
         Assert.Equal(1, handler.MaximumActiveRequests);
-        Assert.Equal(3, progress.Values.Count);
-        Assert.NotNull(progress.Values[0].Error);
-        Assert.Null(progress.Values[1].Error);
-        Assert.Null(progress.Values[2].Error);
+        Assert.Equal(3, reports.Count);
+        Assert.NotNull(reports[0].Error);
+        Assert.Null(reports[1].Error);
+        Assert.Null(reports[2].Error);
+    }
+
+    [Fact]
+    public async Task Refresh_all_awaits_each_report_before_starting_the_next_account()
+    {
+        using var home = new TemporaryDirectory();
+        var first = Accounts.Record(
+            "first-key",
+            "first@example.com",
+            accountId: "first-account");
+        var second = Accounts.Record(
+            "second-key",
+            "second@example.com",
+            accountId: "second-account");
+        WriteSnapshot(home, first, "first-token", first.ChatGptAccountId);
+        WriteSnapshot(home, second, "second-token", second.ChatGptAccountId);
+
+        var secondRequestStarted = false;
+        var firstReportStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstReport = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handler = new RecordingHttpMessageHandler(async (request, _) =>
+        {
+            var accountId = request.Headers.GetValues("ChatGPT-Account-Id").Single();
+            if (accountId == second.ChatGptAccountId)
+            {
+                secondRequestStarted = true;
+            }
+
+            await Task.Yield();
+            return JsonResponse();
+        });
+        using var client = new HttpClient(handler);
+        var reports = new List<string>();
+        var refreshTask = new QuotaService(client).RefreshAllAsync(
+            [first, second],
+            home.Path,
+            async (update, cancellationToken) =>
+            {
+                reports.Add(update.AccountKey);
+                if (update.AccountKey == first.AccountKey)
+                {
+                    firstReportStarted.SetResult();
+                    await releaseFirstReport.Task.WaitAsync(cancellationToken);
+                }
+            },
+            CancellationToken.None);
+
+        await firstReportStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(secondRequestStarted);
+
+        releaseFirstReport.SetResult();
+        var warning = await refreshTask;
+
+        Assert.Null(warning);
+        Assert.True(secondRequestStarted);
+        Assert.Equal([first.AccountKey, second.AccountKey], reports);
     }
 
     [Fact]
@@ -777,19 +843,23 @@ public sealed class QuotaServiceTests
                     usedPercent: 25)
                 : JsonResponse("""{"data":[]}""")));
         using var client = new HttpClient(handler);
-        var progress = new CollectingProgress<QuotaUpdate>();
+        var reports = new List<QuotaUpdate>();
 
         await new QuotaService(
             client,
             hybridEstimator: hybrid).RefreshAllAsync(
                 accounts,
                 home.Path,
-                progress,
+                (update, _) =>
+                {
+                    reports.Add(update);
+                    return Task.CompletedTask;
+                },
                 default);
 
         Assert.Equal(1, collectCount);
         Assert.Equal(1, saveCount);
-        Assert.Equal(5, progress.Values.Count);
+        Assert.Equal(5, reports.Count);
         Assert.Equal(1, handler.MaximumActiveRequests);
     }
 
@@ -933,6 +1003,55 @@ public sealed class QuotaServiceTests
                     usedPercent: 25)
                 : JsonResponse("""{"data":[]}""")));
         using var client = new HttpClient(handler);
+        var reports = new List<QuotaUpdate>();
+
+        var warning = await new QuotaService(
+            client,
+            hybridEstimator: hybrid).RefreshAllAsync(
+                [account],
+                home.Path,
+                (update, _) =>
+                {
+                    reports.Add(update);
+                    return Task.CompletedTask;
+                },
+                default);
+
+        var update = Assert.Single(reports);
+        Assert.Null(update.Error);
+        Assert.Equal(75, update.Display!.RemainingPercent);
+        Assert.Null(update.Warning);
+        Assert.Contains("未保存", warning, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refresh_all_legacy_progress_receives_completion_warning()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        var segmentStart = DateTimeOffset.Parse("2026-07-20T12:00:00Z");
+        var serverNow = DateTimeOffset.Parse("2026-07-24T12:00:00Z");
+        var hybrid = new HybridQuotaEstimateService(
+            (_, _) => Task.FromResult(new LocalUsageCollectionResult(
+                [LocalUsage(segmentStart.AddHours(1))],
+                0)),
+            _ => Task.FromResult(new QuotaEstimateLedgerLoadResult(
+                StateWithActivation(
+                    account,
+                    new AccountActivationInterval(segmentStart.AddMinutes(-1), null)),
+                null)),
+            (_, _) => Task.FromException(new IOException("ledger-save-failure")),
+            new CodexCreditRateCard());
+        using var handler = new RecordingHttpMessageHandler((request, _) => Task.FromResult(
+            request.RequestUri!.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal)
+                ? UsageResponse(
+                    segmentStart.AddDays(7),
+                    serverNow,
+                    TimeSpan.FromDays(7),
+                    usedPercent: 25)
+                : JsonResponse("""{"data":[]}""")));
+        using var client = new HttpClient(handler);
         var progress = new CollectingProgress<QuotaUpdate>();
 
         await new QuotaService(
@@ -948,6 +1067,19 @@ public sealed class QuotaServiceTests
         Assert.Equal(75, update.Display!.RemainingPercent);
         Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
         Assert.Contains("未保存", update.Display.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Refresh_all_legacy_progress_rejects_null_accounts()
+    {
+        using var client = new HttpClient();
+
+        await Assert.ThrowsAsync<ArgumentNullException>(() =>
+            new QuotaService(client).RefreshAllAsync(
+                null!,
+                "unused",
+                new CollectingProgress<QuotaUpdate>(),
+                default));
     }
 
     [Fact]
@@ -992,36 +1124,33 @@ public sealed class QuotaServiceTests
                     usedPercent: 25)
                 : JsonResponse("""{"data":[]}""")));
         using var client = new HttpClient(handler);
-        var progress = new CollectingProgress<QuotaUpdate>();
+        var reports = new List<QuotaUpdate>();
 
-        await new QuotaService(
+        var warning = await new QuotaService(
             client,
             hybridEstimator: hybrid).RefreshAllAsync(
                 accounts,
                 home.Path,
-                progress,
+                (update, _) =>
+                {
+                    reports.Add(update);
+                    return Task.CompletedTask;
+                },
                 default);
 
         Assert.Collection(
-            progress.Values,
+            reports,
             update =>
             {
                 Assert.Equal(accounts[0].AccountKey, update.AccountKey);
-                Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
-                Assert.Contains(
-                    "未保存",
-                    update.Display!.EstimateStatus,
-                    StringComparison.Ordinal);
+                Assert.Null(update.Warning);
             },
             update =>
             {
                 Assert.Equal(accounts[1].AccountKey, update.AccountKey);
-                Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
-                Assert.Contains(
-                    "未保存",
-                    update.Display!.EstimateStatus,
-                    StringComparison.Ordinal);
+                Assert.Null(update.Warning);
             });
+        Assert.Contains("未保存", warning, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1116,7 +1245,7 @@ public sealed class QuotaServiceTests
                     : JsonResponse("""{"data":[]}"""));
         });
         using var client = new HttpClient(handler);
-        var progress = new CollectingProgress<QuotaUpdate>();
+        var reports = new List<QuotaUpdate>();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             new QuotaService(
@@ -1124,12 +1253,16 @@ public sealed class QuotaServiceTests
                 hybridEstimator: hybrid).RefreshAllAsync(
                     accounts,
                     home.Path,
-                    progress,
+                    (update, _) =>
+                    {
+                        reports.Add(update);
+                        return Task.CompletedTask;
+                    },
                     cancellation.Token));
 
-        var update = Assert.Single(progress.Values);
+        var update = Assert.Single(reports);
         Assert.Equal(accounts[0].AccountKey, update.AccountKey);
-        Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
+        Assert.Null(update.Warning);
         Assert.Equal(1, saveCount);
         Assert.Single(attemptedSave!.Accounts[accounts[0].AccountKey].Observations);
         Assert.Equal(3, handler.Requests.Count);

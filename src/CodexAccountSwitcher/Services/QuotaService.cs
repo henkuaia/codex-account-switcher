@@ -367,6 +367,41 @@ public sealed class QuotaService
             availability);
     }
 
+    public async Task<string?> RefreshAllAsync(
+        IReadOnlyList<AccountRecord> accounts,
+        string codexHome,
+        Func<QuotaUpdate, CancellationToken, Task> reportAsync,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+        ArgumentNullException.ThrowIfNull(reportAsync);
+
+        var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
+        try
+        {
+            foreach (var account in accounts)
+            {
+                var update = await RefreshAccountCoreAsync(
+                    account,
+                    codexHome,
+                    hybridContext,
+                    cancellationToken);
+                await reportAsync(update, cancellationToken);
+            }
+        }
+        catch
+        {
+            await TryCompleteHybridRefreshAsync(
+                hybridContext,
+                CancellationToken.None);
+            throw;
+        }
+
+        return await TryCompleteHybridRefreshAsync(
+            hybridContext,
+            CancellationToken.None);
+    }
+
     public async Task RefreshAllAsync(
         IReadOnlyList<AccountRecord> accounts,
         string codexHome,
@@ -376,35 +411,17 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(accounts);
         ArgumentNullException.ThrowIfNull(progress);
 
-        var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
         var completedUpdates = new List<QuotaUpdate>(accounts.Count);
-        try
-        {
-            foreach (var account in accounts)
+        var warning = await RefreshAllAsync(
+            accounts,
+            codexHome,
+            (update, _) =>
             {
-                completedUpdates.Add(await RefreshAccountCoreAsync(
-                    account,
-                    codexHome,
-                    hybridContext,
-                    cancellationToken));
-            }
-        }
-        catch
-        {
-            var completionWarning = await TryCompleteHybridRefreshAsync(
-                hybridContext,
-                CancellationToken.None);
-            foreach (var update in completedUpdates)
-            {
-                progress.Report(WithWarning(update, completionWarning));
-            }
+                completedUpdates.Add(update);
+                return Task.CompletedTask;
+            },
+            cancellationToken);
 
-            throw;
-        }
-
-        var warning = await TryCompleteHybridRefreshAsync(
-            hybridContext,
-            CancellationToken.None);
         foreach (var update in completedUpdates)
         {
             progress.Report(WithWarning(update, warning));

@@ -130,6 +130,14 @@ public sealed class WpfInterfaceContractTests
             "x:Name=\"QuotaSweepStoryboard\"",
             xaml,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "x:Name=\"LoadingRefreshRing\"",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "x:Name=\"LoadingRingStoryboard\"",
+            xaml,
+            StringComparison.Ordinal);
         Assert.Contains("<DataTrigger.ExitActions>", xaml, StringComparison.Ordinal);
         Assert.Contains(
             "<RemoveStoryboard BeginStoryboardName=\"BulkRefreshStoryboard\" />",
@@ -141,6 +149,10 @@ public sealed class WpfInterfaceContractTests
             StringComparison.Ordinal);
         Assert.Contains(
             "<RemoveStoryboard BeginStoryboardName=\"QuotaSweepStoryboard\" />",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "<RemoveStoryboard BeginStoryboardName=\"LoadingRingStoryboard\" />",
             xaml,
             StringComparison.Ordinal);
     }

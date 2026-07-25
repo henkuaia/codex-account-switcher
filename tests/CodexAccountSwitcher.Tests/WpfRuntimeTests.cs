@@ -45,6 +45,7 @@ public sealed class WpfRuntimeTests
             OperationWindow? canceledLoginWindow = null;
             OperationWindow? dialogRemoveWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
+            MainWindow? layoutWindow = null;
             var refreshStarted = new TaskCompletionSource(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var finishRefresh = new TaskCompletionSource(
@@ -139,12 +140,18 @@ public sealed class WpfRuntimeTests
                 var accountRefreshGlyph = FindVisualChildren<TextBlock>(mainWindow)
                     .Single(textBlock =>
                         textBlock.Text == "\uE72C" &&
+                        textBlock.Name != "LoadingRefreshRing" &&
                         textBlock.DataContext is AccountRowViewModel row &&
                         row.Account.AccountKey == first.AccountKey);
                 var quotaSweep = FindVisualChildren<Border>(mainWindow)
                     .Single(border =>
                         border.Name == "QuotaSweep" &&
                         border.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == first.AccountKey);
+                var loadingRefreshRing = FindVisualChildren<TextBlock>(mainWindow)
+                    .Single(textBlock =>
+                        textBlock.Name == "LoadingRefreshRing" &&
+                        textBlock.DataContext is AccountRowViewModel row &&
                         row.Account.AccountKey == first.AccountKey);
 
                 var refresh = viewModel.RefreshCommand.ExecuteAsync();
@@ -158,15 +165,19 @@ public sealed class WpfRuntimeTests
                     Assert.IsType<RotateTransform>(accountRefreshGlyph.RenderTransform);
                 var quotaSweepTranslation =
                     Assert.IsType<TranslateTransform>(quotaSweep.RenderTransform);
+                var loadingRingRotation =
+                    Assert.IsType<RotateTransform>(loadingRefreshRing.RenderTransform);
                 Assert.True(viewModel.IsBulkRefreshing);
                 Assert.True(viewModel.Accounts.All(row => row.IsRefreshing));
                 Assert.True(
                     refreshRotation.HasAnimatedProperties &&
                     accountRefreshRotation.HasAnimatedProperties &&
-                    quotaSweepTranslation.HasAnimatedProperties,
+                    quotaSweepTranslation.HasAnimatedProperties &&
+                    loadingRingRotation.HasAnimatedProperties,
                     $"Expected active refresh clocks. top={refreshRotation.HasAnimatedProperties}, " +
                     $"account={accountRefreshRotation.HasAnimatedProperties}, " +
                     $"sweep={quotaSweepTranslation.HasAnimatedProperties}, " +
+                    $"loadingRing={loadingRingRotation.HasAnimatedProperties}, " +
                     $"accountContextRefreshing=" +
                     $"{((AccountRowViewModel)accountRefreshGlyph.DataContext).IsRefreshing}, " +
                     $"sweepContextRefreshing=" +
@@ -182,14 +193,17 @@ public sealed class WpfRuntimeTests
                 Assert.False(refreshRotation.HasAnimatedProperties);
                 Assert.False(accountRefreshRotation.HasAnimatedProperties);
                 Assert.False(quotaSweepTranslation.HasAnimatedProperties);
+                Assert.False(loadingRingRotation.HasAnimatedProperties);
 
                 var stoppedRefreshAngle = refreshRotation.Angle;
                 var stoppedAccountRefreshAngle = accountRefreshRotation.Angle;
                 var stoppedQuotaSweepX = quotaSweepTranslation.X;
+                var stoppedLoadingRingAngle = loadingRingRotation.Angle;
                 await Task.Delay(150);
                 Assert.Equal(stoppedRefreshAngle, refreshRotation.Angle);
                 Assert.Equal(stoppedAccountRefreshAngle, accountRefreshRotation.Angle);
                 Assert.Equal(stoppedQuotaSweepX, quotaSweepTranslation.X);
+                Assert.Equal(stoppedLoadingRingAngle, loadingRingRotation.Angle);
                 var details = FindVisualChildren<Expander>(mainWindow)
                     .Single(expander =>
                         expander.Name == "QuotaDetailsExpander" &&
@@ -226,6 +240,59 @@ public sealed class WpfRuntimeTests
 
                 mainWindow.Close();
                 Assert.False(mainWindow.IsVisible);
+
+                var layoutAccounts = Enumerable.Range(1, 5)
+                    .Select(index => Accounts.Record(
+                        $"layout-{index}",
+                        $"layout-{index}@example.com",
+                        accountId: $"layout-account-{index}"))
+                    .ToArray();
+                var layoutRegistry = new AccountRegistry(
+                    3,
+                    layoutAccounts[0].AccountKey,
+                    layoutAccounts);
+                var layoutViewModel = CreateViewModel(layoutRegistry);
+                await layoutViewModel.LoadAsync();
+                layoutWindow = new MainWindow(layoutViewModel);
+                layoutWindow.Show();
+                await layoutWindow.Dispatcher.InvokeAsync(
+                    static () => { },
+                    DispatcherPriority.ApplicationIdle);
+                layoutWindow.UpdateLayout();
+
+                var layoutItems =
+                    Assert.IsType<ItemsControl>(layoutWindow.FindName("AccountItems"));
+                var cardContainers = layoutViewModel.Accounts
+                    .Select(row => Assert.IsAssignableFrom<FrameworkElement>(
+                        layoutItems.ItemContainerGenerator.ContainerFromItem(row)))
+                    .ToArray();
+                var cardPositions = cardContainers
+                    .Select(container => container.TranslatePoint(new Point(), layoutItems))
+                    .ToArray();
+                Assert.Equal(cardPositions[0].Y, cardPositions[1].Y, 3);
+                Assert.Equal(cardPositions[2].Y, cardPositions[3].Y, 3);
+                Assert.True(cardPositions[2].Y > cardPositions[0].Y);
+                Assert.True(cardPositions[4].Y > cardPositions[2].Y);
+                Assert.Equal(cardPositions[0].X, cardPositions[2].X, 3);
+                Assert.Equal(cardPositions[0].X, cardPositions[4].X, 3);
+                Assert.Equal(cardPositions[1].X, cardPositions[3].X, 3);
+                Assert.True(cardPositions[1].X > cardPositions[0].X);
+
+                var layoutScrollViewer =
+                    Assert.Single(FindVisualChildren<ScrollViewer>(layoutWindow));
+                Assert.True(
+                    layoutScrollViewer.ComputedVerticalScrollBarVisibility == Visibility.Visible,
+                    $"Expected vertical scrolling. viewport={layoutScrollViewer.ViewportHeight}, " +
+                    $"extent={layoutScrollViewer.ExtentHeight}, " +
+                    $"cardHeight={cardContainers[0].ActualHeight}.");
+                Assert.True(layoutScrollViewer.ScrollableHeight > 0);
+                Assert.Equal(
+                    Visibility.Collapsed,
+                    layoutScrollViewer.ComputedHorizontalScrollBarVisibility);
+                Assert.Equal(0, layoutScrollViewer.ScrollableWidth);
+                layoutWindow.AllowClose();
+                layoutWindow.Close();
+                layoutWindow = null;
 
                 var confirmationRow = new AccountRowViewModel(
                     second,
@@ -512,6 +579,12 @@ public sealed class WpfRuntimeTests
             finally
             {
                 finishRefresh.TrySetResult();
+                if (layoutWindow is not null)
+                {
+                    layoutWindow.AllowClose();
+                    layoutWindow.Close();
+                }
+
                 confirmationWindow?.Close();
                 if (localizedWindow?.IsVisible == true)
                 {

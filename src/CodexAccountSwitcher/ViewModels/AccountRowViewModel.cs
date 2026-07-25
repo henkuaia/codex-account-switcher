@@ -276,26 +276,30 @@ public sealed class AccountRowViewModel : ObservableObject
             };
             var source = display.EstimateSource switch
             {
-                QuotaEstimateSource.Analytics => "（服务器 Analytics）",
-                QuotaEstimateSource.Local => "（本机用量）",
+                QuotaEstimateSource.Analytics => "服务器 Analytics",
+                QuotaEstimateSource.Local => "本机用量",
                 _ => string.Empty,
             };
+            var context = string.Join(
+                " · ",
+                new[] { quality, source }.Where(value => !string.IsNullOrEmpty(value)));
+            var contextSuffix = string.IsNullOrEmpty(context)
+                ? string.Empty
+                : $"（{context}）";
             var range = lower == upper
                 ? FormatUsd(lower)
                 : $"{FormatUsd(lower)}–{FormatUsd(upper)}";
             text =
-                $"{quality}估算单次{period}额度：US${range}{source}{Environment.NewLine}" +
+                $"单次{period}额度（估算）：US${range}{contextSuffix}{Environment.NewLine}" +
                 "按 Credits 购买价格换算，非官方套餐额度";
         }
         else if (display.UsedPercent <= 0)
         {
-            text = $"估算单次{period}额度：产生用量后可计算";
+            text = $"单次{period}额度（估算）：产生用量后可计算";
         }
         else
         {
-            text = string.IsNullOrWhiteSpace(display.EstimateStatus)
-                ? $"估算单次{period}额度：暂不可用"
-                : string.Empty;
+            text = $"单次{period}额度（估算）：暂不可用";
         }
 
         return AppendDetailLine(text, display.EstimateStatus);

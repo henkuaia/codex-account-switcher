@@ -241,10 +241,6 @@
                                                                            Text="{Binding UsedResetText}" />
                                                             </WrapPanel>
                                                             <WrapPanel Margin="0,3,0,0">
-                                                                <TextBlock Margin="0,0,12,0"
-                                                                           FontSize="11"
-                                                                           Foreground="{StaticResource TextSecondaryBrush}"
-                                                                           Text="{Binding PeriodQuotaText}" />
                                                                 <TextBlock FontSize="11"
                                                                            Foreground="{StaticResource TextSecondaryBrush}"
                                                                            Text="{Binding OfficialMonthlyLimitText}">

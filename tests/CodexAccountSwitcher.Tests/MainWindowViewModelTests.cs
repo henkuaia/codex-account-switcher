@@ -1492,7 +1492,7 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal("单次周额度 US$40", row.PeriodQuotaText);
         Assert.Equal(
-            $"初步估算单次周额度：US$8–24（本机用量）{Environment.NewLine}" +
+            $"单次周额度（估算）：US$8–24（初步 · 本机用量）{Environment.NewLine}" +
             $"按 Credits 购买价格换算，非官方套餐额度{Environment.NewLine}" +
             "Analytics 无数据，已改用本机用量估算",
             row.EstimatedPeriodQuotaText);
@@ -1526,7 +1526,7 @@ public sealed class MainWindowViewModelTests
             },
             null));
 
-        Assert.Equal("估算单次周额度：产生用量后可计算", row.EstimatedPeriodQuotaText);
+        Assert.Equal("单次周额度（估算）：产生用量后可计算", row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1560,7 +1560,7 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal("单次月额度 US$220", row.PeriodQuotaText);
         Assert.Equal(
-            $"多点估算单次月额度：US$160–200（服务器 Analytics）{Environment.NewLine}" +
+            $"单次月额度（估算）：US$160–200（多点 · 服务器 Analytics）{Environment.NewLine}" +
             "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
@@ -1594,7 +1594,7 @@ public sealed class MainWindowViewModelTests
             null));
 
         Assert.Equal(
-            $"初步估算单次月额度：US$180（服务器 Analytics）{Environment.NewLine}" +
+            $"单次月额度（估算）：US$180（初步 · 服务器 Analytics）{Environment.NewLine}" +
             "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
@@ -1632,7 +1632,7 @@ public sealed class MainWindowViewModelTests
             null));
 
         Assert.Equal(
-            $"初步估算单次{periodText}额度：US$10–20（本机用量）{Environment.NewLine}" +
+            $"单次{periodText}额度（估算）：US$10–20（初步 · 本机用量）{Environment.NewLine}" +
             $"按 Credits 购买价格换算，非官方套餐额度{Environment.NewLine}" +
             "现有状态",
             row.EstimatedPeriodQuotaText);
@@ -1660,7 +1660,7 @@ public sealed class MainWindowViewModelTests
             },
             null));
 
-        Assert.Equal("估算单次月额度：产生用量后可计算", row.EstimatedPeriodQuotaText);
+        Assert.Equal("单次月额度（估算）：产生用量后可计算", row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1695,10 +1695,12 @@ public sealed class MainWindowViewModelTests
             },
             null));
 
-        Assert.Equal(estimateStatus, row.EstimatedPeriodQuotaText);
+        Assert.Equal(
+            $"单次月额度（估算）：暂不可用{Environment.NewLine}{estimateStatus}",
+            row.EstimatedPeriodQuotaText);
         Assert.Equal("Resets 2026-08-22 22:06 UTC", row.QuotaStatusText);
         Assert.Contains(estimateStatus, row.QuotaToolTip, StringComparison.Ordinal);
-        Assert.DoesNotContain("暂不可用", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
+        Assert.Contains("暂不可用", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1723,8 +1725,37 @@ public sealed class MainWindowViewModelTests
             },
             null));
 
-        Assert.Equal("估算单次月额度：暂不可用", row.EstimatedPeriodQuotaText);
+        Assert.Equal("单次月额度（估算）：暂不可用", row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
+    }
+
+    [Fact]
+    public void Unavailable_estimate_keeps_one_labeled_quota_item_before_status()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Weekly,
+                75,
+                null,
+                TimeSpan.FromDays(7),
+                "weekly")
+            {
+                UsedPercent = 25,
+                EstimateStatus = "本机用量扫描不完整",
+            },
+            null));
+
+        Assert.Equal(
+            $"单次周额度（估算）：暂不可用{Environment.NewLine}" +
+            "本机用量扫描不完整",
+            row.EstimatedPeriodQuotaText);
     }
 
     [Fact]
@@ -1840,7 +1871,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal(0, refreshCalls);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
         Assert.Equal(
-            $"初步估算单次月额度：US$160–180（本机用量）{Environment.NewLine}" +
+            $"单次月额度（估算）：US$160–180（初步 · 本机用量）{Environment.NewLine}" +
             "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.Contains("上次刷新", row.QuotaStatusText, StringComparison.Ordinal);
@@ -1851,7 +1882,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("After", row.DisplayIdentity);
         Assert.Equal(64, row.QuotaDisplay!.RemainingPercent);
         Assert.Equal(
-            $"初步估算单次月额度：US$160–180（本机用量）{Environment.NewLine}" +
+            $"单次月额度（估算）：US$160–180（初步 · 本机用量）{Environment.NewLine}" +
             "按 Credits 购买价格换算，非官方套餐额度",
             row.EstimatedPeriodQuotaText);
         Assert.Equal(0, refreshCalls);

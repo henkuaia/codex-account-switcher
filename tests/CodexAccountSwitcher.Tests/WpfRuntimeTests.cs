@@ -77,9 +77,12 @@ public sealed class WpfRuntimeTests
 
                 Assert.NotNull(mainWindow.Icon);
                 Assert.Same(viewModel, mainWindow.DataContext);
-                Assert.Equal(440, mainWindow.Width);
-                Assert.Equal(480, mainWindow.MinHeight);
-                Assert.Equal(720, mainWindow.MaxHeight);
+                Assert.Equal(780, mainWindow.Width);
+                Assert.Equal(780, mainWindow.MinWidth);
+                Assert.Equal(780, mainWindow.MaxWidth);
+                Assert.Equal(620, mainWindow.Height);
+                Assert.Equal(620, mainWindow.MinHeight);
+                Assert.Equal(620, mainWindow.MaxHeight);
                 Assert.Equal(8, Assert.IsType<Border>(mainWindow.Content).CornerRadius.TopLeft);
 
                 var accountItems = Assert.IsType<ItemsControl>(mainWindow.FindName("AccountItems"));
@@ -113,11 +116,9 @@ public sealed class WpfRuntimeTests
                         button.Visibility == Visibility.Visible);
                 Assert.True(ToolTipService.GetShowOnDisabled(switchButton));
 
-                var activeSeparator = FindVisualChildren<Border>(mainWindow)
-                    .Single(border =>
-                        border.Name == "RowSeparator" &&
-                        border.DataContext is AccountRowViewModel { IsActive: true });
-                Assert.Equal(Visibility.Collapsed, activeSeparator.Visibility);
+                Assert.DoesNotContain(
+                    FindVisualChildren<Border>(mainWindow),
+                    border => border.Name == "RowSeparator");
                 var activeRow = FindVisualChildren<Border>(mainWindow)
                     .Single(border =>
                         border.Name == "RowBorder" &&

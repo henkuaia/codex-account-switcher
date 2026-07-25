@@ -15,7 +15,6 @@ public sealed class WpfInterfaceContractTests
     [InlineData("five-hour")]
     [InlineData("Settings")]
     [InlineData("tray behavior")]
-    [InlineData("LinearGradientBrush")]
     [InlineData("RadialGradientBrush")]
     public void Production_xaml_excludes_forbidden_content(string forbidden)
     {
@@ -75,6 +74,48 @@ public sealed class WpfInterfaceContractTests
         Assert.Contains("IsExpanded=\"False\"", xaml, StringComparison.Ordinal);
         Assert.Contains(
             "Converter={StaticResource QuotaRemainingBrushConverter}",
+            xaml,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Main_window_uses_fixed_two_column_account_cards()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("Width=\"780\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("MinWidth=\"780\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("MaxWidth=\"780\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Height=\"620\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("MinHeight=\"620\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("MaxHeight=\"620\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("<WrapPanel", xaml, StringComparison.Ordinal);
+        Assert.Contains("ItemWidth=\"355\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "HorizontalScrollBarVisibility=\"Disabled\"",
+            xaml,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Main_window_binds_bulk_and_account_refresh_animations()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("Binding=\"{Binding IsBulkRefreshing}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Binding=\"{Binding IsRefreshing}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Text=\"正在刷新额度…\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Command=\"{Binding DataContext.RefreshAccountCommand",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains("RepeatBehavior=\"Forever\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Storyboard.TargetProperty=\"(UIElement.RenderTransform).(RotateTransform.Angle)\"",
             xaml,
             StringComparison.Ordinal);
     }

@@ -106,6 +106,15 @@
                             AutomationProperties.Name="Remove account">
                         <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE74D;" />
                     </Button>
+                    <Button x:Name="WindowMinimizeButton"
+                            Width="36"
+                            Margin="0,0,6,0"
+                            Click="MinimizeButton_Click"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="最小化"
+                            AutomationProperties.Name="最小化">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="14" Text="&#xE921;" />
+                    </Button>
                     <Button x:Name="WindowCloseButton"
                             Width="36"
                             Click="CloseButton_Click"
@@ -345,6 +354,30 @@
                                                         </Border.Style>
                                                     </Border>
                                                 </Grid>
+
+                                                <TextBlock Grid.Row="3"
+                                                           Grid.ColumnSpan="2"
+                                                           Margin="0,6,0,0"
+                                                           FontSize="11"
+                                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                                           Text="{Binding EstimatedPeriodQuotaSummaryText}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding EstimatedPeriodQuotaText}">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                            <Style.Triggers>
+                                                                <MultiDataTrigger>
+                                                                    <MultiDataTrigger.Conditions>
+                                                                        <Condition Binding="{Binding HasEstimatedPeriodQuotaText}" Value="True" />
+                                                                        <Condition Binding="{Binding IsRefreshing}" Value="False" />
+                                                                    </MultiDataTrigger.Conditions>
+                                                                    <Setter Property="Visibility" Value="Visible" />
+                                                                </MultiDataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
 
                                                 <StackPanel Grid.Row="3"
                                                             Grid.ColumnSpan="2"

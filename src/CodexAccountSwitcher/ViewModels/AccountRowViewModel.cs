@@ -21,6 +21,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private string _periodQuotaText = "单次额度 —";
     private string _officialMonthlyLimitText = string.Empty;
     private string _estimatedPeriodQuotaText = string.Empty;
+    private string _estimatedPeriodQuotaSummaryText = string.Empty;
     private string _quotaLabel = "Not queried";
     private string? _quotaError;
     private string _quotaStatusText = string.Empty;
@@ -139,6 +140,12 @@ public sealed class AccountRowViewModel : ObservableObject
     {
         get => _estimatedPeriodQuotaText;
         private set => SetProperty(ref _estimatedPeriodQuotaText, value);
+    }
+
+    public string EstimatedPeriodQuotaSummaryText
+    {
+        get => _estimatedPeriodQuotaSummaryText;
+        private set => SetProperty(ref _estimatedPeriodQuotaSummaryText, value);
     }
 
     public bool HasEstimatedPeriodQuotaText
@@ -263,6 +270,8 @@ public sealed class AccountRowViewModel : ObservableObject
         HasEstimatedPeriodQuotaText =
             QuotaDisplay?.Period is QuotaPeriod.Weekly or QuotaPeriod.Monthly;
         EstimatedPeriodQuotaText = FormatEstimatedPeriodQuota(QuotaDisplay);
+        EstimatedPeriodQuotaSummaryText =
+            EstimatedPeriodQuotaText.Split(Environment.NewLine)[0];
     }
 
     private static string FormatEstimatedPeriodQuota(QuotaDisplay? display)
@@ -308,7 +317,7 @@ public sealed class AccountRowViewModel : ObservableObject
         }
         else
         {
-            text = $"单次{period}额度（估算）：暂不可用";
+            text = "额度估算：采集中，还需使用后刷新";
         }
 
         return AppendDetailLine(text, display.EstimateStatus);

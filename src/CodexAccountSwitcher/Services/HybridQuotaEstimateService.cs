@@ -192,16 +192,15 @@ public sealed class HybridQuotaEstimateService
         QuotaUsageObservation observation;
 
         if (analyticsAvailability == AnalyticsAvailability.Available &&
-            analytics?.State == AnalyticsUsageState.Valid)
+            analytics?.State == AnalyticsUsageState.Valid &&
+            analytics.UpperCredits > 0)
         {
             source = QuotaEstimateSource.Analytics;
-            var estimate = analytics.UpperCredits > 0
-                ? QuotaEstimateMath.TryCreateFullIntervalPrecise(
-                    analytics.LowerCredits,
-                    analytics.UpperCredits,
-                    display.UsedPercent,
-                    PercentResolution)
-                : null;
+            var estimate = QuotaEstimateMath.TryCreateFullIntervalPrecise(
+                analytics.LowerCredits,
+                analytics.UpperCredits,
+                display.UsedPercent,
+                PercentResolution);
             observation = CreateObservation(
                 segment,
                 observedAt,
@@ -971,6 +970,11 @@ public sealed class HybridQuotaEstimateService
         else if (analytics?.State == AnalyticsUsageState.Empty)
         {
             statuses.Add("Analytics 无数据，已改用本机用量估算");
+        }
+        else if (analytics?.State == AnalyticsUsageState.Valid &&
+                 analytics.UpperCredits == 0)
+        {
+            statuses.Add("Analytics Credits 为 0，已改用本机用量估算");
         }
         else
         {

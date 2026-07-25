@@ -45,6 +45,17 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Main_window_exposes_standard_minimize_button()
+    {
+        var xaml = File.ReadAllText(Path.Combine(
+            FindDirectory("src", "CodexAccountSwitcher"),
+            "MainWindow.xaml"));
+
+        Assert.Contains("x:Name=\"WindowMinimizeButton\"", xaml, StringComparison.Ordinal);
+        Assert.Contains("Click=\"MinimizeButton_Click\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Main_window_exposes_compact_reset_quota_metadata_and_edit_command()
     {
         var xaml = File.ReadAllText(Path.Combine(
@@ -58,6 +69,10 @@ public sealed class WpfInterfaceContractTests
             xaml,
             StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding EstimatedPeriodQuotaText}\"", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "Text=\"{Binding EstimatedPeriodQuotaSummaryText}\"",
+            xaml,
+            StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding OfficialMonthlyLimitText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Command=\"{Binding DataContext.EditMetadataCommand", xaml, StringComparison.Ordinal);
     }

@@ -1874,11 +1874,11 @@ public sealed class MainWindowViewModelTests
             null));
 
         Assert.Equal(
-            $"单次月额度（估算）：暂不可用{Environment.NewLine}{estimateStatus}",
+            $"额度估算：采集中，还需使用后刷新{Environment.NewLine}{estimateStatus}",
             row.EstimatedPeriodQuotaText);
         Assert.Equal("Resets 2026-08-22 22:06 UTC", row.QuotaStatusText);
         Assert.Contains(estimateStatus, row.QuotaToolTip, StringComparison.Ordinal);
-        Assert.Contains("暂不可用", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
+        Assert.Contains("采集中", row.EstimatedPeriodQuotaText, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -1903,7 +1903,7 @@ public sealed class MainWindowViewModelTests
             },
             null));
 
-        Assert.Equal("单次月额度（估算）：暂不可用", row.EstimatedPeriodQuotaText);
+        Assert.Equal("额度估算：采集中，还需使用后刷新", row.EstimatedPeriodQuotaText);
         Assert.True(row.HasEstimatedPeriodQuotaText);
     }
 
@@ -1931,7 +1931,7 @@ public sealed class MainWindowViewModelTests
             null));
 
         Assert.Equal(
-            $"单次周额度（估算）：暂不可用{Environment.NewLine}" +
+            $"额度估算：采集中，还需使用后刷新{Environment.NewLine}" +
             "本机用量扫描不完整",
             row.EstimatedPeriodQuotaText);
     }

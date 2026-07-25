@@ -48,6 +48,9 @@ public partial class MainWindow : Window
 
     private void CloseButton_Click(object sender, RoutedEventArgs e) => Close();
 
+    private void MinimizeButton_Click(object sender, RoutedEventArgs e) =>
+        WindowState = WindowState.Minimized;
+
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (e.ButtonState == MouseButtonState.Pressed)

@@ -1081,6 +1081,29 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Zero_credit_analytics_uses_local_fallback()
+    {
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            new AnalyticsUsageParseResult(AnalyticsUsageState.Valid, 0m, 0m),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(QuotaEstimateSource.Local, result.EstimateSource);
+        Assert.Equal(15.69m, result.EstimatedPeriodQuotaLowerUsd);
+        var observation = Assert.Single(context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.Equal(QuotaEstimateSource.Local, observation.Source);
+    }
+
+    [Fact]
     public async Task Invalid_analytics_uses_local_fallback_with_invalid_data_status()
     {
         var service = CreateService(

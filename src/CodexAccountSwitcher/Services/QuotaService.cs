@@ -376,6 +376,49 @@ public sealed class QuotaService
         ArgumentNullException.ThrowIfNull(accounts);
         ArgumentNullException.ThrowIfNull(reportAsync);
 
+        return await RefreshAllCoreAsync(
+            accounts,
+            codexHome,
+            reportAsync,
+            cancellationToken,
+            null);
+    }
+
+    public async Task RefreshAllAsync(
+        IReadOnlyList<AccountRecord> accounts,
+        string codexHome,
+        IProgress<QuotaUpdate> progress,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(accounts);
+        ArgumentNullException.ThrowIfNull(progress);
+
+        var completedUpdates = new List<QuotaUpdate>(accounts.Count);
+        await RefreshAllCoreAsync(
+            accounts,
+            codexHome,
+            (update, _) =>
+            {
+                completedUpdates.Add(update);
+                return Task.CompletedTask;
+            },
+            cancellationToken,
+            warning =>
+            {
+                foreach (var update in completedUpdates)
+                {
+                    progress.Report(WithWarning(update, warning));
+                }
+            });
+    }
+
+    private async Task<string?> RefreshAllCoreAsync(
+        IReadOnlyList<AccountRecord> accounts,
+        string codexHome,
+        Func<QuotaUpdate, CancellationToken, Task> reportAsync,
+        CancellationToken cancellationToken,
+        Action<string?>? completed)
+    {
         var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
         try
         {
@@ -391,41 +434,18 @@ public sealed class QuotaService
         }
         catch
         {
-            await TryCompleteHybridRefreshAsync(
+            var completionWarning = await TryCompleteHybridRefreshAsync(
                 hybridContext,
                 CancellationToken.None);
+            completed?.Invoke(completionWarning);
             throw;
         }
 
-        return await TryCompleteHybridRefreshAsync(
+        var warning = await TryCompleteHybridRefreshAsync(
             hybridContext,
             CancellationToken.None);
-    }
-
-    public async Task RefreshAllAsync(
-        IReadOnlyList<AccountRecord> accounts,
-        string codexHome,
-        IProgress<QuotaUpdate> progress,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(accounts);
-        ArgumentNullException.ThrowIfNull(progress);
-
-        var completedUpdates = new List<QuotaUpdate>(accounts.Count);
-        var warning = await RefreshAllAsync(
-            accounts,
-            codexHome,
-            (update, _) =>
-            {
-                completedUpdates.Add(update);
-                return Task.CompletedTask;
-            },
-            cancellationToken);
-
-        foreach (var update in completedUpdates)
-        {
-            progress.Report(WithWarning(update, warning));
-        }
+        completed?.Invoke(warning);
+        return warning;
     }
 
     private QuotaDisplay ApplyEstimate(

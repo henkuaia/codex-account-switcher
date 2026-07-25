@@ -1083,7 +1083,7 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
-    public async Task Refresh_all_save_failure_reports_shared_warning_once_to_every_account_in_order()
+    public async Task Refresh_all_save_failure_returns_shared_warning_after_reporting_each_account_in_order()
     {
         using var home = new TemporaryDirectory();
         var accounts = new[]
@@ -1245,7 +1245,7 @@ public sealed class QuotaServiceTests
                     : JsonResponse("""{"data":[]}"""));
         });
         using var client = new HttpClient(handler);
-        var reports = new List<QuotaUpdate>();
+        var progress = new CollectingProgress<QuotaUpdate>();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
             new QuotaService(
@@ -1253,16 +1253,12 @@ public sealed class QuotaServiceTests
                 hybridEstimator: hybrid).RefreshAllAsync(
                     accounts,
                     home.Path,
-                    (update, _) =>
-                    {
-                        reports.Add(update);
-                        return Task.CompletedTask;
-                    },
+                    progress,
                     cancellation.Token));
 
-        var update = Assert.Single(reports);
+        var update = Assert.Single(progress.Values);
         Assert.Equal(accounts[0].AccountKey, update.AccountKey);
-        Assert.Null(update.Warning);
+        Assert.Contains("未保存", update.Warning, StringComparison.Ordinal);
         Assert.Equal(1, saveCount);
         Assert.Single(attemptedSave!.Accounts[accounts[0].AccountKey].Observations);
         Assert.Equal(3, handler.Requests.Count);

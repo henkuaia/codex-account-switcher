@@ -48,9 +48,9 @@ public sealed class MainWindowViewModel : ObservableObject
     private readonly Func<CancellationToken, Task<AccountRegistry>> _loadRegistryAsync;
     private readonly Func<
         IReadOnlyList<AccountRecord>,
-        IProgress<QuotaUpdate>,
+        Func<QuotaUpdate, CancellationToken, Task>,
         CancellationToken,
-        Task> _refreshQuotaAsync;
+        Task<string?>> _refreshQuotaAsync;
     private readonly Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> _loginAsync;
     private readonly Func<
         AccountRecord,
@@ -84,6 +84,8 @@ public sealed class MainWindowViewModel : ObservableObject
     private int _operationGate;
     private int _registryReloadPending;
     private bool _isBusy;
+    private bool _isBulkRefreshing;
+    private bool _quotaCacheSaveFailed;
     private bool _canRetryLaunch;
     private bool _isHelperAvailable;
     private string _helperAvailabilityError = string.Empty;
@@ -129,9 +131,9 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
         Func<
             IReadOnlyList<AccountRecord>,
-            IProgress<QuotaUpdate>,
+            Func<QuotaUpdate, CancellationToken, Task>,
             CancellationToken,
-            Task> refreshQuotaAsync,
+            Task<string?>> refreshQuotaAsync,
         Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> loginAsync,
         Func<CancellationToken, Task<CommandResult>> removeAsync,
         Func<
@@ -174,9 +176,9 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
         Func<
             IReadOnlyList<AccountRecord>,
-            IProgress<QuotaUpdate>,
+            Func<QuotaUpdate, CancellationToken, Task>,
             CancellationToken,
-            Task> refreshQuotaAsync,
+            Task<string?>> refreshQuotaAsync,
         Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> loginAsync,
         Func<
             AccountRecord,
@@ -213,9 +215,9 @@ public sealed class MainWindowViewModel : ObservableObject
         Func<CancellationToken, Task<AccountRegistry>> loadRegistryAsync,
         Func<
             IReadOnlyList<AccountRecord>,
-            IProgress<QuotaUpdate>,
+            Func<QuotaUpdate, CancellationToken, Task>,
             CancellationToken,
-            Task> refreshQuotaAsync,
+            Task<string?>> refreshQuotaAsync,
         Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> loginAsync,
         Func<
             AccountRecord,
@@ -280,6 +282,15 @@ public sealed class MainWindowViewModel : ObservableObject
             (_, cancellationToken) => RunBusyAsync(RefreshQuotaAsync, cancellationToken),
             _ => !IsBusy && IsHelperAvailable,
             HandleCommandErrorAsync);
+        RefreshAccountCommand = new AsyncCommand(
+            _dispatcher,
+            (parameter, cancellationToken) => RunBusyAsync(
+                token => RefreshAccountQuotaAsync(parameter, token),
+                cancellationToken),
+            parameter => !IsBusy &&
+                IsHelperAvailable &&
+                parameter is AccountRowViewModel,
+            HandleCommandErrorAsync);
         AddCommand = new AsyncCommand(
             _dispatcher,
             (_, cancellationToken) => RunBusyAsync(LoginAsync, cancellationToken),
@@ -313,6 +324,8 @@ public sealed class MainWindowViewModel : ObservableObject
 
     public AsyncCommand RefreshCommand { get; }
 
+    public AsyncCommand RefreshAccountCommand { get; }
+
     public AsyncCommand AddCommand { get; }
 
     public AsyncCommand RemoveCommand { get; }
@@ -339,6 +352,12 @@ public sealed class MainWindowViewModel : ObservableObject
     {
         get => _isBusy;
         private set => SetProperty(ref _isBusy, value);
+    }
+
+    public bool IsBulkRefreshing
+    {
+        get => _isBulkRefreshing;
+        private set => SetProperty(ref _isBulkRefreshing, value);
     }
 
     public bool IsHelperAvailable
@@ -397,60 +416,127 @@ public sealed class MainWindowViewModel : ObservableObject
             return;
         }
 
-        var updates = new List<QuotaUpdate>();
-        await _refreshQuotaAsync(
-            _registry.Accounts.ToArray(),
-            new InlineProgress<QuotaUpdate>(updates.Add),
-            cancellationToken);
-        var refreshWarning = updates
-            .Select(update => update.Warning)
-            .LastOrDefault(warning => !string.IsNullOrWhiteSpace(warning));
+        _quotaCacheSaveFailed = false;
         await _dispatcher.InvokeAsync(
             () =>
             {
-                foreach (var update in updates)
+                IsBulkRefreshing = true;
+                foreach (var row in Accounts)
                 {
-                    Accounts.FirstOrDefault(row => string.Equals(
-                        row.Account.AccountKey,
-                        update.AccountKey,
-                        StringComparison.Ordinal))?.ApplyQuota(update);
+                    row.SetRefreshing(true);
                 }
-
-                StatusText = refreshWarning ?? "额度刷新完成。";
             },
             cancellationToken);
 
-        var refreshedAt = DateTimeOffset.UtcNow;
-        var mergedCache = new Dictionary<string, QuotaCacheEntry>(
-            _quotaCache,
-            StringComparer.Ordinal);
-        var hasSuccessfulUpdate = false;
-        foreach (var update in updates)
+        try
         {
-            if (update.Error is null && update.Display is { } display)
+            var warning = await _refreshQuotaAsync(
+                _registry.Accounts.ToArray(),
+                ApplyAndPersistQuotaUpdateAsync,
+                cancellationToken);
+            if (!_quotaCacheSaveFailed)
             {
-                mergedCache[update.AccountKey] = new QuotaCacheEntry(display, refreshedAt);
-                hasSuccessfulUpdate = true;
+                await _dispatcher.InvokeAsync(
+                    () => StatusText = warning ?? "额度刷新完成。",
+                    CancellationToken.None);
             }
         }
+        finally
+        {
+            await _dispatcher.InvokeAsync(
+                () =>
+                {
+                    IsBulkRefreshing = false;
+                    foreach (var row in Accounts)
+                    {
+                        row.SetRefreshing(false);
+                    }
+                },
+                CancellationToken.None);
+        }
+    }
 
-        if (!hasSuccessfulUpdate)
+    private async Task RefreshAccountQuotaAsync(
+        object? parameter,
+        CancellationToken cancellationToken)
+    {
+        if (parameter is not AccountRowViewModel target ||
+            !await RecheckHelperAvailabilityAsync(cancellationToken))
         {
             return;
         }
 
+        _quotaCacheSaveFailed = false;
+        await _dispatcher.InvokeAsync(
+            () => target.SetRefreshing(true),
+            cancellationToken);
         try
         {
-            await _saveQuotaCacheAsync(mergedCache, cancellationToken);
-            _quotaCache = mergedCache;
+            var warning = await _refreshQuotaAsync(
+                [target.Account],
+                ApplyAndPersistQuotaUpdateAsync,
+                cancellationToken);
+            if (!_quotaCacheSaveFailed)
+            {
+                await _dispatcher.InvokeAsync(
+                    () => StatusText = warning ?? "该账号额度刷新完成。",
+                    CancellationToken.None);
+            }
         }
-        catch (Exception exception) when (
-            exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        finally
         {
             await _dispatcher.InvokeAsync(
-                () => StatusText = refreshWarning is null
-                    ? "额度刷新完成，但本地缓存失败。"
-                    : $"{refreshWarning}；额度刷新完成，但本地缓存失败。",
+                () => target.SetRefreshing(false),
+                CancellationToken.None);
+        }
+    }
+
+    private async Task ApplyAndPersistQuotaUpdateAsync(
+        QuotaUpdate update,
+        CancellationToken cancellationToken)
+    {
+        await _dispatcher.InvokeAsync(
+            () =>
+            {
+                var row = Accounts.FirstOrDefault(candidate => string.Equals(
+                    candidate.Account.AccountKey,
+                    update.AccountKey,
+                    StringComparison.Ordinal));
+                var displayUpdate = update.Error is null
+                    ? update
+                    : update with { Error = "额度刷新失败，请稍后重试。" };
+                row?.ApplyQuota(displayUpdate);
+                row?.SetRefreshing(false);
+            },
+            cancellationToken);
+
+        if (update.Error is not null || update.Display is null)
+        {
+            return;
+        }
+
+        var merged = new Dictionary<string, QuotaCacheEntry>(
+            _quotaCache,
+            StringComparer.Ordinal)
+        {
+            [update.AccountKey] = new(
+                update.Display,
+                DateTimeOffset.UtcNow),
+        };
+
+        try
+        {
+            await _saveQuotaCacheAsync(merged, cancellationToken);
+            _quotaCache = merged;
+        }
+        catch (Exception exception) when (
+            exception is IOException or
+                UnauthorizedAccessException or
+                InvalidOperationException)
+        {
+            _quotaCacheSaveFailed = true;
+            await _dispatcher.InvokeAsync(
+                () => StatusText = "额度已刷新，但本地缓存保存失败。",
                 CancellationToken.None);
         }
     }
@@ -830,6 +916,7 @@ public sealed class MainWindowViewModel : ObservableObject
     private void RaiseCommandCanExecuteChanged()
     {
         RefreshCommand.NotifyCanExecuteChanged();
+        RefreshAccountCommand.NotifyCanExecuteChanged();
         AddCommand.NotifyCanExecuteChanged();
         RemoveCommand.NotifyCanExecuteChanged();
         SwitchCommand.NotifyCanExecuteChanged();
@@ -853,16 +940,16 @@ public sealed class MainWindowViewModel : ObservableObject
 
     private static Func<
         IReadOnlyList<AccountRecord>,
-        IProgress<QuotaUpdate>,
+        Func<QuotaUpdate, CancellationToken, Task>,
         CancellationToken,
-        Task> CreateRefreshQuotaDelegate(
+        Task<string?>> CreateRefreshQuotaDelegate(
             string codexHome,
             QuotaService quotaService)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(codexHome);
         ArgumentNullException.ThrowIfNull(quotaService);
-        return (accounts, progress, cancellationToken) =>
-            quotaService.RefreshAllAsync(accounts, codexHome, progress, cancellationToken);
+        return (accounts, reportAsync, cancellationToken) =>
+            quotaService.RefreshAllAsync(accounts, codexHome, reportAsync, cancellationToken);
     }
 
     private static Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>> CreateLoginDelegate(
@@ -925,8 +1012,4 @@ public sealed class MainWindowViewModel : ObservableObject
         return safeSwitchCoordinator.SwitchAsync;
     }
 
-    private sealed class InlineProgress<T>(Action<T> report) : IProgress<T>
-    {
-        public void Report(T value) => report(value);
-    }
 }

@@ -503,7 +503,7 @@ public sealed class WpfRuntimeTests
 
     private static MainWindowViewModel CreateViewModel(AccountRegistry registry) => new(
         _ => Task.FromResult(registry),
-        (_, _, _) => Task.CompletedTask,
+        (_, _, _) => Task.FromResult<string?>(null),
         (_, _) => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         _ => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         (_, _, _) => Task.FromResult(new SwitchResult(true, "switched", true)),

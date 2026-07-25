@@ -8,6 +8,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private AccountRecord _account;
     private bool _isActive;
     private bool _canSwitch;
+    private bool _isRefreshing;
     private string _displayIdentity;
     private bool _hasQuotaStatus;
     private bool _hasOfficialMonthlyLimit;
@@ -52,6 +53,12 @@ public sealed class AccountRowViewModel : ObservableObject
     {
         get => _canSwitch;
         private set => SetProperty(ref _canSwitch, value);
+    }
+
+    public bool IsRefreshing
+    {
+        get => _isRefreshing;
+        private set => SetProperty(ref _isRefreshing, value);
     }
 
     public string? SwitchUnavailableReason
@@ -153,6 +160,8 @@ public sealed class AccountRowViewModel : ObservableObject
         CanSwitch = canSwitch;
         SwitchUnavailableReason = switchUnavailableReason;
     }
+
+    internal void SetRefreshing(bool value) => IsRefreshing = value;
 
     internal void ApplyQuota(QuotaUpdate update)
     {

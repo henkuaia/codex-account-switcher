@@ -384,34 +384,6 @@ public sealed class QuotaService
             null);
     }
 
-    public async Task RefreshAllAsync(
-        IReadOnlyList<AccountRecord> accounts,
-        string codexHome,
-        IProgress<QuotaUpdate> progress,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(accounts);
-        ArgumentNullException.ThrowIfNull(progress);
-
-        var completedUpdates = new List<QuotaUpdate>(accounts.Count);
-        await RefreshAllCoreAsync(
-            accounts,
-            codexHome,
-            (update, _) =>
-            {
-                completedUpdates.Add(update);
-                return Task.CompletedTask;
-            },
-            cancellationToken,
-            warning =>
-            {
-                foreach (var update in completedUpdates)
-                {
-                    progress.Report(WithWarning(update, warning));
-                }
-            });
-    }
-
     private async Task<string?> RefreshAllCoreAsync(
         IReadOnlyList<AccountRecord> accounts,
         string codexHome,

@@ -72,6 +72,181 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Account_row_refreshing_state_is_independent()
+    {
+        var first = new AccountRowViewModel(
+            Accounts.Record("first-key", "first@example.com"),
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        var second = new AccountRowViewModel(
+            Accounts.Record("second-key", "second@example.com"),
+            isActive: false,
+            canSwitch: true,
+            switchUnavailableReason: null);
+
+        first.SetRefreshing(true);
+
+        Assert.True(first.IsRefreshing);
+        Assert.False(second.IsRefreshing);
+
+        first.SetRefreshing(false);
+        Assert.False(first.IsRefreshing);
+    }
+
+    [Fact]
+    public async Task Bulk_refresh_clears_and_saves_each_row_as_its_update_arrives()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var first = fixture.ViewModel.Accounts[0];
+        var second = fixture.ViewModel.Accounts[1];
+        var releaseSecond = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstSaved = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        fixture.QuotaRefreshOperation = async (accounts, reportAsync, cancellationToken) =>
+        {
+            await reportAsync(
+                new QuotaUpdate(
+                    accounts[0].AccountKey,
+                    CreateQuotaCacheEntry(
+                        75,
+                        "2026-07-25T10:00:00Z",
+                        "2100-08-01T00:00:00Z").Display with
+                    {
+                        Period = QuotaPeriod.Weekly,
+                        WindowDuration = TimeSpan.FromDays(7),
+                    },
+                    null),
+                cancellationToken);
+            await releaseSecond.Task.WaitAsync(cancellationToken);
+            await reportAsync(
+                new QuotaUpdate(
+                    accounts[1].AccountKey,
+                    CreateQuotaCacheEntry(
+                        40,
+                        "2026-07-25T10:01:00Z",
+                        "2100-08-01T00:00:00Z").Display with
+                    {
+                        Period = QuotaPeriod.Weekly,
+                        WindowDuration = TimeSpan.FromDays(7),
+                    },
+                    null),
+                cancellationToken);
+            return null;
+        };
+        fixture.QuotaCacheSaveOperation = (cache, _) =>
+        {
+            if (cache.ContainsKey(first.Account.AccountKey))
+            {
+                firstSaved.TrySetResult();
+            }
+
+            return Task.CompletedTask;
+        };
+
+        var refresh = fixture.ViewModel.RefreshCommand.ExecuteAsync();
+        await firstSaved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.False(first.IsRefreshing);
+        Assert.True(second.IsRefreshing);
+        Assert.True(fixture.ViewModel.IsBulkRefreshing);
+        Assert.False(fixture.ViewModel.RefreshCommand.CanExecute(null));
+        Assert.False(fixture.ViewModel.RefreshAccountCommand.CanExecute(second));
+        Assert.False(fixture.ViewModel.AddCommand.CanExecute(null));
+        Assert.Equal(75, first.QuotaDisplay!.RemainingPercent);
+
+        releaseSecond.SetResult();
+        await refresh;
+
+        Assert.False(fixture.ViewModel.IsBulkRefreshing);
+        Assert.False(second.IsRefreshing);
+        Assert.Equal(40, second.QuotaDisplay!.RemainingPercent);
+    }
+
+    [Fact]
+    public async Task Account_refresh_requests_and_updates_only_its_target()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var first = fixture.ViewModel.Accounts[0];
+        var second = fixture.ViewModel.Accounts[1];
+        IReadOnlyList<AccountRecord>? requested = null;
+
+        fixture.QuotaRefreshOperation = async (accounts, reportAsync, cancellationToken) =>
+        {
+            requested = accounts;
+            await reportAsync(
+                new QuotaUpdate(
+                    accounts[0].AccountKey,
+                    CreateQuotaCacheEntry(
+                        88,
+                        "2026-07-25T10:00:00Z",
+                        "2100-08-22T00:00:00Z").Display,
+                    null),
+                cancellationToken);
+            return null;
+        };
+
+        await fixture.ViewModel.RefreshAccountCommand.ExecuteAsync(second);
+
+        Assert.Single(requested!);
+        Assert.Equal(second.Account.AccountKey, requested![0].AccountKey);
+        Assert.Null(first.QuotaDisplay);
+        Assert.Equal(88, second.QuotaDisplay!.RemainingPercent);
+        Assert.False(second.IsRefreshing);
+    }
+
+    [Fact]
+    public async Task Bulk_refresh_cancellation_clears_every_row_refreshing_state()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.QuotaRefreshOperation = async (_, _, cancellationToken) =>
+        {
+            started.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            return null;
+        };
+        using var cancellationSource = new CancellationTokenSource();
+
+        var refresh = fixture.ViewModel.RefreshCommand.ExecuteAsync(cancellationToken: cancellationSource.Token);
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellationSource.Cancel();
+        await refresh;
+
+        Assert.False(fixture.ViewModel.IsBulkRefreshing);
+        Assert.All(fixture.ViewModel.Accounts, row => Assert.False(row.IsRefreshing));
+    }
+
+    [Fact]
+    public async Task Failed_refresh_localizes_error_preserves_cached_quota_and_clears_row_state()
+    {
+        var fixture = new Fixture();
+        var cached = CreateQuotaCacheEntry(60, "2026-07-24T10:00:00Z", "2100-08-01T00:00:00Z");
+        fixture.QuotaCache[fixture.Second.AccountKey] = cached;
+        await fixture.ViewModel.LoadAsync();
+        var failedRow = fixture.Row(fixture.Second);
+        fixture.QuotaRefreshOperation = async (accounts, reportAsync, cancellationToken) =>
+        {
+            await reportAsync(
+                new QuotaUpdate(accounts[1].AccountKey, null, "quota failed"),
+                cancellationToken);
+            throw new InvalidOperationException("refresh operation failed");
+        };
+
+        await fixture.ViewModel.RefreshCommand.ExecuteAsync();
+
+        Assert.Equal(cached.Display, failedRow.QuotaDisplay);
+        Assert.Equal("额度刷新失败，请稍后重试。", failedRow.QuotaError);
+        Assert.False(fixture.ViewModel.IsBulkRefreshing);
+        Assert.All(fixture.ViewModel.Accounts, row => Assert.False(row.IsRefreshing));
+    }
+
+    [Fact]
     public async Task Initial_load_does_not_refresh_quota()
     {
         var fixture = new Fixture();
@@ -356,6 +531,7 @@ public sealed class MainWindowViewModelTests
         {
             refreshStarted.TrySetResult();
             await releaseRefresh.Task.WaitAsync(cancellationToken);
+            return null;
         };
         var deferredReloadObserved = false;
         fixture.LoadRegistryOperation = cancellationToken =>
@@ -479,6 +655,7 @@ public sealed class MainWindowViewModelTests
         {
             refreshStarted.TrySetResult();
             await releaseRefresh.Task.WaitAsync(cancellationToken);
+            return null;
         };
 
         var faultedLoad = fixture.ViewModel.LoadAsync();
@@ -619,6 +796,7 @@ public sealed class MainWindowViewModelTests
         {
             refreshStarted.TrySetResult();
             await releaseRefresh.Task.WaitAsync(cancellationToken);
+            return null;
         };
 
         var running = fixture.ViewModel.RefreshCommand.ExecuteAsync();
@@ -715,7 +893,7 @@ public sealed class MainWindowViewModelTests
         var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
         [
             (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registries.Dequeue())),
-            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<IReadOnlyList<AccountRecord>, Func<QuotaUpdate, CancellationToken, Task>, CancellationToken, Task<string?>>)((_, _, _) => Task.FromResult<string?>(null)),
             (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) =>
             {
                 safeLoginCalls++;
@@ -766,7 +944,7 @@ public sealed class MainWindowViewModelTests
         var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
         [
             (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registry)),
-            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<IReadOnlyList<AccountRecord>, Func<QuotaUpdate, CancellationToken, Task>, CancellationToken, Task<string?>>)((_, _, _) => Task.FromResult<string?>(null)),
             (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) => Task.FromResult(new LoginResult(false, "unused", true))),
             (Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>)((_, _, _) => Task.FromResult(new RemovalResult(true, "unused"))),
             (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true))),
@@ -1060,10 +1238,10 @@ public sealed class MainWindowViewModelTests
         var viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
         [
             (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registries.Dequeue())),
-            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) =>
+            (Func<IReadOnlyList<AccountRecord>, Func<QuotaUpdate, CancellationToken, Task>, CancellationToken, Task<string?>>)((_, _, _) =>
             {
                 quotaRefreshCalls++;
-                return Task.CompletedTask;
+                return Task.FromResult<string?>(null);
             }),
             (Func<ProcessOutputHandler, CancellationToken, Task<LoginResult>>)((_, _) => Task.FromResult(new LoginResult(false, "unused", true))),
             (Func<AccountRecord, AccountRegistry, CancellationToken, Task<RemovalResult>>)((target, registry, _) =>
@@ -1185,7 +1363,7 @@ public sealed class MainWindowViewModelTests
         Assert.Equal("Not queried", fixture.Row(fixture.First).QuotaLabel);
         var affected = fixture.Row(fixture.Second);
         Assert.Equal("Unavailable", affected.QuotaLabel);
-        Assert.Equal("quota failed", affected.QuotaError);
+        Assert.Equal("额度刷新失败，请稍后重试。", affected.QuotaError);
         Assert.True(affected.CanSwitch);
     }
 
@@ -1217,7 +1395,7 @@ public sealed class MainWindowViewModelTests
 
         Assert.Equal(display, fixture.Row(renamedFirst).QuotaDisplay);
         Assert.Equal("Renamed first", fixture.Row(renamedFirst).DisplayIdentity);
-        Assert.Equal("quota failed", fixture.Row(renamedSecond).QuotaError);
+        Assert.Equal("额度刷新失败，请稍后重试。", fixture.Row(renamedSecond).QuotaError);
         Assert.True(fixture.Row(renamedSecond).IsActive);
         Assert.Equal("Not queried", fixture.Row(fixture.Third).QuotaLabel);
 
@@ -1771,7 +1949,7 @@ public sealed class MainWindowViewModelTests
         IReadOnlyDictionary<string, AccountMetadata>? saved = null;
         var viewModel = new MainWindowViewModel(
             _ => Task.FromResult(registry),
-            (_, _, _) => Task.CompletedTask,
+            (_, _, _) => Task.FromResult<string?>(null),
             (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
             (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
             (_, _, _) => Task.FromResult(new SwitchResult(false, "unused", true)),
@@ -1843,7 +2021,7 @@ public sealed class MainWindowViewModelTests
             (_, _, _) =>
             {
                 refreshCalls++;
-                return Task.CompletedTask;
+                return Task.FromResult<string?>(null);
             },
             (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
             (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
@@ -1900,11 +2078,11 @@ public sealed class MainWindowViewModelTests
         IReadOnlyDictionary<string, QuotaCacheEntry>? saved = null;
         var viewModel = new MainWindowViewModel(
             _ => Task.FromResult(registry),
-            (_, progress, _) =>
+            async (_, reportAsync, cancellationToken) =>
             {
-                progress.Report(new QuotaUpdate(first.AccountKey, liveDisplay, null));
-                progress.Report(new QuotaUpdate(second.AccountKey, null, "quota failed"));
-                return Task.CompletedTask;
+                await reportAsync(new QuotaUpdate(first.AccountKey, liveDisplay, null), cancellationToken);
+                await reportAsync(new QuotaUpdate(second.AccountKey, null, "quota failed"), cancellationToken);
+                return null;
             },
             (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
             (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
@@ -1944,7 +2122,7 @@ public sealed class MainWindowViewModelTests
                 second.AccountKey,
                 StringComparison.Ordinal));
         Assert.Equal(oldSecond.Display, failedRow.QuotaDisplay);
-        Assert.Equal("quota failed", failedRow.QuotaError);
+        Assert.Equal("额度刷新失败，请稍后重试。", failedRow.QuotaError);
         Assert.Contains("上次刷新", failedRow.QuotaStatusText, StringComparison.Ordinal);
     }
 
@@ -1959,10 +2137,10 @@ public sealed class MainWindowViewModelTests
             "2100-08-01T00:00:00Z").Display;
         var viewModel = new MainWindowViewModel(
             _ => Task.FromResult(registry),
-            (_, progress, _) =>
+            async (_, reportAsync, cancellationToken) =>
             {
-                progress.Report(new QuotaUpdate(account.AccountKey, liveDisplay, null));
-                return Task.CompletedTask;
+                await reportAsync(new QuotaUpdate(account.AccountKey, liveDisplay, null), cancellationToken);
+                return null;
             },
             (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
             (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
@@ -1985,7 +2163,7 @@ public sealed class MainWindowViewModelTests
         await viewModel.RefreshCommand.ExecuteAsync();
 
         Assert.Equal(liveDisplay, Assert.Single(viewModel.Accounts).QuotaDisplay);
-        Assert.Equal("额度刷新完成，但本地缓存失败。", viewModel.StatusText);
+        Assert.Equal("额度已刷新，但本地缓存保存失败。", viewModel.StatusText);
     }
 
     [Fact]
@@ -1997,10 +2175,10 @@ public sealed class MainWindowViewModelTests
         var liveDisplay = cached.Display with { RemainingPercent = 40 };
         var viewModel = new MainWindowViewModel(
             _ => Task.FromResult(registry),
-            (_, progress, _) =>
+            async (_, reportAsync, cancellationToken) =>
             {
-                progress.Report(new QuotaUpdate(account.AccountKey, liveDisplay, null));
-                return Task.CompletedTask;
+                await reportAsync(new QuotaUpdate(account.AccountKey, liveDisplay, null), cancellationToken);
+                return null;
             },
             (_, _) => Task.FromResult(new LoginResult(false, "unused", true)),
             (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
@@ -2074,7 +2252,7 @@ public sealed class MainWindowViewModelTests
         viewModel = Assert.IsType<MainWindowViewModel>(constructor.Invoke(
         [
             (Func<CancellationToken, Task<AccountRegistry>>)(_ => Task.FromResult(registry)),
-            (Func<IReadOnlyList<AccountRecord>, IProgress<QuotaUpdate>, CancellationToken, Task>)((_, _, _) => Task.CompletedTask),
+            (Func<IReadOnlyList<AccountRecord>, Func<QuotaUpdate, CancellationToken, Task>, CancellationToken, Task<string?>>)((_, _, _) => Task.FromResult<string?>(null)),
             (Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>>)((_, _) => Task.FromResult(Succeeded())),
             (Func<CancellationToken, Task<CommandResult>>)(_ => Task.FromResult(Succeeded())),
             (Func<AccountRecord, AccountRegistry, CancellationToken, Task<SwitchResult>>)((_, _, _) => Task.FromResult(launchFailure)),
@@ -2247,13 +2425,35 @@ public sealed class MainWindowViewModelTests
             ViewModel = new MainWindowViewModel(
                 LoadRegistryAsync,
                 RefreshQuotaAsync,
-                LoginAsync,
-                RemoveAsync,
+                async (outputHandler, cancellationToken) =>
+                {
+                    var result = await LoginAsync(outputHandler, cancellationToken);
+                    return new LoginResult(
+                        result.Succeeded,
+                        result.Succeeded ? "Login completed." : "Login failed.",
+                        true);
+                },
+                async (_, _, cancellationToken) =>
+                {
+                    var result = await RemoveAsync(cancellationToken);
+                    return new RemovalResult(
+                        result.Succeeded,
+                        result.Succeeded ? "Removal completed." : "Removal failed.");
+                },
                 SwitchAsync,
                 _ => Task.FromResult(true),
+                () => new HelperAvailability(true, "codex-auth.exe", string.Empty),
                 Dialog,
                 Dispatcher,
-                activityTracker ?? new ActiveOperationTracker());
+                activityTracker ?? new ActiveOperationTracker(),
+                _ => Task.FromResult(new AccountMetadataLoadResult(
+                    new Dictionary<string, AccountMetadata>(StringComparer.Ordinal),
+                    null)),
+                (_, _) => Task.CompletedTask,
+                _ => Task.FromResult(new QuotaCacheLoadResult(
+                    new Dictionary<string, QuotaCacheEntry>(QuotaCache, StringComparer.Ordinal),
+                    null)),
+                SaveQuotaCacheAsync);
         }
 
         public AccountRecord First { get; }
@@ -2268,6 +2468,9 @@ public sealed class MainWindowViewModelTests
 
         public IReadOnlyList<QuotaUpdate> QuotaUpdates { get; set; } = [];
 
+        public Dictionary<string, QuotaCacheEntry> QuotaCache { get; } =
+            new(StringComparer.Ordinal);
+
         public Func<ProcessOutputHandler, CancellationToken, Task<CommandResult>> LoginOperation { get; set; } =
             (_, _) => Task.FromResult(Succeeded());
 
@@ -2278,9 +2481,14 @@ public sealed class MainWindowViewModelTests
 
         public Func<
             IReadOnlyList<AccountRecord>,
-            IProgress<QuotaUpdate>,
+            Func<QuotaUpdate, CancellationToken, Task>,
             CancellationToken,
-            Task>? QuotaRefreshOperation { get; set; }
+            Task<string?>>? QuotaRefreshOperation { get; set; }
+
+        public Func<
+            IReadOnlyDictionary<string, QuotaCacheEntry>,
+            CancellationToken,
+            Task>? QuotaCacheSaveOperation { get; set; }
 
         public Func<
             AccountRecord,
@@ -2328,21 +2536,41 @@ public sealed class MainWindowViewModelTests
             return Task.FromResult(Registry);
         }
 
-        private Task RefreshQuotaAsync(
+        private async Task<string?> RefreshQuotaAsync(
             IReadOnlyList<AccountRecord> accounts,
-            IProgress<QuotaUpdate> progress,
+            Func<QuotaUpdate, CancellationToken, Task> reportAsync,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             QuotaRefreshCallCount++;
             if (QuotaRefreshOperation is not null)
             {
-                return QuotaRefreshOperation(accounts, progress, cancellationToken);
+                return await QuotaRefreshOperation(accounts, reportAsync, cancellationToken);
             }
 
             foreach (var update in QuotaUpdates)
             {
-                progress.Report(update);
+                await reportAsync(update, cancellationToken);
+            }
+
+            return QuotaUpdates
+                .Select(update => update.Warning)
+                .LastOrDefault(warning => !string.IsNullOrWhiteSpace(warning));
+        }
+
+        private Task SaveQuotaCacheAsync(
+            IReadOnlyDictionary<string, QuotaCacheEntry> cache,
+            CancellationToken cancellationToken)
+        {
+            if (QuotaCacheSaveOperation is not null)
+            {
+                return QuotaCacheSaveOperation(cache, cancellationToken);
+            }
+
+            QuotaCache.Clear();
+            foreach (var pair in cache)
+            {
+                QuotaCache[pair.Key] = pair.Value;
             }
 
             return Task.CompletedTask;
@@ -2393,7 +2621,7 @@ public sealed class MainWindowViewModelTests
             Dialog = new FakeDialogService { ConfirmResult = true };
             ViewModel = new MainWindowViewModel(
                 LoadRegistryAsync,
-                (_, _, _) => Task.CompletedTask,
+                (_, _, _) => Task.FromResult<string?>(null),
                 LoginAsync,
                 (_, _, _) => Task.FromResult(new RemovalResult(false, "unused")),
                 SwitchAsync,
@@ -2563,14 +2791,14 @@ public sealed class MainWindowViewModelTests
             return Task.FromResult(Registry);
         }
 
-        private Task RefreshQuotaAsync(
+        private Task<string?> RefreshQuotaAsync(
             IReadOnlyList<AccountRecord> accounts,
-            IProgress<QuotaUpdate> progress,
+            Func<QuotaUpdate, CancellationToken, Task> reportAsync,
             CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             QuotaRefreshCallCount++;
-            return Task.CompletedTask;
+            return Task.FromResult<string?>(null);
         }
 
         private Task<LoginResult> LoginAsync(

@@ -380,16 +380,14 @@ public sealed class QuotaService
             accounts,
             codexHome,
             reportAsync,
-            cancellationToken,
-            null);
+            cancellationToken);
     }
 
     private async Task<string?> RefreshAllCoreAsync(
         IReadOnlyList<AccountRecord> accounts,
         string codexHome,
         Func<QuotaUpdate, CancellationToken, Task> reportAsync,
-        CancellationToken cancellationToken,
-        Action<string?>? completed)
+        CancellationToken cancellationToken)
     {
         var hybridContext = await TryBeginHybridRefreshAsync(cancellationToken);
         try
@@ -406,17 +404,15 @@ public sealed class QuotaService
         }
         catch
         {
-            var completionWarning = await TryCompleteHybridRefreshAsync(
+            await TryCompleteHybridRefreshAsync(
                 hybridContext,
                 CancellationToken.None);
-            completed?.Invoke(completionWarning);
             throw;
         }
 
         var warning = await TryCompleteHybridRefreshAsync(
             hybridContext,
             CancellationToken.None);
-        completed?.Invoke(warning);
         return warning;
     }
 

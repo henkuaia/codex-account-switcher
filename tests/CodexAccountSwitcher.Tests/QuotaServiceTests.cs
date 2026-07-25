@@ -8,6 +8,20 @@ namespace CodexAccountSwitcher.Tests;
 public sealed class QuotaServiceTests
 {
     [Fact]
+    public void Refresh_all_core_has_no_legacy_completion_bridge()
+    {
+        var method = typeof(QuotaService).GetMethod(
+            "RefreshAllCoreAsync",
+            System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic);
+
+        Assert.NotNull(method);
+        Assert.DoesNotContain(
+            method.GetParameters(),
+            parameter => parameter.ParameterType == typeof(Action<string>));
+    }
+
+    [Fact]
     public async Task Refresh_account_sends_authenticated_usage_request_and_parses_successful_response()
     {
         using var home = new TemporaryDirectory();

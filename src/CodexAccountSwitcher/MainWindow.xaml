@@ -68,7 +68,7 @@
                                     <Style.Triggers>
                                         <DataTrigger Binding="{Binding IsBulkRefreshing}" Value="True">
                                             <DataTrigger.EnterActions>
-                                                <BeginStoryboard>
+                                                <BeginStoryboard x:Name="BulkRefreshStoryboard">
                                                     <Storyboard>
                                                         <DoubleAnimation
                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
@@ -79,6 +79,9 @@
                                                     </Storyboard>
                                                 </BeginStoryboard>
                                             </DataTrigger.EnterActions>
+                                            <DataTrigger.ExitActions>
+                                                <RemoveStoryboard BeginStoryboardName="BulkRefreshStoryboard" />
+                                            </DataTrigger.ExitActions>
                                         </DataTrigger>
                                     </Style.Triggers>
                                 </Style>
@@ -190,7 +193,7 @@
                                                                     <Style.Triggers>
                                                                         <DataTrigger Binding="{Binding IsRefreshing}" Value="True">
                                                                             <DataTrigger.EnterActions>
-                                                                                <BeginStoryboard>
+                                                                                <BeginStoryboard x:Name="AccountRefreshStoryboard">
                                                                                     <Storyboard>
                                                                                         <DoubleAnimation
                                                                                             Storyboard.TargetProperty="(UIElement.RenderTransform).(RotateTransform.Angle)"
@@ -201,6 +204,9 @@
                                                                                     </Storyboard>
                                                                                 </BeginStoryboard>
                                                                             </DataTrigger.EnterActions>
+                                                                            <DataTrigger.ExitActions>
+                                                                                <RemoveStoryboard BeginStoryboardName="AccountRefreshStoryboard" />
+                                                                            </DataTrigger.ExitActions>
                                                                         </DataTrigger>
                                                                     </Style.Triggers>
                                                                 </Style>
@@ -318,7 +324,7 @@
                                                                     <DataTrigger Binding="{Binding IsRefreshing}" Value="True">
                                                                         <Setter Property="Opacity" Value="1" />
                                                                         <DataTrigger.EnterActions>
-                                                                            <BeginStoryboard>
+                                                                            <BeginStoryboard x:Name="QuotaSweepStoryboard">
                                                                                 <Storyboard>
                                                                                     <DoubleAnimation
                                                                                         Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)"
@@ -329,6 +335,9 @@
                                                                                 </Storyboard>
                                                                             </BeginStoryboard>
                                                                         </DataTrigger.EnterActions>
+                                                                        <DataTrigger.ExitActions>
+                                                                            <RemoveStoryboard BeginStoryboardName="QuotaSweepStoryboard" />
+                                                                        </DataTrigger.ExitActions>
                                                                     </DataTrigger>
                                                                 </Style.Triggers>
                                                             </Style>

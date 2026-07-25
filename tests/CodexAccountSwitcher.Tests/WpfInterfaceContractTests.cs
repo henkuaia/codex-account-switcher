@@ -118,6 +118,31 @@ public sealed class WpfInterfaceContractTests
             "Storyboard.TargetProperty=\"(UIElement.RenderTransform).(RotateTransform.Angle)\"",
             xaml,
             StringComparison.Ordinal);
+        Assert.Contains(
+            "x:Name=\"BulkRefreshStoryboard\"",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "x:Name=\"AccountRefreshStoryboard\"",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "x:Name=\"QuotaSweepStoryboard\"",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains("<DataTrigger.ExitActions>", xaml, StringComparison.Ordinal);
+        Assert.Contains(
+            "<RemoveStoryboard BeginStoryboardName=\"BulkRefreshStoryboard\" />",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "<RemoveStoryboard BeginStoryboardName=\"AccountRefreshStoryboard\" />",
+            xaml,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "<RemoveStoryboard BeginStoryboardName=\"QuotaSweepStoryboard\" />",
+            xaml,
+            StringComparison.Ordinal);
     }
 
     [Fact]

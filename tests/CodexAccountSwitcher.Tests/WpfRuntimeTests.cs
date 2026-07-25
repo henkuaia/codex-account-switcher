@@ -45,6 +45,10 @@ public sealed class WpfRuntimeTests
             OperationWindow? canceledLoginWindow = null;
             OperationWindow? dialogRemoveWindow = null;
             SwitchConfirmationWindow? confirmationWindow = null;
+            var refreshStarted = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var finishRefresh = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
             try
             {
                 var expectedColors = new Dictionary<string, Color>
@@ -66,7 +70,14 @@ public sealed class WpfRuntimeTests
                 var first = Accounts.Record("first", "same@example.com", accountId: "account-1");
                 var second = Accounts.Record("second", "same@example.com", accountId: "account-2");
                 var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
-                var viewModel = CreateViewModel(registry);
+                var viewModel = CreateViewModel(
+                    registry,
+                    async (_, _, cancellationToken) =>
+                    {
+                        refreshStarted.TrySetResult();
+                        await finishRefresh.Task.WaitAsync(cancellationToken);
+                        return null;
+                    });
                 await viewModel.LoadAsync();
                 mainWindow = new MainWindow(viewModel);
                 Assert.True(mainWindow.ShowInTaskbar);
@@ -124,6 +135,61 @@ public sealed class WpfRuntimeTests
                         border.Name == "RowBorder" &&
                         border.DataContext is AccountRowViewModel { IsActive: true });
                 Assert.Equal(7, activeRow.CornerRadius.TopLeft);
+                var refreshGlyph = Assert.IsType<TextBlock>(mainWindow.FindName("RefreshGlyph"));
+                var accountRefreshGlyph = FindVisualChildren<TextBlock>(mainWindow)
+                    .Single(textBlock =>
+                        textBlock.Text == "\uE72C" &&
+                        textBlock.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == first.AccountKey);
+                var quotaSweep = FindVisualChildren<Border>(mainWindow)
+                    .Single(border =>
+                        border.Name == "QuotaSweep" &&
+                        border.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == first.AccountKey);
+
+                var refresh = viewModel.RefreshCommand.ExecuteAsync();
+                await refreshStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+                await mainWindow.Dispatcher.InvokeAsync(
+                    static () => { },
+                    DispatcherPriority.ApplicationIdle);
+                await Task.Delay(100);
+                var refreshRotation = Assert.IsType<RotateTransform>(refreshGlyph.RenderTransform);
+                var accountRefreshRotation =
+                    Assert.IsType<RotateTransform>(accountRefreshGlyph.RenderTransform);
+                var quotaSweepTranslation =
+                    Assert.IsType<TranslateTransform>(quotaSweep.RenderTransform);
+                Assert.True(viewModel.IsBulkRefreshing);
+                Assert.True(viewModel.Accounts.All(row => row.IsRefreshing));
+                Assert.True(
+                    refreshRotation.HasAnimatedProperties &&
+                    accountRefreshRotation.HasAnimatedProperties &&
+                    quotaSweepTranslation.HasAnimatedProperties,
+                    $"Expected active refresh clocks. top={refreshRotation.HasAnimatedProperties}, " +
+                    $"account={accountRefreshRotation.HasAnimatedProperties}, " +
+                    $"sweep={quotaSweepTranslation.HasAnimatedProperties}, " +
+                    $"accountContextRefreshing=" +
+                    $"{((AccountRowViewModel)accountRefreshGlyph.DataContext).IsRefreshing}, " +
+                    $"sweepContextRefreshing=" +
+                    $"{((AccountRowViewModel)quotaSweep.DataContext).IsRefreshing}.");
+
+                finishRefresh.TrySetResult();
+                await refresh.WaitAsync(TimeSpan.FromSeconds(2));
+                await mainWindow.Dispatcher.InvokeAsync(
+                    static () => { },
+                    DispatcherPriority.ApplicationIdle);
+                Assert.False(viewModel.IsBulkRefreshing);
+                Assert.True(viewModel.Accounts.All(row => !row.IsRefreshing));
+                Assert.False(refreshRotation.HasAnimatedProperties);
+                Assert.False(accountRefreshRotation.HasAnimatedProperties);
+                Assert.False(quotaSweepTranslation.HasAnimatedProperties);
+
+                var stoppedRefreshAngle = refreshRotation.Angle;
+                var stoppedAccountRefreshAngle = accountRefreshRotation.Angle;
+                var stoppedQuotaSweepX = quotaSweepTranslation.X;
+                await Task.Delay(150);
+                Assert.Equal(stoppedRefreshAngle, refreshRotation.Angle);
+                Assert.Equal(stoppedAccountRefreshAngle, accountRefreshRotation.Angle);
+                Assert.Equal(stoppedQuotaSweepX, quotaSweepTranslation.X);
                 var details = FindVisualChildren<Expander>(mainWindow)
                     .Single(expander =>
                         expander.Name == "QuotaDetailsExpander" &&
@@ -445,6 +511,7 @@ public sealed class WpfRuntimeTests
             }
             finally
             {
+                finishRefresh.TrySetResult();
                 confirmationWindow?.Close();
                 if (localizedWindow?.IsVisible == true)
                 {
@@ -502,9 +569,15 @@ public sealed class WpfRuntimeTests
         return count;
     }
 
-    private static MainWindowViewModel CreateViewModel(AccountRegistry registry) => new(
+    private static MainWindowViewModel CreateViewModel(
+        AccountRegistry registry,
+        Func<
+            IReadOnlyList<AccountRecord>,
+            Func<QuotaUpdate, CancellationToken, Task>,
+            CancellationToken,
+            Task<string?>>? refreshQuotaAsync = null) => new(
         _ => Task.FromResult(registry),
-        (_, _, _) => Task.FromResult<string?>(null),
+        refreshQuotaAsync ?? ((_, _, _) => Task.FromResult<string?>(null)),
         (_, _) => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         _ => Task.FromResult(new CommandResult(0, string.Empty, string.Empty)),
         (_, _, _) => Task.FromResult(new SwitchResult(true, "switched", true)),

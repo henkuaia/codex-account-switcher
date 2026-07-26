@@ -315,6 +315,42 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Incomplete_checkpoint_before_segment_does_not_block_current_estimate()
+    {
+        var oldCheckpoint = Checkpoint("old.jsonl", completedOffset: 10) with
+        {
+            HasCompleteScan = false,
+            RelevantThroughUtc = SegmentStart.AddMinutes(-1),
+        };
+        var service = CreateService(
+            usage: UsageResult(Usage(SegmentStart.AddHours(1))) with
+            {
+                SkippedFileCount = 1,
+                FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                    StringComparer.Ordinal)
+                {
+                    [oldCheckpoint.RelativePath] = oldCheckpoint,
+                },
+            },
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.NotNull(result.EstimatedPeriodQuotaLowerUsd);
+        var observation = Assert.Single(context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.True(observation.IsLocalScanComplete);
+        Assert.Equal(0, observation.SkippedFileCount);
+    }
+
+    [Fact]
     public async Task Partial_current_scan_reuses_older_bounded_local_estimate()
     {
         var activationStart = SegmentStart.AddMinutes(-1);

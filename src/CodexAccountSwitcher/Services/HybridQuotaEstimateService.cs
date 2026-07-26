@@ -483,6 +483,27 @@ public sealed class HybridQuotaEstimateService
         var unknownModelCount = usage.PossibleUnknownModelEventCount;
         var unknownTierCount = usage.PossibleUnknownServiceTierEventCount;
         var invalidUsageCount = usage.PossibleInvalidUsageEventCount;
+        var checkpoints = context.LocalUsage.FileCheckpoints.Values;
+        var incompleteCheckpointCount =
+            checkpoints.Count(checkpoint => !checkpoint.HasCompleteScan);
+        var checkpointInvalidLineCount =
+            checkpoints.Sum(checkpoint => checkpoint.InvalidLineCount);
+        var relevantCheckpoints = checkpoints
+            .Where(checkpoint => checkpoint.RelevantThroughUtc >= segment.SegmentStart)
+            .ToArray();
+        var skippedFileCount =
+            relevantCheckpoints.Count(checkpoint => !checkpoint.HasCompleteScan) +
+            Math.Max(
+                0,
+                context.LocalUsage.SkippedFileCount - incompleteCheckpointCount);
+        var malformedLineCount =
+            relevantCheckpoints.Sum(checkpoint => checkpoint.InvalidLineCount) +
+            Math.Max(
+                0,
+                context.LocalUsage.InvalidLineCount - checkpointInvalidLineCount);
+        var isLocalScanComplete =
+            skippedFileCount == 0 &&
+            malformedLineCount == 0;
 
         var activation = FindUnambiguousActivation(
             context.Ledger,
@@ -494,13 +515,13 @@ public sealed class HybridQuotaEstimateService
             segment.SegmentStart,
             observedAt);
         var hasFullCoverage =
-            context.LocalUsage.IsComplete && hasActivationCoverage;
+            isLocalScanComplete && hasActivationCoverage;
         PeriodQuotaEstimate? estimate = null;
-        var isObservationComplete = context.LocalUsage.IsComplete;
+        var isObservationComplete = isLocalScanComplete;
         var kind = hasFullCoverage
             ? QuotaObservationKind.FullSegment
             : QuotaObservationKind.Delta;
-        if (context.LocalUsage.IsComplete &&
+        if (isLocalScanComplete &&
             attributedCreditsUpper > 0 &&
             hasFullCoverage)
         {
@@ -548,17 +569,17 @@ public sealed class HybridQuotaEstimateService
             }
         }
 
-        if (!context.LocalUsage.IsComplete)
+        if (!isLocalScanComplete)
         {
             var partialDetails = new List<string>();
-            if (context.LocalUsage.SkippedFileCount > 0)
+            if (skippedFileCount > 0)
             {
-                partialDetails.Add($"跳过 {context.LocalUsage.SkippedFileCount} 个文件");
+                partialDetails.Add($"跳过 {skippedFileCount} 个文件");
             }
 
-            if (context.LocalUsage.InvalidLineCount > 0)
+            if (malformedLineCount > 0)
             {
-                partialDetails.Add($"忽略 {context.LocalUsage.InvalidLineCount} 行异常记录");
+                partialDetails.Add($"忽略 {malformedLineCount} 行异常记录");
             }
 
             statuses.Add(partialDetails.Count == 0
@@ -604,8 +625,8 @@ public sealed class HybridQuotaEstimateService
             QuotaEstimateSource.Local,
             kind,
             isObservationComplete,
-            context.LocalUsage.InvalidLineCount,
-            context.LocalUsage.SkippedFileCount,
+            malformedLineCount,
+            skippedFileCount,
             CodexCreditRateCard.Version,
             activation?.StartedAt,
             usage.HasBoundaryUncertainty);

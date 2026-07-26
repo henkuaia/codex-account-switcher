@@ -108,7 +108,10 @@ public sealed class WpfInterfaceContractTests
             "Text=\"{Binding PeriodQuotaText}\"",
             xaml,
             StringComparison.Ordinal);
-        Assert.Contains("Text=\"{Binding EstimatedPeriodQuotaText}\"", xaml, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "Text=\"{Binding EstimatedPeriodQuotaText}\"",
+            xaml,
+            StringComparison.Ordinal);
         Assert.Contains(
             "Text=\"{Binding PeriodQuotaSummaryText}\"",
             xaml,

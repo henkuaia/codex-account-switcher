@@ -46,6 +46,40 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Authoritative_individual_limit_skips_sampling_requests()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "access-secret", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) =>
+            throw new InvalidOperationException("HTTP fallback must not run."));
+        using var client = new HttpClient(handler);
+        var reader = new StubIndividualLimitReader(new IndividualLimitSnapshot(
+            5000m,
+            625m,
+            88,
+            DateTimeOffset.Parse("2026-08-25T12:00:00Z"),
+            2));
+
+        var update = await new QuotaService(
+            client,
+            individualLimitReader: reader).RefreshAccountAsync(
+                account,
+                home.Path,
+                default);
+
+        Assert.Null(update.Error);
+        Assert.Empty(handler.Requests);
+        Assert.Equal(QuotaPeriod.Monthly, update.Display!.Period);
+        Assert.Equal(5000m, update.Display.IndividualLimitCredits);
+        Assert.Equal(625m, update.Display.IndividualUsedCredits);
+        Assert.Equal(88, update.Display.RemainingPercent);
+        Assert.Equal(2, update.Display.AvailableResetCount);
+        Assert.Null(update.Display.EstimatedPeriodQuotaLowerUsd);
+        Assert.EndsWith(".auth.json", Assert.Single(reader.Paths), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Refresh_weekly_quota_fetches_analytics_and_applies_estimated_usd_range()
     {
         using var home = new TemporaryDirectory();
@@ -1301,5 +1335,19 @@ public sealed class QuotaServiceTests
     {
         Content = new StringContent(json),
     };
+
+    private sealed class StubIndividualLimitReader(IndividualLimitSnapshot? result)
+        : IIndividualLimitReader
+    {
+        public List<string> Paths { get; } = [];
+
+        public Task<IndividualLimitSnapshot?> ReadAsync(
+            string authSnapshotPath,
+            CancellationToken cancellationToken)
+        {
+            Paths.Add(authSnapshotPath);
+            return Task.FromResult(result);
+        }
+    }
 
 }

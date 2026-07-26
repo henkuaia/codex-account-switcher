@@ -70,7 +70,7 @@ public sealed class WpfInterfaceContractTests
             StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding EstimatedPeriodQuotaText}\"", xaml, StringComparison.Ordinal);
         Assert.Contains(
-            "Text=\"{Binding EstimatedPeriodQuotaSummaryText}\"",
+            "Text=\"{Binding PeriodQuotaSummaryText}\"",
             xaml,
             StringComparison.Ordinal);
         Assert.Contains("Text=\"{Binding OfficialMonthlyLimitText}\"", xaml, StringComparison.Ordinal);
@@ -227,7 +227,11 @@ public sealed class WpfInterfaceContractTests
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "var quotaService = new QuotaService(_httpClient, hybridEstimator: hybridEstimator);",
+            "var individualLimitReader =",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "individualLimitReader: individualLimitReader);",
             source,
             StringComparison.Ordinal);
         Assert.Contains(

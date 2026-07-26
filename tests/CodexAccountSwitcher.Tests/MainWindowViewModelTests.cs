@@ -1640,6 +1640,40 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public void Server_credit_limit_replaces_sampling_estimate_in_card_summary()
+    {
+        var account = Accounts.Record("first-key", "first@example.com");
+        var row = new AccountRowViewModel(
+            account,
+            isActive: true,
+            canSwitch: false,
+            switchUnavailableReason: null);
+        row.ApplyQuota(new QuotaUpdate(
+            account.AccountKey,
+            new QuotaDisplay(
+                QuotaPeriod.Monthly,
+                88,
+                DateTimeOffset.Parse("2026-08-25T12:00:00Z"),
+                TimeSpan.FromDays(30),
+                "monthly")
+            {
+                IndividualLimitCredits = 5000m,
+                IndividualUsedCredits = 625m,
+                EstimatedPeriodQuotaLowerUsd = 100m,
+                EstimatedPeriodQuotaUpperUsd = 200m,
+            },
+            null));
+
+        Assert.True(row.HasOfficialMonthlyLimit);
+        Assert.False(row.HasEstimatedPeriodQuotaText);
+        Assert.True(row.HasPeriodQuotaSummaryText);
+        Assert.Equal(
+            "服务器月额度 5000 Credits（已用 625）",
+            row.PeriodQuotaSummaryText);
+        Assert.DoesNotContain("估算", row.PeriodQuotaSummaryText, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Weekly_estimate_is_separate_from_manually_recorded_quota()
     {
         var account = Accounts.Record("first-key", "first@example.com");

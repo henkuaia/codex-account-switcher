@@ -18,6 +18,10 @@ public sealed record QuotaDisplay(
 
     public decimal? IndividualLimitUsd { get; init; }
 
+    public decimal? IndividualLimitCredits { get; init; }
+
+    public decimal? IndividualUsedCredits { get; init; }
+
     public double UsedPercent { get; init; }
 
     public DateTimeOffset? ServerNow { get; init; }
@@ -34,6 +38,13 @@ public sealed record QuotaDisplay(
 
     public int EstimateObservationCount { get; init; }
 }
+
+public sealed record IndividualLimitSnapshot(
+    decimal LimitCredits,
+    decimal UsedCredits,
+    int RemainingPercent,
+    DateTimeOffset ResetsAt,
+    int? AvailableResetCount);
 
 public sealed record WeeklyQuotaEstimate(decimal LowerUsd, decimal UpperUsd);
 

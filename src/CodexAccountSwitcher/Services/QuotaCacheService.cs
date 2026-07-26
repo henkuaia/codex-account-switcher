@@ -196,6 +196,8 @@ public sealed class QuotaCacheService
             display.Tooltip is not null &&
             display.AvailableResetCount is null or >= 0 &&
             display.IndividualLimitUsd is null or >= 0 &&
+            display.IndividualLimitCredits is null or >= 0 &&
+            display.IndividualUsedCredits is null or >= 0 &&
             display.EstimatedPeriodQuotaLowerUsd is null or >= 0 &&
             display.EstimatedPeriodQuotaUpperUsd is null or >= 0 &&
             hasBothEstimateBounds &&

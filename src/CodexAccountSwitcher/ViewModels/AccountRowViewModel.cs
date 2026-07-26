@@ -13,6 +13,7 @@ public sealed class AccountRowViewModel : ObservableObject
     private bool _hasQuotaStatus;
     private bool _hasOfficialMonthlyLimit;
     private bool _hasEstimatedPeriodQuotaText;
+    private bool _hasPeriodQuotaSummaryText;
     private string? _switchUnavailableReason;
     private QuotaDisplay? _quotaDisplay;
     private AccountMetadata _metadata = new(null, 0);
@@ -22,6 +23,8 @@ public sealed class AccountRowViewModel : ObservableObject
     private string _officialMonthlyLimitText = string.Empty;
     private string _estimatedPeriodQuotaText = string.Empty;
     private string _estimatedPeriodQuotaSummaryText = string.Empty;
+    private string _periodQuotaSummaryText = string.Empty;
+    private string _periodQuotaSummaryToolTip = string.Empty;
     private string _quotaLabel = "Not queried";
     private string? _quotaError;
     private string _quotaStatusText = string.Empty;
@@ -154,6 +157,24 @@ public sealed class AccountRowViewModel : ObservableObject
         private set => SetProperty(ref _hasEstimatedPeriodQuotaText, value);
     }
 
+    public bool HasPeriodQuotaSummaryText
+    {
+        get => _hasPeriodQuotaSummaryText;
+        private set => SetProperty(ref _hasPeriodQuotaSummaryText, value);
+    }
+
+    public string PeriodQuotaSummaryText
+    {
+        get => _periodQuotaSummaryText;
+        private set => SetProperty(ref _periodQuotaSummaryText, value);
+    }
+
+    public string PeriodQuotaSummaryToolTip
+    {
+        get => _periodQuotaSummaryToolTip;
+        private set => SetProperty(ref _periodQuotaSummaryToolTip, value);
+    }
+
     internal void ApplyAccountState(
         AccountRecord account,
         bool isActive,
@@ -262,16 +283,32 @@ public sealed class AccountRowViewModel : ObservableObject
             ? $"单次{period}额度 US${FormatUsd(quota)}"
             : $"单次{period}额度 —";
 
-        HasOfficialMonthlyLimit = QuotaDisplay?.IndividualLimitUsd is not null;
-        OfficialMonthlyLimitText = QuotaDisplay?.IndividualLimitUsd is { } limit
-            ? $"官方月度上限 US${FormatUsd(limit)}"
-            : string.Empty;
+        HasOfficialMonthlyLimit =
+            QuotaDisplay?.IndividualLimitCredits is not null ||
+            QuotaDisplay?.IndividualLimitUsd is not null;
+        OfficialMonthlyLimitText = QuotaDisplay switch
+        {
+            { IndividualLimitCredits: { } limit, IndividualUsedCredits: { } used } =>
+                $"服务器月额度 {FormatUsd(limit)} Credits（已用 {FormatUsd(used)}）",
+            { IndividualLimitUsd: { } limit } =>
+                $"官方月度上限 US${FormatUsd(limit)}",
+            _ => string.Empty,
+        };
 
         HasEstimatedPeriodQuotaText =
+            !HasOfficialMonthlyLimit &&
             QuotaDisplay?.Period is QuotaPeriod.Weekly or QuotaPeriod.Monthly;
         EstimatedPeriodQuotaText = FormatEstimatedPeriodQuota(QuotaDisplay);
         EstimatedPeriodQuotaSummaryText =
             EstimatedPeriodQuotaText.Split(Environment.NewLine)[0];
+        HasPeriodQuotaSummaryText =
+            HasOfficialMonthlyLimit || HasEstimatedPeriodQuotaText;
+        PeriodQuotaSummaryText = HasOfficialMonthlyLimit
+            ? OfficialMonthlyLimitText
+            : EstimatedPeriodQuotaSummaryText;
+        PeriodQuotaSummaryToolTip = HasOfficialMonthlyLimit
+            ? OfficialMonthlyLimitText
+            : EstimatedPeriodQuotaText;
     }
 
     private static string FormatEstimatedPeriodQuota(QuotaDisplay? display)

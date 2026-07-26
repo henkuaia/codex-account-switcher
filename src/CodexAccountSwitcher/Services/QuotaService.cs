@@ -1,6 +1,7 @@
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text.Json;
 using CodexAccountSwitcher.Models;
 using CodexAccountSwitcher.Security;
 
@@ -19,15 +20,18 @@ public sealed class QuotaService
     private readonly HttpClient _httpClient;
     private readonly AuthSnapshotReader _authSnapshotReader;
     private readonly HybridQuotaEstimateService? _hybridEstimator;
+    private readonly IIndividualLimitReader? _individualLimitReader;
 
     public QuotaService(
         HttpClient httpClient,
         AuthSnapshotReader? authSnapshotReader = null,
-        HybridQuotaEstimateService? hybridEstimator = null)
+        HybridQuotaEstimateService? hybridEstimator = null,
+        IIndividualLimitReader? individualLimitReader = null)
     {
         _httpClient = httpClient ?? throw new ArgumentNullException(nameof(httpClient));
         _authSnapshotReader = authSnapshotReader ?? new AuthSnapshotReader();
         _hybridEstimator = hybridEstimator;
+        _individualLimitReader = individualLimitReader;
     }
 
     public async Task<QuotaUpdate> RefreshAccountAsync(
@@ -74,6 +78,28 @@ public sealed class QuotaService
             if (!string.Equals(snapshot.AccountId, account.ChatGptAccountId, StringComparison.Ordinal))
             {
                 return Failure(account, "The authentication snapshot does not match the selected account.", snapshot);
+            }
+
+            var individualLimit = await TryReadIndividualLimitAsync(
+                snapshotPath,
+                cancellationToken);
+            if (individualLimit is not null)
+            {
+                return new QuotaUpdate(
+                    account.AccountKey,
+                    new QuotaDisplay(
+                        QuotaPeriod.Monthly,
+                        individualLimit.RemainingPercent,
+                        individualLimit.ResetsAt,
+                        TimeSpan.FromDays(30),
+                        $"Monthly credit limit: {individualLimit.RemainingPercent}% remaining")
+                    {
+                        AvailableResetCount = individualLimit.AvailableResetCount,
+                        IndividualLimitCredits = individualLimit.LimitCredits,
+                        IndividualUsedCredits = individualLimit.UsedCredits,
+                        UsedPercent = 100 - individualLimit.RemainingPercent,
+                    },
+                    null);
             }
 
             using var request = new HttpRequestMessage(HttpMethod.Get, UsageEndpoint);
@@ -144,6 +170,12 @@ public sealed class QuotaService
         CancellationToken requestCancellationToken,
         CancellationToken userCancellationToken)
     {
+        if (display.IndividualLimitUsd is not null ||
+            display.IndividualLimitCredits is not null)
+        {
+            return display;
+        }
+
         return display.Period switch
         {
             QuotaPeriod.Weekly => await TryApplyWeeklyEstimateAsync(
@@ -162,6 +194,37 @@ public sealed class QuotaService
                 userCancellationToken),
             _ => display,
         };
+    }
+
+    private async Task<IndividualLimitSnapshot?> TryReadIndividualLimitAsync(
+        string snapshotPath,
+        CancellationToken cancellationToken)
+    {
+        if (_individualLimitReader is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return await _individualLimitReader.ReadAsync(snapshotPath, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is OperationCanceledException or
+                IOException or
+                UnauthorizedAccessException or
+                InvalidDataException or
+                JsonException or
+                InvalidOperationException or
+                ArgumentException or
+                System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
     }
 
     private async Task<QuotaDisplay> TryApplyWeeklyEstimateAsync(

@@ -360,16 +360,16 @@
                                                            Margin="0,6,0,0"
                                                            FontSize="11"
                                                            Foreground="{StaticResource TextSecondaryBrush}"
-                                                           Text="{Binding EstimatedPeriodQuotaSummaryText}"
+                                                           Text="{Binding PeriodQuotaSummaryText}"
                                                            TextTrimming="CharacterEllipsis"
-                                                           ToolTip="{Binding EstimatedPeriodQuotaText}">
+                                                           ToolTip="{Binding PeriodQuotaSummaryToolTip}">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
                                                             <Setter Property="Visibility" Value="Collapsed" />
                                                             <Style.Triggers>
                                                                 <MultiDataTrigger>
-                                                                    <MultiDataTrigger.Conditions>
-                                                                        <Condition Binding="{Binding HasEstimatedPeriodQuotaText}" Value="True" />
+                                                                <MultiDataTrigger.Conditions>
+                                                                        <Condition Binding="{Binding HasPeriodQuotaSummaryText}" Value="True" />
                                                                         <Condition Binding="{Binding IsRefreshing}" Value="False" />
                                                                     </MultiDataTrigger.Conditions>
                                                                     <Setter Property="Visibility" Value="Visible" />

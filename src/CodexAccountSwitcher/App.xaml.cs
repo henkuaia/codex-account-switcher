@@ -59,7 +59,12 @@ public partial class App : System.Windows.Application
                 collector,
                 ledgerService,
                 new CodexCreditRateCard());
-            var quotaService = new QuotaService(_httpClient, hybridEstimator: hybridEstimator);
+            var individualLimitReader =
+                new CodexAppServerIndividualLimitReader(package.CliDirectory);
+            var quotaService = new QuotaService(
+                _httpClient,
+                hybridEstimator: hybridEstimator,
+                individualLimitReader: individualLimitReader);
             var metadataService = AccountMetadataService.CreateDefault();
             var quotaCacheService = QuotaCacheService.CreateDefault();
             var processController = new CodexProcessController();

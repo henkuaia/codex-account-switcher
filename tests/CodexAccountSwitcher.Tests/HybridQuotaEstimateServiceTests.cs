@@ -350,6 +350,110 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Old_tombstone_does_not_block_complete_incremental_estimate()
+    {
+        var activationStart = SegmentStart.AddHours(2);
+        var earlier = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(4),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: null,
+            UpperUsd: null,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            IsLocalScanComplete = false,
+            RateCardVersion = CodexCreditRateCard.Version,
+            ActivationStartedAt = activationStart,
+        };
+        var tombstone = Checkpoint("archived.jsonl", completedOffset: 100) with
+        {
+            HasCompleteScan = false,
+            IsTombstone = true,
+            RelevantThroughUtc = earlier.ObservedAt.AddMinutes(-1),
+        };
+        var usage = UsageResult(
+            Usage(SegmentStart.AddHours(3)),
+            Usage(SegmentStart.AddHours(5))) with
+        {
+            SkippedFileCount = 1,
+            FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                StringComparer.Ordinal)
+            {
+                [tombstone.RelativePath] = tombstone,
+            },
+        };
+        var service = CreateService(
+            usage,
+            StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                earlier));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(15.38m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.67m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.True(context.Ledger.Accounts[Account.AccountKey]
+            .Observations[^1].IsLocalScanComplete);
+        Assert.Contains("本机用量扫描不完整", result.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Unattributed_skipped_input_blocks_incremental_estimate()
+    {
+        var activationStart = SegmentStart.AddHours(2);
+        var earlier = new QuotaUsageObservation(
+            Segment,
+            SegmentStart.AddHours(4),
+            UsedPercent: 25,
+            PercentResolution: 1,
+            AttributedCredits: 100m,
+            HasFullSegmentCoverage: false,
+            LowerUsd: null,
+            UpperUsd: null,
+            QuotaEstimateSource.Local,
+            QuotaObservationKind.Delta)
+        {
+            IsLocalScanComplete = false,
+            RateCardVersion = CodexCreditRateCard.Version,
+            ActivationStartedAt = activationStart,
+        };
+        var service = CreateService(
+            UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(SegmentStart.AddHours(5))) with
+            {
+                SkippedFileCount = 1,
+            },
+            StateWithAccount(
+                new AccountActivationInterval(activationStart, null),
+                earlier));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 50, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
+        Assert.False(context.Ledger.Accounts[Account.AccountKey]
+            .Observations[^1].IsLocalScanComplete);
+    }
+
+    [Fact]
     public async Task Deleted_malformed_only_checkpoint_keeps_historical_local_range()
     {
         using var directory = new TemporaryDirectory();

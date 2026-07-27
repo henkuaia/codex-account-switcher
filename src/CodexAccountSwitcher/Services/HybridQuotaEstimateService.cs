@@ -474,6 +474,7 @@ public sealed class HybridQuotaEstimateService
         var hasFullCoverage =
             context.LocalUsage.IsComplete && hasActivationCoverage;
         PeriodQuotaEstimate? estimate = null;
+        var isObservationComplete = context.LocalUsage.IsComplete;
         var kind = hasFullCoverage
             ? QuotaObservationKind.FullSegment
             : QuotaObservationKind.Delta;
@@ -487,8 +488,7 @@ public sealed class HybridQuotaEstimateService
                 display.UsedPercent,
                 PercentResolution);
         }
-        else if (context.LocalUsage.IsComplete &&
-            attributedCreditsUpper > 0 &&
+        else if (attributedCreditsUpper > 0 &&
             activation is not null)
         {
             var earlier = context.Ledger.Accounts
@@ -497,7 +497,6 @@ public sealed class HybridQuotaEstimateService
                 .Where(item =>
                     item.Segment == segment &&
                     item.Source == QuotaEstimateSource.Local &&
-                    item.IsLocalScanComplete &&
                     string.Equals(
                         item.RateCardVersion,
                         CodexCreditRateCard.Version,
@@ -506,8 +505,10 @@ public sealed class HybridQuotaEstimateService
                     item.ObservedAt < observedAt)
                 .OrderByDescending(item => item.ObservedAt)
                 .FirstOrDefault();
-            if (earlier is not null)
+            if (earlier is not null &&
+                IsCompleteSince(context.LocalUsage, earlier.ObservedAt))
             {
+                isObservationComplete = true;
                 var earlierUpper = GetAttributedCreditsUpper(earlier);
                 var lowerDelta = Math.Max(
                     0m,
@@ -580,12 +581,28 @@ public sealed class HybridQuotaEstimateService
             estimate,
             QuotaEstimateSource.Local,
             kind,
-            context.LocalUsage.IsComplete,
+            isObservationComplete,
             context.LocalUsage.InvalidLineCount,
             context.LocalUsage.SkippedFileCount,
             CodexCreditRateCard.Version,
             activation?.StartedAt,
             usage.HasBoundaryUncertainty);
+    }
+
+    private static bool IsCompleteSince(
+        LocalUsageCollectionResult usage,
+        DateTimeOffset since)
+    {
+        if (usage.IsComplete)
+        {
+            return true;
+        }
+
+        var incomplete = usage.FileCheckpoints.Values
+            .Where(checkpoint => !checkpoint.HasCompleteScan)
+            .ToArray();
+        return usage.SkippedFileCount <= incomplete.Count(checkpoint => checkpoint.IsTombstone) &&
+            incomplete.All(checkpoint => checkpoint.RelevantThroughUtc < since);
     }
 
     private static QuotaUsageObservation CreateObservation(

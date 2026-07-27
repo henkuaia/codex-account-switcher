@@ -315,7 +315,7 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
-    public async Task Partial_current_scan_does_not_reuse_older_bounded_local_estimate()
+    public async Task Partial_current_scan_reuses_older_bounded_local_estimate()
     {
         var activationStart = SegmentStart.AddMinutes(-1);
         var older = Observation(
@@ -344,13 +344,13 @@ public sealed class HybridQuotaEstimateServiceTests
             EmptyAnalytics(),
             AnalyticsAvailability.Available);
 
-        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
-        Assert.Null(result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(15m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(17m, result.EstimatedPeriodQuotaUpperUsd);
         Assert.Contains("本机用量扫描不完整", result.EstimateStatus, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task Deleted_malformed_only_checkpoint_suppresses_historical_local_range()
+    public async Task Deleted_malformed_only_checkpoint_keeps_historical_local_range()
     {
         using var directory = new TemporaryDirectory();
         var path = Path.Combine(directory.Path, "malformed-only.jsonl");
@@ -393,8 +393,8 @@ public sealed class HybridQuotaEstimateServiceTests
             AnalyticsAvailability.Available);
 
         Assert.False(second.IsComplete);
-        Assert.Null(result.EstimatedPeriodQuotaLowerUsd);
-        Assert.Null(result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(15m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(17m, result.EstimatedPeriodQuotaUpperUsd);
         Assert.Contains("本机用量扫描不完整", result.EstimateStatus);
     }
 

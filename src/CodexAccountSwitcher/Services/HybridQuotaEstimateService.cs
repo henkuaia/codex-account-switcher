@@ -236,22 +236,18 @@ public sealed class HybridQuotaEstimateService
 
         AppendObservation(context, account.AccountKey, observation);
         var accountLedger = context.Ledger.Accounts[account.AccountKey];
-        var intersection =
-            source == QuotaEstimateSource.Local &&
-            !observation.IsLocalScanComplete
-                ? null
-                : QuotaEstimateMath.IntersectRecentCompatible(
-                    accountLedger.Observations
-                        .Where(item =>
-                            item.Source == source &&
-                            (source != QuotaEstimateSource.Local ||
-                             string.Equals(
-                                 item.RateCardVersion,
-                                 observation.RateCardVersion,
-                                 StringComparison.Ordinal) &&
-                             item.ActivationStartedAt == observation.ActivationStartedAt))
-                        .ToArray(),
-                    segment);
+        var intersection = QuotaEstimateMath.IntersectRecentCompatible(
+            accountLedger.Observations
+                .Where(item =>
+                    item.Source == source &&
+                    (source != QuotaEstimateSource.Local ||
+                     string.Equals(
+                         item.RateCardVersion,
+                         observation.RateCardVersion,
+                         StringComparison.Ordinal) &&
+                     item.ActivationStartedAt == observation.ActivationStartedAt))
+                .ToArray(),
+            segment);
         if (intersection?.IgnoredConflictingHistory == true)
         {
             statuses.Add("历史观测不一致，已忽略较早冲突记录");

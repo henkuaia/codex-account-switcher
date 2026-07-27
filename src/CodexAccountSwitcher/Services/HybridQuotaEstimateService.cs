@@ -244,8 +244,7 @@ public sealed class HybridQuotaEstimateService
                      string.Equals(
                          item.RateCardVersion,
                          observation.RateCardVersion,
-                         StringComparison.Ordinal) &&
-                     item.ActivationStartedAt == observation.ActivationStartedAt))
+                         StringComparison.Ordinal)))
                 .ToArray(),
             segment);
         if (intersection?.IgnoredConflictingHistory == true)

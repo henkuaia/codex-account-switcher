@@ -667,7 +667,7 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
-    public async Task Reactivation_does_not_intersect_new_delta_with_old_activation_interval()
+    public async Task Reactivation_reuses_compatible_estimate_from_old_activation_interval()
     {
         var firstActivation = SegmentStart.AddHours(1);
         var secondActivation = SegmentStart.AddHours(5);
@@ -719,10 +719,10 @@ public sealed class HybridQuotaEstimateServiceTests
             EmptyAnalytics(),
             AnalyticsAvailability.Available);
 
-        Assert.Equal(15.38m, result.EstimatedPeriodQuotaLowerUsd);
-        Assert.Equal(16.67m, result.EstimatedPeriodQuotaUpperUsd);
-        Assert.Equal(QuotaEstimateQuality.Initial, result.EstimateQuality);
-        Assert.Equal(1, result.EstimateObservationCount);
+        Assert.Equal(15.5m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(16.5m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(QuotaEstimateQuality.MultiPoint, result.EstimateQuality);
+        Assert.Equal(2, result.EstimateObservationCount);
     }
 
     [Fact]

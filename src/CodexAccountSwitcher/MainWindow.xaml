@@ -47,6 +47,15 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="ConversationHistoryButton"
+                            Width="36"
+                            Margin="0,0,6,0"
+                            Click="ConversationHistoryButton_Click"
+                            Style="{StaticResource ActionButtonStyle}"
+                            ToolTip="恢复历史对话"
+                            AutomationProperties.Name="恢复历史对话">
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE81C;" />
+                    </Button>
                     <Button x:Name="RefreshButton"
                             Width="36"
                             Margin="0,0,6,0"

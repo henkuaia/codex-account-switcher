@@ -1,18 +1,25 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Input;
+using CodexAccountSwitcher.Services;
 using CodexAccountSwitcher.ViewModels;
+using CodexAccountSwitcher.Views;
 
 namespace CodexAccountSwitcher;
 
 public partial class MainWindow : Window
 {
     private readonly MainWindowViewModel _viewModel;
+    private readonly ICodexConversationService _conversationService;
     private bool _allowClose;
 
-    public MainWindow(MainWindowViewModel viewModel)
+    public MainWindow(
+        MainWindowViewModel viewModel,
+        ICodexConversationService conversationService)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
+        _conversationService = conversationService
+            ?? throw new ArgumentNullException(nameof(conversationService));
         InitializeComponent();
         DataContext = _viewModel;
     }
@@ -50,6 +57,14 @@ public partial class MainWindow : Window
 
     private void MinimizeButton_Click(object sender, RoutedEventArgs e) =>
         WindowState = WindowState.Minimized;
+
+    private void ConversationHistoryButton_Click(object sender, RoutedEventArgs e)
+    {
+        new ConversationHistoryWindow(_conversationService)
+        {
+            Owner = this,
+        }.ShowDialog();
+    }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {

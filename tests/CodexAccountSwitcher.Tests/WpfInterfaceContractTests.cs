@@ -56,6 +56,23 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Main_window_exposes_read_only_conversation_recovery()
+    {
+        var sourceDirectory = FindDirectory("src", "CodexAccountSwitcher");
+        var mainWindow = File.ReadAllText(Path.Combine(sourceDirectory, "MainWindow.xaml"));
+        var historyWindow = File.ReadAllText(Path.Combine(
+            sourceDirectory,
+            "Views",
+            "ConversationHistoryWindow.xaml"));
+
+        Assert.Contains("x:Name=\"ConversationHistoryButton\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Click=\"ConversationHistoryButton_Click\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Text=\"历史对话恢复\"", historyWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"在 Codex 打开\"", historyWindow, StringComparison.Ordinal);
+        Assert.Contains("只读查看本机 Codex 记录", historyWindow, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Main_window_exposes_compact_reset_quota_metadata_and_edit_command()
     {
         var xaml = File.ReadAllText(Path.Combine(

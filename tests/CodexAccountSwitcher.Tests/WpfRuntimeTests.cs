@@ -80,7 +80,7 @@ public sealed class WpfRuntimeTests
                         return null;
                     });
                 await viewModel.LoadAsync();
-                mainWindow = new MainWindow(viewModel);
+                mainWindow = new MainWindow(viewModel, new StubConversationService());
                 Assert.True(mainWindow.ShowInTaskbar);
                 mainWindow.Show();
                 await mainWindow.Dispatcher.InvokeAsync(
@@ -253,7 +253,7 @@ public sealed class WpfRuntimeTests
                     layoutAccounts);
                 var layoutViewModel = CreateViewModel(layoutRegistry);
                 await layoutViewModel.LoadAsync();
-                layoutWindow = new MainWindow(layoutViewModel);
+                layoutWindow = new MainWindow(layoutViewModel, new StubConversationService());
                 layoutWindow.Show();
                 await layoutWindow.Dispatcher.InvokeAsync(
                     static () => { },
@@ -771,6 +771,17 @@ public sealed class WpfRuntimeTests
         public Task<CommandResult> RunRemoveAsync(
             Func<CancellationToken, Task<CommandResult>> operation,
             CancellationToken cancellationToken) => operation(cancellationToken);
+    }
+
+    private sealed class StubConversationService : ICodexConversationService
+    {
+        public Task<IReadOnlyList<CodexConversation>> LoadAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CodexConversation>>([]);
+
+        public void Open(CodexConversation conversation)
+        {
+        }
     }
 
     private sealed class InlineDispatcher : IUiDispatcher

@@ -61,6 +61,9 @@ public partial class App : System.Windows.Application
                 new CodexCreditRateCard());
             var individualLimitReader =
                 new CodexAppServerIndividualLimitReader(package.CliDirectory);
+            var conversationService = new CodexConversationService(
+                package.CliDirectory,
+                codexHome);
             var quotaService = new QuotaService(
                 _httpClient,
                 hybridEstimator: hybridEstimator,
@@ -104,7 +107,7 @@ public partial class App : System.Windows.Application
                 quotaCacheService,
                 hybridEstimator.ObserveRegistryAsync);
 
-            _mainWindow = new MainWindow(viewModel);
+            _mainWindow = new MainWindow(viewModel, conversationService);
             MainWindow = _mainWindow;
             _exitCoordinator = new ApplicationExitCoordinator(
                 activityTracker,

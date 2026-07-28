@@ -959,6 +959,50 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task New_segment_without_current_estimate_displays_latest_prior_estimate()
+    {
+        var oldSegment = new QuotaSegment(
+            QuotaPeriod.Monthly,
+            DateTimeOffset.Parse("2026-07-26T02:57:48Z"),
+            DateTimeOffset.Parse("2026-08-25T12:57:48Z"));
+        var newStart = DateTimeOffset.Parse("2026-07-28T03:29:59Z");
+        var newReset = DateTimeOffset.Parse("2026-08-27T13:29:59Z");
+        var newSegment = new QuotaSegment(QuotaPeriod.Monthly, newStart, newReset);
+        var oldObservation = Observation(
+            oldSegment,
+            newStart.AddHours(-1),
+            lowerUsd: 220m,
+            upperUsd: 254m);
+        var service = CreateService(
+            usage: UsageResult(Usage(newStart.AddHours(1))) with
+            {
+                SkippedFileCount = 1,
+            },
+            ledger: StateWithAccount(
+                new AccountActivationInterval(newStart.AddMinutes(-1), null),
+                oldObservation));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(
+                QuotaPeriod.Monthly,
+                usedPercent: 52,
+                resetsAt: newReset,
+                serverNow: newStart.AddHours(2)),
+            newSegment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(220m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(254m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Equal(QuotaEstimateQuality.Initial, result.EstimateQuality);
+        Assert.Equal(1, result.EstimateObservationCount);
+        Assert.Contains("暂显示上周期估算", result.EstimateStatus, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Unknown_model_is_unpriced_and_has_no_estimate()
     {
         var service = CreateService(

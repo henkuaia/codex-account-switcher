@@ -236,17 +236,39 @@ public sealed class HybridQuotaEstimateService
 
         AppendObservation(context, account.AccountKey, observation);
         var accountLedger = context.Ledger.Accounts[account.AccountKey];
+        var compatibleObservations = accountLedger.Observations
+            .Where(item =>
+                item.Source == source &&
+                (source != QuotaEstimateSource.Local ||
+                 string.Equals(
+                     item.RateCardVersion,
+                     observation.RateCardVersion,
+                     StringComparison.Ordinal)))
+            .ToArray();
         var intersection = QuotaEstimateMath.IntersectRecentCompatible(
-            accountLedger.Observations
-                .Where(item =>
-                    item.Source == source &&
-                    (source != QuotaEstimateSource.Local ||
-                     string.Equals(
-                         item.RateCardVersion,
-                         observation.RateCardVersion,
-                         StringComparison.Ordinal)))
-                .ToArray(),
+            compatibleObservations,
             segment);
+        if (intersection is null)
+        {
+            var priorSegment = compatibleObservations
+                .Where(item =>
+                    item.Segment.Period == segment.Period &&
+                    item.Segment != segment &&
+                    item.LowerUsd is >= 0 &&
+                    item.UpperUsd is >= 0 &&
+                    item.LowerUsd <= item.UpperUsd)
+                .OrderByDescending(item => item.ObservedAt)
+                .Select(item => item.Segment)
+                .FirstOrDefault();
+            if (priorSegment is not null)
+            {
+                intersection = QuotaEstimateMath.IntersectRecentCompatible(
+                    compatibleObservations,
+                    priorSegment);
+                statuses.Add("当前周期采集中，暂显示上周期估算");
+            }
+        }
+
         if (intersection?.IgnoredConflictingHistory == true)
         {
             statuses.Add("历史观测不一致，已忽略较早冲突记录");

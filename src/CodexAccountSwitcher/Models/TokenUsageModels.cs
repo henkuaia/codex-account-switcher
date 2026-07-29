@@ -8,6 +8,14 @@ public sealed record DailyTokenUsage(
 {
     public long TotalTokens => InputTokens + OutputTokens;
 
+    public decimal InputMillions => InputTokens / 1_000_000m;
+
+    public decimal CachedInputMillions => CachedInputTokens / 1_000_000m;
+
+    public decimal OutputMillions => OutputTokens / 1_000_000m;
+
+    public decimal TotalMillions => TotalTokens / 1_000_000m;
+
     public string DateText => Date.ToString("M.d");
 }
 
@@ -20,6 +28,14 @@ public sealed record TokenUsageSummary(
     IReadOnlyList<DailyTokenUsage> Days)
 {
     public long TotalTokens => InputTokens + OutputTokens;
+
+    public decimal InputMillions => InputTokens / 1_000_000m;
+
+    public decimal CachedInputMillions => CachedInputTokens / 1_000_000m;
+
+    public decimal OutputMillions => OutputTokens / 1_000_000m;
+
+    public decimal TotalMillions => TotalTokens / 1_000_000m;
 
     public string RangeText => $"{StartDate:M.d}–{EndDate:M.d}";
 }

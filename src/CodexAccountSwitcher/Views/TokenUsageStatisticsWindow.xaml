@@ -118,25 +118,25 @@
 
                 <Border Padding="12,10" Background="{StaticResource WindowBackgroundBrush}" CornerRadius="7">
                     <StackPanel>
-                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="输入 Token" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="输入（百万 Token）" />
                         <TextBlock x:Name="InputTokenText" Margin="0,4,0,0" FontSize="20" FontWeight="SemiBold" Text="0" />
                     </StackPanel>
                 </Border>
                 <Border Grid.Column="2" Padding="12,10" Background="{StaticResource WindowBackgroundBrush}" CornerRadius="7">
                     <StackPanel>
-                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="缓存输入" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="缓存输入（百万 Token）" />
                         <TextBlock x:Name="CachedInputTokenText" Margin="0,4,0,0" FontSize="20" FontWeight="SemiBold" Text="0" />
                     </StackPanel>
                 </Border>
                 <Border Grid.Column="4" Padding="12,10" Background="{StaticResource WindowBackgroundBrush}" CornerRadius="7">
                     <StackPanel>
-                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="输出 Token" />
+                        <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="输出（百万 Token）" />
                         <TextBlock x:Name="OutputTokenText" Margin="0,4,0,0" FontSize="20" FontWeight="SemiBold" Text="0" />
                     </StackPanel>
                 </Border>
                 <Border Grid.Column="6" Padding="12,10" Background="{StaticResource PrimaryBrush}" CornerRadius="7">
                     <StackPanel>
-                        <TextBlock Foreground="White" Opacity="0.82" Text="总 Token" />
+                        <TextBlock Foreground="White" Opacity="0.82" Text="总量（百万 Token）" />
                         <TextBlock x:Name="TotalTokenText" Margin="0,4,0,0" FontSize="20" FontWeight="SemiBold" Foreground="White" Text="0" />
                     </StackPanel>
                 </Border>
@@ -168,10 +168,10 @@
                     <ListView.View>
                         <GridView>
                             <GridViewColumn Width="120" Header="日期" DisplayMemberBinding="{Binding DateText}" />
-                            <GridViewColumn Width="145" Header="输入 Token" DisplayMemberBinding="{Binding InputTokens, StringFormat=N0}" />
-                            <GridViewColumn Width="145" Header="缓存输入" DisplayMemberBinding="{Binding CachedInputTokens, StringFormat=N0}" />
-                            <GridViewColumn Width="145" Header="输出 Token" DisplayMemberBinding="{Binding OutputTokens, StringFormat=N0}" />
-                            <GridViewColumn Width="145" Header="总 Token" DisplayMemberBinding="{Binding TotalTokens, StringFormat=N0}" />
+                            <GridViewColumn Width="145" Header="输入（百万）" DisplayMemberBinding="{Binding InputMillions, StringFormat=N3}" />
+                            <GridViewColumn Width="145" Header="缓存输入（百万）" DisplayMemberBinding="{Binding CachedInputMillions, StringFormat=N3}" />
+                            <GridViewColumn Width="145" Header="输出（百万）" DisplayMemberBinding="{Binding OutputMillions, StringFormat=N3}" />
+                            <GridViewColumn Width="145" Header="总量（百万）" DisplayMemberBinding="{Binding TotalMillions, StringFormat=N3}" />
                         </GridView>
                     </ListView.View>
                 </ListView>

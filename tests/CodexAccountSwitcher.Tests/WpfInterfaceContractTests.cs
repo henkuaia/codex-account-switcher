@@ -90,6 +90,9 @@ public sealed class WpfInterfaceContractTests
         Assert.Contains("x:Name=\"StartDatePicker\"", usageWindow, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"EndDatePicker\"", usageWindow, StringComparison.Ordinal);
         Assert.Contains("x:Name=\"DailyItems\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("输入（百万 Token）", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("Binding InputMillions, StringFormat=N3", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("Binding TotalMillions, StringFormat=N3", usageWindow, StringComparison.Ordinal);
     }
 
     [Fact]

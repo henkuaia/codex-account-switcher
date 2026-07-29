@@ -32,6 +32,10 @@ public sealed class TokenUsageAggregatorTests
         Assert.Equal(180, result.CachedInputTokens);
         Assert.Equal(120, result.OutputTokens);
         Assert.Equal(1_020, result.TotalTokens);
+        Assert.Equal(0.0009m, result.InputMillions);
+        Assert.Equal(0.00018m, result.CachedInputMillions);
+        Assert.Equal(0.00012m, result.OutputMillions);
+        Assert.Equal(0.00102m, result.TotalMillions);
         Assert.Collection(
             result.Days,
             day =>
@@ -39,6 +43,8 @@ public sealed class TokenUsageAggregatorTests
                 Assert.Equal(new DateOnly(2026, 7, 26), day.Date);
                 Assert.Equal(200, day.InputTokens);
                 Assert.Equal(230, day.TotalTokens);
+                Assert.Equal(0.0002m, day.InputMillions);
+                Assert.Equal(0.00023m, day.TotalMillions);
             },
             day =>
             {

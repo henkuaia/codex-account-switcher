@@ -101,10 +101,10 @@ public partial class TokenUsageStatisticsWindow : Window
             endDate,
             _timeZone);
         RangeText.Text = $"{summary.RangeText} 每日明细";
-        InputTokenText.Text = summary.InputTokens.ToString("N0", CultureInfo.CurrentCulture);
-        CachedInputTokenText.Text = summary.CachedInputTokens.ToString("N0", CultureInfo.CurrentCulture);
-        OutputTokenText.Text = summary.OutputTokens.ToString("N0", CultureInfo.CurrentCulture);
-        TotalTokenText.Text = summary.TotalTokens.ToString("N0", CultureInfo.CurrentCulture);
+        InputTokenText.Text = summary.InputMillions.ToString("N3", CultureInfo.CurrentCulture);
+        CachedInputTokenText.Text = summary.CachedInputMillions.ToString("N3", CultureInfo.CurrentCulture);
+        OutputTokenText.Text = summary.OutputMillions.ToString("N3", CultureInfo.CurrentCulture);
+        TotalTokenText.Text = summary.TotalMillions.ToString("N3", CultureInfo.CurrentCulture);
         DailyItems.ItemsSource = summary.Days.Reverse().ToArray();
     }
 

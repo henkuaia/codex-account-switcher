@@ -103,7 +103,7 @@ public sealed class WpfRuntimeTests
                     Assert.Single(FindVisualChildren<ItemsControl>(
                         Assert.Single(FindVisualChildren<ScrollViewer>(mainWindow)))));
 
-                foreach (var name in new[] { "RefreshButton", "AddButton", "RemoveButton", "WindowMinimizeButton", "WindowCloseButton" })
+                foreach (var name in new[] { "TokenUsageButton", "RefreshButton", "AddButton", "RemoveButton", "WindowMinimizeButton", "WindowCloseButton" })
                 {
                     var button = Assert.IsType<Button>(mainWindow.FindName(name));
                     Assert.False(string.IsNullOrWhiteSpace(AutomationProperties.GetName(button)));

@@ -633,7 +633,11 @@ public sealed class QuotaEstimateLedgerService
             bucket.PricedEventCount < 0 ||
             bucket.UnknownModelEventCount < 0 ||
             bucket.UnknownServiceTierEventCount < 0 ||
-            bucket.InvalidUsageEventCount < 0)
+            bucket.InvalidUsageEventCount < 0 ||
+            bucket.InputTokens < 0 ||
+            bucket.CachedInputTokens < 0 ||
+            bucket.CachedInputTokens > bucket.InputTokens ||
+            bucket.OutputTokens < 0)
         {
             return false;
         }

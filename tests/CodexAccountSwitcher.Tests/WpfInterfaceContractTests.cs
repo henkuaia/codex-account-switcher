@@ -73,6 +73,26 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
+    public void Main_window_exposes_token_usage_statistics_with_date_ranges()
+    {
+        var sourceDirectory = FindDirectory("src", "CodexAccountSwitcher");
+        var mainWindow = File.ReadAllText(Path.Combine(sourceDirectory, "MainWindow.xaml"));
+        var usageWindow = File.ReadAllText(Path.Combine(
+            sourceDirectory,
+            "Views",
+            "TokenUsageStatisticsWindow.xaml"));
+
+        Assert.Contains("x:Name=\"TokenUsageButton\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Click=\"TokenUsageButton_Click\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"今日\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"最近7天\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"本月\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"StartDatePicker\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"EndDatePicker\"", usageWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"DailyItems\"", usageWindow, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Main_window_exposes_compact_reset_quota_metadata_and_edit_command()
     {
         var xaml = File.ReadAllText(Path.Combine(

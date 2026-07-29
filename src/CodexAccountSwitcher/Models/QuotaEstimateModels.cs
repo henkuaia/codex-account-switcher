@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace CodexAccountSwitcher.Models;
 
 public enum QuotaEstimateSource { None, Analytics, Local }
@@ -35,7 +37,20 @@ public sealed record LocalUsageBucket(
     int PricedEventCount,
     int UnknownModelEventCount,
     int UnknownServiceTierEventCount,
-    int InvalidUsageEventCount);
+    int InvalidUsageEventCount)
+{
+    [JsonIgnore]
+    public long InputTokens { get; init; }
+
+    [JsonIgnore]
+    public long CachedInputTokens { get; init; }
+
+    [JsonIgnore]
+    public long OutputTokens { get; init; }
+
+    [JsonIgnore]
+    public long TotalTokens => InputTokens + OutputTokens;
+}
 
 public sealed record LocalUsageFileCheckpoint(
     string RelativePath,

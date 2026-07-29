@@ -59,6 +59,7 @@ public partial class App : System.Windows.Application
                 collector,
                 ledgerService,
                 new CodexCreditRateCard());
+            var tokenUsageService = TokenUsageStatisticsService.CreateDefault(collector);
             var individualLimitReader =
                 new CodexAppServerIndividualLimitReader(package.CliDirectory);
             var conversationService = new CodexConversationService(
@@ -107,7 +108,10 @@ public partial class App : System.Windows.Application
                 quotaCacheService,
                 hybridEstimator.ObserveRegistryAsync);
 
-            _mainWindow = new MainWindow(viewModel, conversationService);
+            _mainWindow = new MainWindow(
+                viewModel,
+                conversationService,
+                tokenUsageService);
             MainWindow = _mainWindow;
             _exitCoordinator = new ApplicationExitCoordinator(
                 activityTracker,

@@ -47,6 +47,23 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="TokenUsageButton"
+                            Width="36"
+                            Margin="0,0,6,0"
+                            Click="TokenUsageButton_Click"
+                            ToolTip="Token 用量统计"
+                            AutomationProperties.Name="Token 用量统计">
+                        <Button.Style>
+                            <Style BasedOn="{StaticResource ActionButtonStyle}" TargetType="Button">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBusy}" Value="True">
+                                        <Setter Property="IsEnabled" Value="False" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                        <TextBlock FontFamily="Segoe Fluent Icons" FontSize="15" Text="&#xE9D2;" />
+                    </Button>
                     <Button x:Name="ConversationHistoryButton"
                             Width="36"
                             Margin="0,0,6,0"

@@ -47,6 +47,10 @@ public sealed class LocalCodexUsageCollectorTests
                 10,
                 3)).Credits;
         Assert.Equal(expectedCredits, bucket.PricedCredits);
+        Assert.Equal(20_223, bucket.InputTokens);
+        Assert.Equal(10_010, bucket.CachedInputTokens);
+        Assert.Equal(400, bucket.OutputTokens);
+        Assert.Equal(20_623, bucket.TotalTokens);
         var checkpoint = Assert.Single(result.FileCheckpoints).Value;
         Assert.Equal("gpt-5.3-codex", checkpoint.Model);
         Assert.Equal("default", checkpoint.ServiceTier);
@@ -134,6 +138,7 @@ public sealed class LocalCodexUsageCollectorTests
 
         var bucket = Assert.Single(second.Buckets);
         Assert.Equal(2, bucket.PricedEventCount);
+        Assert.Equal(3_000, bucket.InputTokens);
         Assert.True(second.ParsedByteCount < new FileInfo(path).Length);
         var checkpoint = Assert.Single(second.FileCheckpoints).Value;
         Assert.Equal("nested/session.jsonl", checkpoint.RelativePath);

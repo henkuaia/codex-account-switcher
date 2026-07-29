@@ -333,7 +333,7 @@ public sealed class LocalCodexUsageCollector
                 else if (usage is not null)
                 {
                     var calculation = _rateCard.CalculateCredits(usage);
-                    AddUsage(newBuckets, usage.Timestamp, calculation);
+                    AddUsage(newBuckets, usage, calculation);
                 }
 
                 line.SetLength(0);
@@ -359,7 +359,7 @@ public sealed class LocalCodexUsageCollector
                 if (usage is not null)
                 {
                     var calculation = _rateCard.CalculateCredits(usage);
-                    AddUsage(newBuckets, usage.Timestamp, calculation);
+                    AddUsage(newBuckets, usage, calculation);
                 }
 
                 completedLineByteOffset = absoluteOffset;
@@ -562,10 +562,10 @@ public sealed class LocalCodexUsageCollector
 
     private static void AddUsage(
         IDictionary<DateTimeOffset, LocalUsageBucket> buckets,
-        DateTimeOffset timestamp,
+        LocalUsageEvent usage,
         CodexCreditCalculationResult calculation)
     {
-        var utc = timestamp.ToUniversalTime();
+        var utc = usage.Timestamp.ToUniversalTime();
         var bucketStart = new DateTimeOffset(
             utc.Year,
             utc.Month,
@@ -582,7 +582,12 @@ public sealed class LocalCodexUsageCollector
             calculation.IsPriced ? 1 : 0,
             calculation.FailureReason == CreditPricingFailureReason.UnknownModel ? 1 : 0,
             calculation.FailureReason == CreditPricingFailureReason.UnknownServiceTier ? 1 : 0,
-            calculation.FailureReason == CreditPricingFailureReason.InvalidUsage ? 1 : 0);
+            calculation.FailureReason == CreditPricingFailureReason.InvalidUsage ? 1 : 0)
+        {
+            InputTokens = usage.InputTokens,
+            CachedInputTokens = usage.CachedInputTokens,
+            OutputTokens = usage.OutputTokens,
+        };
         buckets[bucketStart] = buckets.TryGetValue(bucketStart, out var existing)
             ? MergeBucket(existing, next)
             : next;
@@ -624,6 +629,9 @@ public sealed class LocalCodexUsageCollector
                 left.UnknownServiceTierEventCount + right.UnknownServiceTierEventCount,
             InvalidUsageEventCount =
                 left.InvalidUsageEventCount + right.InvalidUsageEventCount,
+            InputTokens = left.InputTokens + right.InputTokens,
+            CachedInputTokens = left.CachedInputTokens + right.CachedInputTokens,
+            OutputTokens = left.OutputTokens + right.OutputTokens,
         };
 
     private static bool IsRelevant(

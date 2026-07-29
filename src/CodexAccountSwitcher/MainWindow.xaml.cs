@@ -11,15 +11,18 @@ public partial class MainWindow : Window
 {
     private readonly MainWindowViewModel _viewModel;
     private readonly ICodexConversationService _conversationService;
+    private readonly TokenUsageStatisticsService? _tokenUsageService;
     private bool _allowClose;
 
     public MainWindow(
         MainWindowViewModel viewModel,
-        ICodexConversationService conversationService)
+        ICodexConversationService conversationService,
+        TokenUsageStatisticsService? tokenUsageService = null)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _conversationService = conversationService
             ?? throw new ArgumentNullException(nameof(conversationService));
+        _tokenUsageService = tokenUsageService;
         InitializeComponent();
         DataContext = _viewModel;
     }
@@ -61,6 +64,16 @@ public partial class MainWindow : Window
     private void ConversationHistoryButton_Click(object sender, RoutedEventArgs e)
     {
         new ConversationHistoryWindow(_conversationService)
+        {
+            Owner = this,
+        }.ShowDialog();
+    }
+
+    private void TokenUsageButton_Click(object sender, RoutedEventArgs e)
+    {
+        var service = _tokenUsageService
+            ?? throw new InvalidOperationException("Token usage service is not configured.");
+        new TokenUsageStatisticsWindow(service)
         {
             Owner = this,
         }.ShowDialog();

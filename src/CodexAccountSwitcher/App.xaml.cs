@@ -18,6 +18,7 @@ public partial class App : System.Windows.Application
         "Codex Account Switcher is already running for this Windows user.";
 
     private HttpClient? _httpClient;
+    private BackgroundUsageRecorder? _backgroundUsageRecorder;
     private ApplicationExitCoordinator? _exitCoordinator;
     private MainWindow? _mainWindow;
     private IDisposable? _singleInstanceOwnership;
@@ -126,6 +127,10 @@ public partial class App : System.Windows.Application
             _trayIcon = new TrayIconHost(OpenMainWindow, ExitApplication);
             _trayIcon.Show();
             await _mainWindow.ShowAndReloadAsync();
+            _backgroundUsageRecorder = new BackgroundUsageRecorder(
+                viewModel.RefreshActiveAccountAsync,
+                tokenUsageService.RefreshAsync);
+            _backgroundUsageRecorder.Start();
         }
         catch (Exception exception)
         {
@@ -140,6 +145,7 @@ public partial class App : System.Windows.Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _backgroundUsageRecorder?.Dispose();
         _trayIcon?.Dispose();
         _httpClient?.Dispose();
         _singleInstanceOwnership?.Dispose();

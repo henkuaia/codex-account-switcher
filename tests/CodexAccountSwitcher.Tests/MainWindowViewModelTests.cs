@@ -200,6 +200,24 @@ public sealed class MainWindowViewModelTests
     }
 
     [Fact]
+    public async Task Background_refresh_requests_only_the_active_account()
+    {
+        var fixture = new Fixture();
+        await fixture.ViewModel.LoadAsync();
+        IReadOnlyList<AccountRecord>? requested = null;
+        fixture.QuotaRefreshOperation = (accounts, _, _) =>
+        {
+            requested = accounts;
+            return Task.FromResult<string?>(null);
+        };
+
+        await fixture.ViewModel.RefreshActiveAccountAsync();
+
+        var account = Assert.Single(requested!);
+        Assert.Equal(fixture.First.AccountKey, account.AccountKey);
+    }
+
+    [Fact]
     public async Task Bulk_refresh_cancellation_clears_every_row_refreshing_state()
     {
         var fixture = new Fixture();
@@ -1128,11 +1146,18 @@ public sealed class MainWindowViewModelTests
         fixture.Dialog.ConfirmResult = true;
         fixture.SwitchResult = new SwitchResult(true, "Account switch verified.", true);
         fixture.Registries.Enqueue(fixture.Registry with { ActiveAccountKey = fixture.Second.AccountKey });
+        IReadOnlyList<AccountRecord>? refreshed = null;
+        fixture.QuotaRefreshOperation = (accounts, _, _) =>
+        {
+            refreshed = accounts;
+            return Task.FromResult<string?>(null);
+        };
 
         await fixture.ViewModel.SwitchCommand.ExecuteAsync(fixture.Row(fixture.Second));
 
         Assert.Equal(1, fixture.SwitchCallCount);
         Assert.Equal(2, fixture.LoadCallCount);
+        Assert.Equal(fixture.Second.AccountKey, Assert.Single(refreshed!).AccountKey);
         Assert.True(fixture.Row(fixture.Second).IsActive);
         Assert.False(fixture.Row(fixture.Second).CanSwitch);
         Assert.False(fixture.Row(fixture.First).IsActive);

@@ -381,6 +381,9 @@ public sealed class MainWindowViewModel : ObservableObject
     public Task LoadAsync(CancellationToken cancellationToken = default) =>
         RunBusyAsync(LoadRegistryAsync, cancellationToken, queueRegistryReloadWhenBusy: true);
 
+    public Task RefreshActiveAccountAsync(CancellationToken cancellationToken = default) =>
+        RunBusyAsync(RefreshActiveAccountCoreAsync, cancellationToken);
+
     private async Task LoadRegistryAsync(CancellationToken cancellationToken)
     {
         var availability = _checkHelperAvailability();
@@ -488,6 +491,18 @@ public sealed class MainWindowViewModel : ObservableObject
             await _dispatcher.InvokeAsync(
                 () => target.SetRefreshing(false),
                 CancellationToken.None);
+        }
+    }
+
+    private async Task RefreshActiveAccountCoreAsync(CancellationToken cancellationToken)
+    {
+        AccountRowViewModel? active = null;
+        await _dispatcher.InvokeAsync(
+            () => active = Accounts.FirstOrDefault(row => row.IsActive),
+            cancellationToken);
+        if (active is not null)
+        {
+            await RefreshAccountQuotaAsync(active, cancellationToken);
         }
     }
 
@@ -699,9 +714,12 @@ public sealed class MainWindowViewModel : ObservableObject
                 () =>
                 {
                     ApplyRegistry(registry);
-                    StatusText = observationError ?? result.Message;
                     CanRetryLaunch = result.CanRetryLaunch;
                 },
+                CancellationToken.None);
+            await RefreshActiveAccountCoreAsync(CancellationToken.None);
+            await _dispatcher.InvokeAsync(
+                () => StatusText = observationError ?? result.Message,
                 CancellationToken.None);
             return;
         }

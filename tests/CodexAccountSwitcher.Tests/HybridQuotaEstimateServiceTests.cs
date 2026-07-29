@@ -756,6 +756,77 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Unchanged_percent_in_the_same_segment_does_not_add_another_sample()
+    {
+        var firstCutoff = SegmentStart.AddHours(4);
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(SegmentStart.AddHours(5))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 25, serverNow: firstCutoff),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 25, serverNow: SegmentStart.AddHours(6)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        var observation = Assert.Single(
+            context.Ledger.Accounts[Account.AccountKey].Observations);
+        Assert.Equal(firstCutoff, observation.ObservedAt);
+    }
+
+    [Fact]
+    public async Task Same_percent_after_reset_starts_a_new_segment_sample()
+    {
+        var nextSegment = new QuotaSegment(
+            QuotaPeriod.Weekly,
+            Reset,
+            Reset.AddDays(7));
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(3)),
+                Usage(Reset.AddHours(1))),
+            ledger: StateWithAccount(
+                new AccountActivationInterval(SegmentStart.AddMinutes(-1), null)));
+        var context = await service.BeginRefreshAsync(default);
+
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 25, serverNow: SegmentStart.AddHours(4)),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+        service.ApplyObservation(
+            context,
+            Account,
+            Display(
+                usedPercent: 25,
+                resetsAt: nextSegment.ResetsAt,
+                serverNow: Reset.AddHours(2)),
+            nextSegment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Collection(
+            context.Ledger.Accounts[Account.AccountKey].Observations,
+            observation => Assert.Equal(Segment, observation.Segment),
+            observation => Assert.Equal(nextSegment, observation.Segment));
+    }
+
+    [Fact]
     public async Task Same_account_reactivation_does_not_delta_across_activation_gap()
     {
         var firstActivation = SegmentStart.AddHours(1);

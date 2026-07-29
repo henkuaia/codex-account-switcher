@@ -237,6 +237,8 @@ public sealed class HybridQuotaEstimateService
         AppendObservation(context, account.AccountKey, observation);
         var accountLedger = context.Ledger.Accounts[account.AccountKey];
         var compatibleObservations = accountLedger.Observations
+            .Append(observation)
+            .Distinct()
             .Where(item =>
                 item.Source == source &&
                 (source != QuotaEstimateSource.Local ||
@@ -697,6 +699,19 @@ public sealed class HybridQuotaEstimateService
             StringComparer.Ordinal);
         accounts.TryGetValue(accountKey, out var ledger);
         ledger ??= new AccountQuotaEstimateLedger([], []);
+        if (ledger.Observations.Any(existing =>
+                existing.Segment == observation.Segment &&
+                existing.UsedPercent.Equals(observation.UsedPercent) &&
+                existing.Source == observation.Source &&
+                string.Equals(
+                    existing.RateCardVersion,
+                    observation.RateCardVersion,
+                    StringComparison.Ordinal) &&
+                existing.ActivationStartedAt == observation.ActivationStartedAt))
+        {
+            return;
+        }
+
         accounts[accountKey] = ledger with
         {
             Observations = ledger.Observations

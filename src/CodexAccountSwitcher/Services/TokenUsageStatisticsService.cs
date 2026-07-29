@@ -7,6 +7,7 @@ public sealed class TokenUsageStatisticsService
     private readonly LocalCodexUsageCollector _collector;
     private readonly TokenUsageLedgerService _ledgerService;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly SemaphoreSlim _refreshGate = new(1, 1);
 
     public TokenUsageStatisticsService(
         LocalCodexUsageCollector collector,
@@ -27,24 +28,32 @@ public sealed class TokenUsageStatisticsService
     public async Task<TokenUsageSnapshot> RefreshAsync(
         CancellationToken cancellationToken)
     {
-        var now = _utcNow().ToUniversalTime();
-        var loaded = await _ledgerService.LoadAsync(cancellationToken);
-        if (loaded.Error is not null)
+        await _refreshGate.WaitAsync(cancellationToken);
+        try
         {
-            throw new InvalidOperationException(loaded.Error);
-        }
+            var now = _utcNow().ToUniversalTime();
+            var loaded = await _ledgerService.LoadAsync(cancellationToken);
+            if (loaded.Error is not null)
+            {
+                throw new InvalidOperationException(loaded.Error);
+            }
 
-        var usage = await _collector.CollectAsync(
-            DateTimeOffset.MinValue,
-            loaded.FileCheckpoints,
-            cancellationToken);
-        if (usage.HasCheckpointChanges)
-        {
-            await _ledgerService.SaveAsync(
-                usage.FileCheckpoints,
+            var usage = await _collector.CollectAsync(
+                DateTimeOffset.MinValue,
+                loaded.FileCheckpoints,
                 cancellationToken);
-        }
+            if (usage.HasCheckpointChanges)
+            {
+                await _ledgerService.SaveAsync(
+                    usage.FileCheckpoints,
+                    cancellationToken);
+            }
 
-        return new TokenUsageSnapshot(usage.Buckets, now, usage.IsComplete);
+            return new TokenUsageSnapshot(usage.Buckets, now, usage.IsComplete);
+        }
+        finally
+        {
+            _refreshGate.Release();
+        }
     }
 }

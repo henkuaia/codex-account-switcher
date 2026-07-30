@@ -55,7 +55,9 @@ public partial class App : System.Windows.Application
             var registryService = new AccountRegistryService();
             _httpClient = new HttpClient();
             var ledgerService = QuotaEstimateLedgerService.CreateDefault();
-            var collector = new LocalCodexUsageCollector(Path.Combine(codexHome, "sessions"));
+            var collector = new LocalCodexUsageCollector(
+                Path.Combine(codexHome, "sessions"),
+                archivedSessionRoot: Path.Combine(codexHome, "archived_sessions"));
             var hybridEstimator = new HybridQuotaEstimateService(
                 collector,
                 ledgerService,

@@ -149,6 +149,43 @@ public sealed class LocalCodexUsageCollectorTests
     }
 
     [Fact]
+    public async Task Archived_session_keeps_its_checkpoint_and_does_not_make_the_scan_incomplete()
+    {
+        using var directory = new TemporaryDirectory();
+        var sessions = Path.Combine(directory.Path, "sessions");
+        var archive = Path.Combine(directory.Path, "archived_sessions");
+        const string relativePath =
+            "2026/07/30/rollout-2026-07-30T12-38-15-test.jsonl";
+        directory.Write($"sessions/{relativePath}", """
+            {"timestamp":"2026-07-30T04:38:20Z","type":"turn_context","payload":{"model":"gpt-5.4"}}
+            {"timestamp":"2026-07-30T04:38:21Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"default"}}}
+            {"timestamp":"2026-07-30T04:38:22Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1000,"cached_input_tokens":0,"output_tokens":0}}}}
+            """);
+        var collector = new LocalCodexUsageCollector(
+            sessions,
+            archivedSessionRoot: archive);
+        var first = await collector.CollectAsync(
+            EarliestUtc,
+            CancellationToken.None);
+        Directory.CreateDirectory(archive);
+        File.Move(
+            Path.Combine(sessions, relativePath.Replace('/', Path.DirectorySeparatorChar)),
+            Path.Combine(archive, Path.GetFileName(relativePath)));
+
+        var second = await collector.CollectAsync(
+            EarliestUtc,
+            first.FileCheckpoints,
+            CancellationToken.None);
+
+        Assert.True(second.IsComplete);
+        Assert.Equal(0, second.SkippedFileCount);
+        var checkpoint = Assert.Single(second.FileCheckpoints);
+        Assert.Equal(relativePath, checkpoint.Key);
+        Assert.False(checkpoint.Value.IsTombstone);
+        Assert.Equal(1, Assert.Single(second.Buckets).PricedEventCount);
+    }
+
+    [Fact]
     public async Task Shrunk_or_rotated_file_is_rescanned_without_retaining_old_buckets()
     {
         using var directory = new TemporaryDirectory();

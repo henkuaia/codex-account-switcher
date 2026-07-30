@@ -251,7 +251,7 @@ public sealed class WpfInterfaceContractTests
     }
 
     [Fact]
-    public void Production_startup_wires_hybrid_estimator_and_local_cache_without_automatic_refresh()
+    public void Production_startup_wires_hybrid_estimator_and_local_usage_roots()
     {
         var source = File.ReadAllText(Path.Combine(
             FindDirectory("src", "CodexAccountSwitcher"),
@@ -262,7 +262,11 @@ public sealed class WpfInterfaceContractTests
             source,
             StringComparison.Ordinal);
         Assert.Contains(
-            "var collector = new LocalCodexUsageCollector(Path.Combine(codexHome, \"sessions\"));",
+            "Path.Combine(codexHome, \"sessions\")",
+            source,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "archivedSessionRoot: Path.Combine(codexHome, \"archived_sessions\")",
             source,
             StringComparison.Ordinal);
         Assert.Contains(

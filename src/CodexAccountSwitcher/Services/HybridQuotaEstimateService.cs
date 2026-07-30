@@ -250,6 +250,19 @@ public sealed class HybridQuotaEstimateService
         var intersection = QuotaEstimateMath.IntersectRecentCompatible(
             compatibleObservations,
             segment);
+        if (source == QuotaEstimateSource.Local &&
+            observation.Kind == QuotaObservationKind.Delta &&
+            intersection is
+            {
+                Quality: QuotaEstimateQuality.Initial,
+                IgnoredConflictingHistory: true,
+            } &&
+            FindLatestFullMultiPoint(compatibleObservations, segment) is { } stable)
+        {
+            intersection = stable;
+            statuses.Add("本次增量观测不稳定，暂保留历史多点估算");
+        }
+
         if (intersection is null)
         {
             var priorSegment = compatibleObservations
@@ -722,6 +735,30 @@ public sealed class HybridQuotaEstimateService
         };
         context.Ledger = context.Ledger with { Accounts = accounts };
         context.HasChanges = true;
+    }
+
+    private static QuotaEstimateIntersection? FindLatestFullMultiPoint(
+        IReadOnlyList<QuotaUsageObservation> observations,
+        QuotaSegment segment)
+    {
+        var full = observations
+            .Where(observation =>
+                observation.Segment == segment &&
+                observation.Kind == QuotaObservationKind.FullSegment)
+            .OrderByDescending(observation => observation.ObservedAt)
+            .ToArray();
+        for (var index = 0; index < full.Length - 1; index++)
+        {
+            var candidate = QuotaEstimateMath.IntersectRecentCompatible(
+                full[index..],
+                segment);
+            if (candidate?.Quality == QuotaEstimateQuality.MultiPoint)
+            {
+                return candidate;
+            }
+        }
+
+        return null;
     }
 
     private IReadOnlyDictionary<string, LocalUsageAccountIndex> BuildLocalUsageIndex(

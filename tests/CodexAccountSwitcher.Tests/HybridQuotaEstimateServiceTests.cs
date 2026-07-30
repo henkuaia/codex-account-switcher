@@ -1312,6 +1312,67 @@ public sealed class HybridQuotaEstimateServiceTests
     }
 
     [Fact]
+    public async Task Unstable_incremental_outlier_keeps_the_latest_full_multi_point_estimate()
+    {
+        var activation = new AccountActivationInterval(
+            SegmentStart.AddMinutes(-1),
+            null);
+        var older = Observation(
+            Segment,
+            ServerNow.AddHours(-3),
+            lowerUsd: 150m,
+            upperUsd: 153m);
+        var newer = Observation(
+            Segment,
+            ServerNow.AddHours(-2),
+            lowerUsd: 151m,
+            upperUsd: 152m);
+        var tombstone = Checkpoint("archived.jsonl", completedOffset: 100) with
+        {
+            HasCompleteScan = false,
+            IsTombstone = true,
+            RelevantThroughUtc = newer.ObservedAt.AddMinutes(-1),
+        };
+        var service = CreateService(
+            usage: UsageResult(
+                Usage(SegmentStart.AddHours(1)),
+                Usage(SegmentStart.AddHours(2)) with
+                {
+                    InputTokens = 100_000_000,
+                }) with
+            {
+                SkippedFileCount = 1,
+                FileCheckpoints = new Dictionary<string, LocalUsageFileCheckpoint>(
+                    StringComparer.Ordinal)
+                {
+                    [tombstone.RelativePath] = tombstone,
+                },
+            },
+            ledger: StateWithAccount(activation, older, newer));
+        var context = await service.BeginRefreshAsync(default);
+
+        var result = service.ApplyObservation(
+            context,
+            Account,
+            Display(usedPercent: 27),
+            Segment,
+            EmptyAnalytics(),
+            AnalyticsAvailability.Available);
+
+        Assert.Equal(QuotaEstimateQuality.MultiPoint, result.EstimateQuality);
+        Assert.Equal(2, result.EstimateObservationCount);
+        Assert.Equal(151m, result.EstimatedPeriodQuotaLowerUsd);
+        Assert.Equal(152m, result.EstimatedPeriodQuotaUpperUsd);
+        Assert.Contains(
+            "本次增量观测不稳定，暂保留历史多点估算",
+            result.EstimateStatus,
+            StringComparison.Ordinal);
+        Assert.Equal(
+            QuotaObservationKind.Delta,
+            context.Ledger.Accounts[Account.AccountKey].Observations[^1].Kind);
+    }
+
+    [Fact]
     public async Task Valid_analytics_is_preferred_over_local_usage()
     {
         var service = CreateService(

@@ -41,16 +41,21 @@ public sealed class LocalCodexUsageCollector
         throwOnInvalidBytes: true);
 
     private readonly string _sessionRoot;
+    private readonly string? _archivedSessionRoot;
     private readonly CodexCreditRateCard _rateCard;
     private readonly Func<DateTimeOffset> _utcNow;
 
     public LocalCodexUsageCollector(
         string sessionRoot,
         CodexCreditRateCard? rateCard = null,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        string? archivedSessionRoot = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sessionRoot);
         _sessionRoot = Path.GetFullPath(sessionRoot);
+        _archivedSessionRoot = string.IsNullOrWhiteSpace(archivedSessionRoot)
+            ? null
+            : Path.GetFullPath(archivedSessionRoot);
         _rateCard = rateCard ?? new CodexCreditRateCard();
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -79,7 +84,9 @@ public sealed class LocalCodexUsageCollector
         long parsedByteCount = 0;
         var observedAt = _utcNow().ToUniversalTime();
 
-        if (!Directory.Exists(_sessionRoot))
+        if (!Directory.Exists(_sessionRoot) &&
+            (_archivedSessionRoot is null ||
+             !Directory.Exists(_archivedSessionRoot)))
         {
             foreach (var (relativePath, checkpoint) in checkpoints)
             {
@@ -106,10 +113,11 @@ public sealed class LocalCodexUsageCollector
         var enumeration = EnumerateSessionFiles(cancellationToken);
         skippedFileCount += enumeration.SkippedInputCount;
         var observedPaths = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var path in enumeration.Paths)
+        foreach (var file in enumeration.Files)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var relativePath = ToRelativePath(path);
+            var path = file.Path;
+            var relativePath = file.RelativePath;
             observedPaths.Add(relativePath);
             checkpoints.TryGetValue(relativePath, out var checkpoint);
             try
@@ -503,20 +511,27 @@ public sealed class LocalCodexUsageCollector
     private SessionFileEnumeration EnumerateSessionFiles(
         CancellationToken cancellationToken)
     {
-        var paths = new List<string>();
+        var files = new Dictionary<string, string>(StringComparer.Ordinal);
         var skippedInputCount = 0;
         var pending = new Queue<string>();
-        pending.Enqueue(_sessionRoot);
+        if (Directory.Exists(_sessionRoot))
+        {
+            pending.Enqueue(_sessionRoot);
+        }
+
         while (pending.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var directory = pending.Dequeue();
             try
             {
-                paths.AddRange(Directory.GetFiles(
+                foreach (var path in Directory.GetFiles(
                     directory,
                     "*.jsonl",
-                    SearchOption.TopDirectoryOnly));
+                    SearchOption.TopDirectoryOnly))
+                {
+                    files.TryAdd(ToRelativePath(path), path);
+                }
             }
             catch (Exception exception) when (IsExpectedFileFailure(exception))
             {
@@ -536,14 +551,46 @@ public sealed class LocalCodexUsageCollector
             }
         }
 
-        paths.Sort(StringComparer.Ordinal);
-        return new SessionFileEnumeration(paths, skippedInputCount);
+        if (_archivedSessionRoot is not null &&
+            Directory.Exists(_archivedSessionRoot))
+        {
+            try
+            {
+                foreach (var path in Directory.GetFiles(
+                    _archivedSessionRoot,
+                    "*.jsonl",
+                    SearchOption.TopDirectoryOnly))
+                {
+                    files.TryAdd(ToArchivedRelativePath(path), path);
+                }
+            }
+            catch (Exception exception) when (IsExpectedFileFailure(exception))
+            {
+                skippedInputCount++;
+            }
+        }
+
+        return new SessionFileEnumeration(
+            files.OrderBy(pair => pair.Key, StringComparer.Ordinal)
+                .Select(pair => new SessionFile(pair.Value, pair.Key))
+                .ToArray(),
+            skippedInputCount);
     }
 
     private string ToRelativePath(string path) =>
         Path.GetRelativePath(_sessionRoot, path)
             .Replace(Path.DirectorySeparatorChar, '/')
             .Replace(Path.AltDirectorySeparatorChar, '/');
+
+    private static string ToArchivedRelativePath(string path)
+    {
+        var fileName = Path.GetFileName(path);
+        var date = DateOnly.ParseExact(
+            fileName.AsSpan("rollout-".Length, "yyyy-MM-dd".Length),
+            "yyyy-MM-dd",
+            CultureInfo.InvariantCulture);
+        return $"{date:yyyy/MM/dd}/{fileName}";
+    }
 
     private static LocalUsageFileCheckpoint FilterCheckpoint(
         LocalUsageFileCheckpoint checkpoint,
@@ -848,8 +895,10 @@ public sealed class LocalCodexUsageCollector
                property.TryGetInt64(out value);
     }
 
+    private sealed record SessionFile(string Path, string RelativePath);
+
     private sealed record SessionFileEnumeration(
-        IReadOnlyList<string> Paths,
+        IReadOnlyList<SessionFile> Files,
         int SkippedInputCount);
 
     private sealed record FileScanResult(

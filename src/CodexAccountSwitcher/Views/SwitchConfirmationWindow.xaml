@@ -11,8 +11,8 @@
         ResizeMode="NoResize"
         Background="Transparent"
         ShowInTaskbar="False">
-    <Border Background="{StaticResource SurfaceBrush}"
-            BorderBrush="{StaticResource BorderBrush}"
+    <Border Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
             BorderThickness="1"
             CornerRadius="8">
         <Grid>
@@ -45,7 +45,7 @@
             </Grid>
 
             <StackPanel Grid.Row="1" Margin="20,8,20,12">
-                <TextBlock Foreground="{StaticResource TextSecondaryBrush}" Text="Target account" />
+                <TextBlock Foreground="{DynamicResource TextSecondaryBrush}" Text="Target account" />
                 <TextBlock x:Name="TargetIdentityText"
                            Margin="0,4,0,0"
                            FontSize="15"
@@ -53,18 +53,18 @@
                            TextTrimming="CharacterEllipsis" />
                 <TextBlock x:Name="TargetEmailText"
                            Margin="0,2,0,0"
-                           Foreground="{StaticResource TextSecondaryBrush}"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
                            TextTrimming="CharacterEllipsis" />
 
                 <TextBlock Margin="0,18,0,0"
-                           Foreground="{StaticResource TextSecondaryBrush}"
+                           Foreground="{DynamicResource TextSecondaryBrush}"
                            Text="Current quota" />
                 <TextBlock x:Name="QuotaText" Margin="0,4,0,0" FontWeight="SemiBold" />
 
                 <Border Margin="0,18,0,0"
                         Padding="12,10"
                         Background="#FFF8E9"
-                        BorderBrush="{StaticResource WarningBrush}"
+                        BorderBrush="{DynamicResource WarningBrush}"
                         BorderThickness="3,0,0,0"
                         CornerRadius="6">
                     <TextBlock Text="Running Codex work will be interrupted while the app closes and restarts."
@@ -74,8 +74,8 @@
 
             <Border Grid.Row="2"
                     Padding="20,14"
-                    Background="{StaticResource WindowBackgroundBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    Background="{DynamicResource WindowBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,1,0,0">
                 <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
                     <Button Width="82"

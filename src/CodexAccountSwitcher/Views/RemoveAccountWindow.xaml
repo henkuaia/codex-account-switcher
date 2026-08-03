@@ -11,8 +11,8 @@
         ResizeMode="NoResize"
         Background="Transparent"
         ShowInTaskbar="False">
-    <Border Background="{StaticResource SurfaceBrush}"
-            BorderBrush="{StaticResource BorderBrush}"
+    <Border Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
             BorderThickness="1"
             CornerRadius="8">
         <Grid>
@@ -47,7 +47,7 @@
             <ListBox x:Name="AccountList"
                      Grid.Row="1"
                      Margin="20,8,20,16"
-                     BorderBrush="{StaticResource BorderBrush}"
+                     BorderBrush="{DynamicResource BorderBrush}"
                      BorderThickness="1"
                      SelectionChanged="AccountList_SelectionChanged"
                      SelectionMode="Single">
@@ -74,14 +74,14 @@
                                            Text="{Binding DisplayIdentity}"
                                            TextTrimming="CharacterEllipsis" />
                                 <TextBlock Margin="0,2,0,0"
-                                           Foreground="{StaticResource TextSecondaryBrush}"
+                                           Foreground="{DynamicResource TextSecondaryBrush}"
                                            Text="{Binding Account.Email}"
                                            TextTrimming="CharacterEllipsis" />
                             </StackPanel>
                             <TextBlock Grid.Column="1"
                                        Margin="10,0,0,0"
                                        VerticalAlignment="Center"
-                                       Foreground="{StaticResource TextSecondaryBrush}"
+                                       Foreground="{DynamicResource TextSecondaryBrush}"
                                        Text="Active - switch first">
                                 <TextBlock.Style>
                                     <Style TargetType="TextBlock">
@@ -101,8 +101,8 @@
 
             <Border Grid.Row="2"
                     Padding="20,14"
-                    Background="{StaticResource WindowBackgroundBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    Background="{DynamicResource WindowBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,1,0,0">
                 <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
                     <Button Width="82"

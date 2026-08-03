@@ -12,8 +12,8 @@
         Background="Transparent"
         ShowInTaskbar="False"
         Closing="Window_Closing">
-    <Border Background="{StaticResource SurfaceBrush}"
-            BorderBrush="{StaticResource BorderBrush}"
+    <Border Background="{DynamicResource SurfaceBrush}"
+            BorderBrush="{DynamicResource BorderBrush}"
             BorderThickness="1"
             CornerRadius="8">
         <Grid>
@@ -84,10 +84,10 @@
                                     </BeginStoryboard>
                                 </EventTrigger>
                             </Grid.Triggers>
-                            <Ellipse Stroke="{StaticResource BorderBrush}"
+                            <Ellipse Stroke="{DynamicResource BorderBrush}"
                                      StrokeThickness="3" />
                             <Path Data="M 15,1 A 14,14 0 0 1 29,15"
-                                  Stroke="{StaticResource PrimaryBrush}"
+                                  Stroke="{DynamicResource PrimaryBrush}"
                                   StrokeThickness="3"
                                   StrokeStartLineCap="Round"
                                   StrokeEndLineCap="Round" />
@@ -107,7 +107,7 @@
                     <TextBlock x:Name="StateSubtitleText"
                                Margin="0,2,0,0"
                                HorizontalAlignment="Center"
-                               Foreground="{StaticResource TextSecondaryBrush}" />
+                               Foreground="{DynamicResource TextSecondaryBrush}" />
                 </StackPanel>
 
                 <Expander x:Name="DetailsExpander"
@@ -135,8 +135,8 @@
 
             <Border Grid.Row="2"
                     Padding="18,10"
-                    Background="{StaticResource WindowBackgroundBrush}"
-                    BorderBrush="{StaticResource BorderBrush}"
+                    Background="{DynamicResource WindowBackgroundBrush}"
+                    BorderBrush="{DynamicResource BorderBrush}"
                     BorderThickness="0,1,0,0">
                 <Button x:Name="CloseButton"
                         Width="92"

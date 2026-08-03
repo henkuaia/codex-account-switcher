@@ -12,17 +12,26 @@ public partial class MainWindow : Window
     private readonly MainWindowViewModel _viewModel;
     private readonly ICodexConversationService _conversationService;
     private readonly TokenUsageStatisticsService? _tokenUsageService;
+    private readonly AppSettingsService? _settingsService;
+    private readonly StartupRegistrationService? _startupRegistrationService;
+    private readonly ThemeService? _themeService;
     private bool _allowClose;
 
     public MainWindow(
         MainWindowViewModel viewModel,
         ICodexConversationService conversationService,
-        TokenUsageStatisticsService? tokenUsageService = null)
+        TokenUsageStatisticsService? tokenUsageService = null,
+        AppSettingsService? settingsService = null,
+        StartupRegistrationService? startupRegistrationService = null,
+        ThemeService? themeService = null)
     {
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _conversationService = conversationService
             ?? throw new ArgumentNullException(nameof(conversationService));
         _tokenUsageService = tokenUsageService;
+        _settingsService = settingsService;
+        _startupRegistrationService = startupRegistrationService;
+        _themeService = themeService;
         InitializeComponent();
         DataContext = _viewModel;
     }
@@ -42,6 +51,9 @@ public partial class MainWindow : Window
         Activate();
         await _viewModel.LoadAsync(cancellationToken);
     }
+
+    public Task ReloadAsync(CancellationToken cancellationToken = default) =>
+        _viewModel.LoadAsync(cancellationToken);
 
     public void AllowClose() => _allowClose = true;
 
@@ -74,6 +86,24 @@ public partial class MainWindow : Window
         var service = _tokenUsageService
             ?? throw new InvalidOperationException("Token usage service is not configured.");
         new TokenUsageStatisticsWindow(service)
+        {
+            Owner = this,
+        }.ShowDialog();
+    }
+
+    private void SettingsButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_settingsService is null ||
+            _startupRegistrationService is null ||
+            _themeService is null)
+        {
+            throw new InvalidOperationException("Settings services are not configured.");
+        }
+
+        new SettingsWindow(
+            _settingsService,
+            _startupRegistrationService,
+            _themeService)
         {
             Owner = this,
         }.ShowDialog();

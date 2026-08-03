@@ -46,6 +46,74 @@ public sealed class QuotaServiceTests
     }
 
     [Fact]
+    public async Task Refresh_account_uses_current_auth_when_it_matches_selected_account()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "expired-snapshot-token", "acct-1");
+        WriteCurrentAuth(home, "renewed-current-token", "acct-1");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("renewed-current-token", request.Headers.Authorization!.Parameter);
+    }
+
+    [Fact]
+    public async Task Refresh_account_uses_snapshot_when_current_auth_belongs_to_another_account()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "selected-snapshot-token", "acct-1");
+        WriteCurrentAuth(home, "other-current-token", "acct-2");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("selected-snapshot-token", request.Headers.Authorization!.Parameter);
+    }
+
+    [Fact]
+    public async Task Refresh_account_uses_snapshot_when_current_auth_is_invalid()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "selected-snapshot-token", "acct-1");
+        home.Write("auth.json", "not-json");
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        var update = await new QuotaService(client).RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Null(update.Error);
+        var request = Assert.Single(handler.Requests);
+        Assert.Equal("selected-snapshot-token", request.Headers.Authorization!.Parameter);
+    }
+
+    [Fact]
+    public async Task Individual_limit_reader_uses_matching_current_auth_path()
+    {
+        using var home = new TemporaryDirectory();
+        var account = Accounts.Record("user-1::acct-1", "first@example.com");
+        WriteSnapshot(home, account, "expired-snapshot-token", "acct-1");
+        WriteCurrentAuth(home, "renewed-current-token", "acct-1");
+        var reader = new StubIndividualLimitReader(null);
+        using var handler = new RecordingHttpMessageHandler((_, _) => Task.FromResult(JsonResponse()));
+        using var client = new HttpClient(handler);
+
+        await new QuotaService(client, individualLimitReader: reader)
+            .RefreshAccountAsync(account, home.Path, default);
+
+        Assert.Equal(Path.Combine(home.Path, "auth.json"), Assert.Single(reader.Paths));
+    }
+
+    [Fact]
     public async Task Authoritative_individual_limit_skips_sampling_requests()
     {
         using var home = new TemporaryDirectory();
@@ -1326,6 +1394,11 @@ public sealed class QuotaServiceTests
         home.Write(relativePath,
             $"{{\"auth_mode\":\"chatgpt\",\"tokens\":{{\"access_token\":\"{accessToken}\",\"account_id\":\"{accountId}\"}}}}");
     }
+
+    private static void WriteCurrentAuth(TemporaryDirectory home, string accessToken, string accountId) =>
+        home.Write(
+            "auth.json",
+            $"{{\"auth_mode\":\"chatgpt\",\"tokens\":{{\"access_token\":\"{accessToken}\",\"account_id\":\"{accountId}\"}}}}");
 
     private static HttpResponseMessage JsonResponse() => JsonResponse("""
         {"rate_limit":{"primary_window":{"used_percent":27,"limit_window_seconds":604800}}}

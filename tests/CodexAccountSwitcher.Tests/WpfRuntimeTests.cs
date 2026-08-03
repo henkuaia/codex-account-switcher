@@ -68,6 +68,19 @@ public sealed class WpfRuntimeTests
                     Assert.Equal(color, Assert.IsType<Color>(app.Resources[key]));
                 }
 
+                var themeService = new ThemeService();
+                themeService.Apply(AppTheme.Dark);
+                Assert.Equal(
+                    Color.FromRgb(0x18, 0x1B, 0x1D),
+                    Assert.IsType<SolidColorBrush>(app.Resources["WindowBackgroundBrush"]).Color);
+                Assert.Equal(
+                    Color.FromRgb(0xF2, 0xF5, 0xF6),
+                    Assert.IsType<SolidColorBrush>(app.Resources["TextPrimaryBrush"]).Color);
+                themeService.Apply(AppTheme.Light);
+                Assert.Equal(
+                    Color.FromRgb(0xF4, 0xF6, 0xF7),
+                    Assert.IsType<SolidColorBrush>(app.Resources["WindowBackgroundBrush"]).Color);
+
                 var first = Accounts.Record("first", "same@example.com", accountId: "account-1");
                 var second = Accounts.Record("second", "same@example.com", accountId: "account-2");
                 var registry = new AccountRegistry(3, first.AccountKey, [first, second]);
@@ -95,7 +108,16 @@ public sealed class WpfRuntimeTests
                 Assert.Equal(620, mainWindow.Height);
                 Assert.Equal(620, mainWindow.MinHeight);
                 Assert.Equal(620, mainWindow.MaxHeight);
-                Assert.Equal(8, Assert.IsType<Border>(mainWindow.Content).CornerRadius.TopLeft);
+                var mainBorder = Assert.IsType<Border>(mainWindow.Content);
+                Assert.Equal(8, mainBorder.CornerRadius.TopLeft);
+                themeService.Apply(AppTheme.Dark);
+                await mainWindow.Dispatcher.InvokeAsync(
+                    static () => { },
+                    DispatcherPriority.ApplicationIdle);
+                Assert.Equal(
+                    Color.FromRgb(0x20, 0x24, 0x27),
+                    Assert.IsType<SolidColorBrush>(mainBorder.Background).Color);
+                themeService.Apply(AppTheme.Light);
 
                 var accountItems = Assert.IsType<ItemsControl>(mainWindow.FindName("AccountItems"));
                 Assert.Same(

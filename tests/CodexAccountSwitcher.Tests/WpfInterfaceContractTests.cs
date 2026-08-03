@@ -13,8 +13,6 @@ public sealed class WpfInterfaceContractTests
     [Theory]
     [InlineData("5H")]
     [InlineData("five-hour")]
-    [InlineData("Settings")]
-    [InlineData("tray behavior")]
     [InlineData("RadialGradientBrush")]
     public void Production_xaml_excludes_forbidden_content(string forbidden)
     {
@@ -53,6 +51,29 @@ public sealed class WpfInterfaceContractTests
 
         Assert.Contains("x:Name=\"WindowMinimizeButton\"", xaml, StringComparison.Ordinal);
         Assert.Contains("Click=\"MinimizeButton_Click\"", xaml, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Main_window_exposes_compact_startup_and_theme_settings()
+    {
+        var sourceDirectory = FindDirectory("src", "CodexAccountSwitcher");
+        var mainWindow = File.ReadAllText(Path.Combine(sourceDirectory, "MainWindow.xaml"));
+        var settingsWindow = File.ReadAllText(Path.Combine(
+            sourceDirectory,
+            "Views",
+            "SettingsWindow.xaml"));
+        var startup = File.ReadAllText(Path.Combine(sourceDirectory, "App.xaml.cs"));
+
+        Assert.Contains("x:Name=\"SettingsButton\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("Click=\"SettingsButton_Click\"", mainWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"AutoStartCheckBox\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"StartMinimizedCheckBox\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("x:Name=\"ThemeComboBox\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"跟随系统\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"浅色\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("Content=\"深色\"", settingsWindow, StringComparison.Ordinal);
+        Assert.Contains("--minimized", startup, StringComparison.Ordinal);
+        Assert.Contains("await _mainWindow.ReloadAsync();", startup, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -42,6 +42,14 @@ public partial class App : System.Windows.Application
                 return;
             }
 
+            var settingsService = AppSettingsService.CreateDefault();
+            var settings = await settingsService.LoadAsync(CancellationToken.None);
+            var themeService = new ThemeService();
+            themeService.Apply(settings.Theme);
+            var startupRegistrationService = StartupRegistrationService.CreateDefault();
+            var startMinimized = settings.StartMinimizedToTray && e.Args.Any(
+                argument => string.Equals(argument, "--minimized", StringComparison.OrdinalIgnoreCase));
+
             var codexHome = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                 ".codex");
@@ -114,7 +122,10 @@ public partial class App : System.Windows.Application
             _mainWindow = new MainWindow(
                 viewModel,
                 conversationService,
-                tokenUsageService);
+                tokenUsageService,
+                settingsService,
+                startupRegistrationService,
+                themeService);
             MainWindow = _mainWindow;
             _exitCoordinator = new ApplicationExitCoordinator(
                 activityTracker,
@@ -128,7 +139,14 @@ public partial class App : System.Windows.Application
                 Shutdown);
             _trayIcon = new TrayIconHost(OpenMainWindow, ExitApplication);
             _trayIcon.Show();
-            await _mainWindow.ShowAndReloadAsync();
+            if (startMinimized)
+            {
+                await _mainWindow.ReloadAsync();
+            }
+            else
+            {
+                await _mainWindow.ShowAndReloadAsync();
+            }
             _backgroundUsageRecorder = new BackgroundUsageRecorder(
                 viewModel.RefreshActiveAccountAsync,
                 tokenUsageService.RefreshAsync);

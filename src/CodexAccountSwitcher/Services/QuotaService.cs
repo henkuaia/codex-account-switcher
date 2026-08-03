@@ -74,14 +74,38 @@ public sealed class QuotaService
         try
         {
             var snapshotPath = AccountSnapshotPathResolver.Resolve(codexHome, account.AccountKey);
-            snapshot = await _authSnapshotReader.ReadAsync(snapshotPath, cancellationToken);
+            var authenticationPath = snapshotPath;
+            var currentAuthPath = Path.Combine(codexHome, "auth.json");
+            try
+            {
+                var currentAuth = await _authSnapshotReader.ReadAsync(
+                    currentAuthPath,
+                    cancellationToken);
+                if (string.Equals(
+                        currentAuth.AccountId,
+                        account.ChatGptAccountId,
+                        StringComparison.Ordinal))
+                {
+                    snapshot = currentAuth;
+                    authenticationPath = currentAuthPath;
+                }
+                else
+                {
+                    currentAuth.Dispose();
+                }
+            }
+            catch (InvalidDataException)
+            {
+            }
+
+            snapshot ??= await _authSnapshotReader.ReadAsync(snapshotPath, cancellationToken);
             if (!string.Equals(snapshot.AccountId, account.ChatGptAccountId, StringComparison.Ordinal))
             {
                 return Failure(account, "The authentication snapshot does not match the selected account.", snapshot);
             }
 
             var individualLimit = await TryReadIndividualLimitAsync(
-                snapshotPath,
+                authenticationPath,
                 cancellationToken);
             if (individualLimit is not null)
             {

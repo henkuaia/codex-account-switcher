@@ -33,12 +33,14 @@ public sealed class ThemeService
     private static readonly IReadOnlyDictionary<string, MediaColor> LightColors =
         CreateColors(
             "#F4F6F7", "#FBFCFC", "#D9DEE2", "#2D6678", "#EDF5F1", "#C9DED3",
-            "#315C48", "#CF9D39", "#202629", "#667178", "#E9EEF0", "#E3E8EA");
+            "#315C48", "#CF9D39", "#202629", "#667178", "#E9EEF0", "#E3E8EA",
+            "#DCEAF7");
 
     private static readonly IReadOnlyDictionary<string, MediaColor> DarkColors =
         CreateColors(
-            "#181B1D", "#202427", "#384045", "#5A9CB2", "#21342C", "#3D6652",
-            "#8FD3AF", "#E0B45B", "#F2F5F6", "#A9B3B8", "#30363A", "#3A4145");
+            "#292A2D", "#202124", "#3C4043", "#5F8FCF", "#24352F", "#416352",
+            "#81C995", "#FDD663", "#E8EAED", "#9AA0A6", "#303134", "#3C4043",
+            "#394B63");
 
     private static IReadOnlyDictionary<string, MediaColor> CreateColors(
         string window,
@@ -52,7 +54,8 @@ public sealed class ThemeService
         string textPrimary,
         string textSecondary,
         string hover,
-        string progressTrack) =>
+        string progressTrack,
+        string selectionBackground) =>
         new Dictionary<string, MediaColor>(StringComparer.Ordinal)
         {
             ["WindowBackgroundBrush"] = Parse(window),
@@ -67,6 +70,7 @@ public sealed class ThemeService
             ["TextSecondaryBrush"] = Parse(textSecondary),
             ["HoverBrush"] = Parse(hover),
             ["ProgressTrackBrush"] = Parse(progressTrack),
+            ["SelectionBackgroundBrush"] = Parse(selectionBackground),
         };
 
     private static MediaColor Parse(string value) =>

@@ -27,6 +27,7 @@
         <SolidColorBrush x:Key="TextSecondaryBrush" Color="#667178" />
         <SolidColorBrush x:Key="HoverBrush" Color="#E9EEF0" />
         <SolidColorBrush x:Key="ProgressTrackBrush" Color="#E3E8EA" />
+        <SolidColorBrush x:Key="SelectionBackgroundBrush" Color="#DCEAF7" />
 
         <Style TargetType="Window">
             <Setter Property="FontFamily" Value="Segoe UI Variable Text, Segoe UI" />
@@ -35,6 +36,10 @@
             <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
             <Setter Property="UseLayoutRounding" Value="True" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
+        </Style>
+
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimaryBrush}" />
         </Style>
 
         <Style x:Key="ButtonChromeStyle" TargetType="Border">

@@ -71,10 +71,10 @@ public sealed class WpfRuntimeTests
                 var themeService = new ThemeService();
                 themeService.Apply(AppTheme.Dark);
                 Assert.Equal(
-                    Color.FromRgb(0x18, 0x1B, 0x1D),
+                    Color.FromRgb(0x29, 0x2A, 0x2D),
                     Assert.IsType<SolidColorBrush>(app.Resources["WindowBackgroundBrush"]).Color);
                 Assert.Equal(
-                    Color.FromRgb(0xF2, 0xF5, 0xF6),
+                    Color.FromRgb(0xE8, 0xEA, 0xED),
                     Assert.IsType<SolidColorBrush>(app.Resources["TextPrimaryBrush"]).Color);
                 themeService.Apply(AppTheme.Light);
                 Assert.Equal(
@@ -115,8 +115,16 @@ public sealed class WpfRuntimeTests
                     static () => { },
                     DispatcherPriority.ApplicationIdle);
                 Assert.Equal(
-                    Color.FromRgb(0x20, 0x24, 0x27),
+                    Color.FromRgb(0x20, 0x21, 0x24),
                     Assert.IsType<SolidColorBrush>(mainBorder.Background).Color);
+                var activeAccountName = FindVisualChildren<TextBlock>(mainWindow)
+                    .Single(textBlock =>
+                        textBlock.DataContext is AccountRowViewModel row &&
+                        row.Account.AccountKey == first.AccountKey &&
+                        textBlock.Text == row.DisplayIdentity);
+                Assert.Equal(
+                    Color.FromRgb(0xE8, 0xEA, 0xED),
+                    Assert.IsType<SolidColorBrush>(activeAccountName.Foreground).Color);
                 themeService.Apply(AppTheme.Light);
 
                 var accountItems = Assert.IsType<ItemsControl>(mainWindow.FindName("AccountItems"));
